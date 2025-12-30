@@ -12,3 +12,12 @@ class OptionBrokerClient(Protocol):
     async def list_option_positions(self, account_id: str) -> List[OptionPosition]:
         """列出当前期权仓位（含 Greeks），US/HK 通用"""
         ...
+
+    async def get_account_id(self) -> str:
+        """获取真实的券商账户ID"""
+        ...
+
+    async def get_account_equity(self, account_id: str) -> float:
+        """获取账户权益（USD）"""
+        ...
+

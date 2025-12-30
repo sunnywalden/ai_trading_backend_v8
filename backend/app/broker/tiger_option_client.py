@@ -39,9 +39,11 @@ class TigerOptionClient(OptionBrokerClient):
         self.quote_client = QuoteClient(self.client_config)
         self._executor = ThreadPoolExecutor(max_workers=4)
 
-    async def _run_in_executor(self, func, *args):
+    async def _run_in_executor(self, func, *args, **kwargs):
         """在线程池中运行同步的 SDK 调用"""
         loop = asyncio.get_event_loop()
+        if kwargs:
+            return await loop.run_in_executor(self._executor, lambda: func(*args, **kwargs))
         return await loop.run_in_executor(self._executor, func, *args)
 
     async def list_underlying_positions(self, account_id: str) -> List[UnderlyingPosition]:
@@ -52,18 +54,22 @@ class TigerOptionClient(OptionBrokerClient):
         results: List[UnderlyingPosition] = []
 
         try:
+            print(f"[TigerOptionClient] Fetching underlying positions for account: {account_id}")
             # 获取美股持仓
             positions = await self._run_in_executor(
                 self.trade_client.get_positions,
                 sec_type=SecurityType.STK,
                 market=Market.US
             )
+            
+            print(f"[TigerOptionClient] Got {len(positions) if positions else 0} underlying positions")
 
-            for pos in positions:
-                if not pos.contract or not pos.contract.symbol:
-                    continue
+            if positions:
+                for pos in positions:
+                    if not pos.contract or not pos.contract.symbol:
+                        continue
 
-                underlying = UnderlyingPosition(
+                    underlying = UnderlyingPosition(
                     symbol=pos.contract.symbol,
                     market="US",
                     quantity=int(pos.quantity or 0),
@@ -95,12 +101,15 @@ class TigerOptionClient(OptionBrokerClient):
         results: List[OptionPosition] = []
 
         try:
+            print(f"[TigerOptionClient] Fetching option positions for account: {account_id}")
             # 获取期权持仓
             positions = await self._run_in_executor(
                 self.trade_client.get_positions,
                 sec_type=SecurityType.OPT,
                 market=Market.US
             )
+            
+            print(f"[TigerOptionClient] Got {len(positions) if positions else 0} option positions")
 
             if not positions:
                 return results
@@ -175,3 +184,60 @@ class TigerOptionClient(OptionBrokerClient):
             print(f"[TigerOptionClient] Error fetching option positions: {e}")
 
         return results
+
+    async def get_account_id(self) -> str:
+        """获取真实的券商账户ID（从 API 返回的实际账户号）"""
+        try:
+            # 尝试获取账户资产，从中提取真实账户ID
+            assets = await self._run_in_executor(
+                self.trade_client.get_assets,
+                account=self.account
+            )
+            if assets and hasattr(assets, 'account'):
+                return str(assets.account)
+        except Exception as e:
+            print(f"[TigerOptionClient] Error fetching account ID: {e}")
+        
+        # 降级返回配置的账户名
+        return self.account
+
+    async def get_account_equity(self, account_id: str) -> float:
+        """获取账户权益（净清算价值）
+        
+        返回账户的总资产价值（USD）
+        """
+        try:
+            print(f"[TigerOptionClient] Fetching account equity for: {account_id}")
+            assets = await self._run_in_executor(
+                self.trade_client.get_assets,
+                account=account_id
+            )
+            
+            if assets:
+                print(f"[TigerOptionClient] Got assets object: {type(assets)}")
+                # 优先使用 net_liquidation（净清算价值）
+                if hasattr(assets, 'summary') and assets.summary:
+                    net_liq = assets.summary.get('netLiquidation')
+                    if net_liq:
+                        print(f"[TigerOptionClient] Net liquidation: {net_liq}")
+                        return float(net_liq)
+                
+                # 降级尝试其他字段
+                for attr in ['net_liquidation', 'equity_with_loan', 'total_cash_balance']:
+                    value = getattr(assets, attr, None)
+                    if value:
+                        print(f"[TigerOptionClient] Using {attr}: {value}")
+                        return float(value)
+                
+                print(f"[TigerOptionClient] Warning: Could not find equity value in assets")
+            else:
+                print(f"[TigerOptionClient] Warning: assets is None")
+                        
+        except Exception as e:
+            print(f"[TigerOptionClient] Error fetching account equity: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # 如果获取失败，返回 None（由调用方决定默认值）
+        print(f"[TigerOptionClient] Returning None for equity")
+        return None

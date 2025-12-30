@@ -11,9 +11,13 @@ def make_option_broker_client() -> OptionBrokerClient:
     - 否则退回 DummyOptionClient（Greeks/仓位全 0，系统仍可运行）。
     """
     if settings.TIGER_PRIVATE_KEY_PATH and settings.TIGER_ID:
+        print(f"[BrokerFactory] Using TigerOptionClient with account: {settings.TIGER_ACCOUNT}")
+        print(f"[BrokerFactory] TIGER_ID: {settings.TIGER_ID}")
+        print(f"[BrokerFactory] TIGER_PRIVATE_KEY_PATH: {settings.TIGER_PRIVATE_KEY_PATH}")
         return TigerOptionClient(
             private_key_path=settings.TIGER_PRIVATE_KEY_PATH,
             tiger_id=settings.TIGER_ID,
             account=settings.TIGER_ACCOUNT,
         )
+    print("[BrokerFactory] No Tiger API config found, using DummyOptionClient")
     return DummyOptionClient()

@@ -1,11 +1,11 @@
-from sqlalchemy import Column, BigInteger, String, Integer, DateTime, DECIMAL, text
+from sqlalchemy import Column, Integer, String, DateTime, DECIMAL, text
 from .db import Base
 
 
 class SymbolBehaviorStats(Base):
     __tablename__ = "symbol_behavior_stats"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True, autoincrement=True)
     account_id = Column(String(64), nullable=False)
     symbol = Column(String(32), nullable=False)
     window_days = Column(Integer, nullable=False)

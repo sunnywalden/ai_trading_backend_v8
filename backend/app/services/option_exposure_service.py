@@ -51,7 +51,7 @@ class OptionExposureService:
     def __init__(self, session, broker_client: OptionBrokerClient):
         self.session = session
         self.broker = broker_client
-        self.account_svc = AccountService(session)
+        self.account_svc = AccountService(session, broker_client)
 
     # -------- 对外主接口 --------
 

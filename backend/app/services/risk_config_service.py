@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Iterable, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.trade_mode import TradeMode
 from app.services.policies import ShockPolicy, EarningsShockPolicy
 from app.services.symbol_risk_profile_service import (
@@ -24,6 +25,7 @@ class EffectiveRiskState:
     limits: EffectiveRiskLimits
     global_shock_policy: ShockPolicy
     global_earnings_policy: EarningsShockPolicy
+    window_days: int  # 查询行为数据使用的窗口期
     symbol_shock_policies: Dict[str, ShockPolicy] = field(default_factory=dict)
     symbol_earnings_policies: Dict[str, EarningsShockPolicy] = field(default_factory=dict)
     symbol_behavior_tiers: Dict[str, str] = field(default_factory=dict)
@@ -36,8 +38,44 @@ class RiskConfigService:
         self.profile_svc = SymbolRiskProfileService(session)
 
     async def _get_relevant_symbols(self, account_id: str) -> Iterable[str]:
-        # Demo: fixed set
-        return ["META", "TSLA", "1810.HK"]
+        """从数据库获取实际有行为数据的标的列表"""
+        from sqlalchemy import select, distinct
+        from app.models.symbol_behavior_stats import SymbolBehaviorStats
+        
+        print(f"[RiskConfigService] Querying symbols for account: {account_id}")
+        stmt = select(distinct(SymbolBehaviorStats.symbol)).where(
+            SymbolBehaviorStats.account_id == account_id
+        )
+        result = await self.session.execute(stmt)
+        symbols = [row[0] for row in result.all()]
+        
+        print(f"[RiskConfigService] Found {len(symbols)} symbols from DB: {symbols}")
+        
+        # 如果没有数据，返回默认列表
+        if not symbols:
+            print(f"[RiskConfigService] No symbols found, using defaults: ['META', 'TSLA', '1810.HK']")
+            return ["META", "TSLA", "1810.HK"]
+        
+        return symbols
+
+    async def _get_latest_window_days(self, account_id: str) -> int:
+        """获取数据库中最新的 window_days（优先使用较小的值）"""
+        from sqlalchemy import select, distinct
+        from app.models.symbol_behavior_stats import SymbolBehaviorStats
+        
+        print(f"[RiskConfigService] Querying window_days for account: {account_id}")
+        stmt = select(distinct(SymbolBehaviorStats.window_days)).where(
+            SymbolBehaviorStats.account_id == account_id
+        ).order_by(SymbolBehaviorStats.window_days.asc())
+        result = await self.session.execute(stmt)
+        window_days_list = [row[0] for row in result.all()]
+        
+        print(f"[RiskConfigService] Found window_days: {window_days_list}")
+        
+        # 返回最小的 window_days，如果没有数据则返回 60
+        result_days = window_days_list[0] if window_days_list else 60
+        print(f"[RiskConfigService] Using window_days: {result_days}")
+        return result_days
 
     def _load_global_shock_policy(self) -> ShockPolicy:
         return ShockPolicy()
@@ -48,7 +86,9 @@ class RiskConfigService:
     async def get_effective_state(self, account_id: str) -> EffectiveRiskState:
         symbols = list(await self._get_relevant_symbols(account_id))
         profiles = await self.profile_svc.get_profiles(symbols)
-        behaviors = await self.profile_svc.get_behavior_stats(account_id, symbols)
+        # 使用最常见的 window_days 查询（优先查询较小的窗口期）
+        window_days = await self._get_latest_window_days(account_id)
+        behaviors = await self.profile_svc.get_behavior_stats(account_id, symbols, window_days)
 
         base_shock = self._load_global_shock_policy()
         base_earn = self._load_global_earnings_policy()
@@ -75,11 +115,14 @@ class RiskConfigService:
             earnings_windows[sym] = {"in_window": False}  # demo
 
         limits = EffectiveRiskLimits()
+        # 从配置读取交易模式
+        trade_mode = TradeMode[settings.TRADE_MODE] if settings.TRADE_MODE in TradeMode.__members__ else TradeMode.DRY_RUN
         return EffectiveRiskState(
-            effective_trade_mode=TradeMode.DRY_RUN,
+            effective_trade_mode=trade_mode,
             limits=limits,
             global_shock_policy=base_shock,
             global_earnings_policy=base_earn,
+            window_days=window_days,
             symbol_shock_policies=symbol_shock_policies,
             symbol_earnings_policies=symbol_earnings_policies,
             symbol_behavior_tiers=symbol_behavior_tiers,

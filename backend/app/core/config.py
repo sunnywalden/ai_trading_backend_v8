@@ -1,4 +1,20 @@
-from pydantic_settings import BaseSettings
+from pathlib import Path
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+# Locate the nearest .env starting from this file's directory
+def find_env_file() -> Path | None:
+    current = Path(__file__).resolve()
+    for parent in current.parents:
+        env_file = parent / ".env"
+        if env_file.exists():
+            return env_file
+    return None
+
+
+ENV_FILE = find_env_file()
+BASE_DIR = ENV_FILE.parent if ENV_FILE else Path(__file__).resolve().parents[3]
 
 
 class Settings(BaseSettings):
@@ -8,8 +24,7 @@ class Settings(BaseSettings):
     TRADE_MODE: str = "DRY_RUN"
 
     # 券商账户（老虎）
-    # 模拟账户
-    TIGER_ACCOUNT: str | None = None
+    TIGER_ACCOUNT: str = "demo-account"
 
     # Tiger Open API 相关配置（使用 tigeropen SDK）
     # PRIVATE_KEY_PATH：RSA 私钥文件路径（.pem 格式）
@@ -28,10 +43,23 @@ class Settings(BaseSettings):
 
     # LLM / OpenAI 配置（用于 AI 决策助手）
     OPENAI_API_KEY: str | None = None
-    OPENAI_MODEL: str = "gpt-5.1"
+    OPENAI_MODEL: str = "gpt-4"
 
-    class Config:
-        env_file = ".env"
+    model_config = SettingsConfigDict(
+        env_file=str(ENV_FILE) if ENV_FILE else ".env",
+        env_file_encoding="utf-8",
+        case_sensitive=True,
+    )
+
+    @field_validator("TIGER_PRIVATE_KEY_PATH", mode="before")
+    @classmethod
+    def _resolve_private_key_path(cls, value: str | Path | None) -> str | None:
+        if not value:
+            return None
+        resolved_path = Path(value)
+        if not resolved_path.is_absolute():
+            resolved_path = BASE_DIR / resolved_path
+        return str(resolved_path)
 
 
 settings = Settings()

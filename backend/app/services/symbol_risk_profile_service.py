@@ -122,6 +122,8 @@ class SymbolRiskProfileService:
         if not symbol_list:
             return {}
 
+        print(f"[get_behavior_stats] Querying with account_id={account_id}, symbols={symbol_list}, window_days={window_days}")
+        
         stmt = select(SymbolBehaviorStats).where(
             and_(
                 SymbolBehaviorStats.account_id == account_id,
@@ -131,6 +133,8 @@ class SymbolRiskProfileService:
         )
         result = await self.session.execute(stmt)
         rows = result.scalars().all()
+        
+        print(f"[get_behavior_stats] Found {len(rows)} rows in database")
 
         stats_map: Dict[str, SymbolBehaviorStatsDTO] = {}
         for row in rows:

@@ -1,11 +1,11 @@
-from sqlalchemy import Column, BigInteger, String, Boolean, JSON, DateTime, text
+from sqlalchemy import Column, Integer, String, Boolean, JSON, DateTime, text
 from .db import Base
 
 
 class SymbolRiskProfile(Base):
     __tablename__ = "symbol_risk_profile"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True, autoincrement=True)
     symbol = Column(String(32), nullable=False)
     market = Column(String(16), nullable=False)
     vol_level = Column(String(16), nullable=False, default="MEDIUM")

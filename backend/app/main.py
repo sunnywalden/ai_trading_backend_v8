@@ -1,4 +1,5 @@
-from fastapi import FastAPI, Depends, Body
+from fastapi import FastAPI, Depends, Body, Query
+from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 
 from app.core.config import settings
@@ -38,16 +39,24 @@ async def run_auto_hedge_once(session: AsyncSession = Depends(get_session)):
 
 
 @app.get("/ai/state", response_model=AiStateView)
-async def get_ai_state(session: AsyncSession = Depends(get_session)):
+async def get_ai_state(session: AsyncSession = Depends(get_session), window_days: Optional[int] = Query(None, description="窗口期（天），可选，前端可传入以覆盖自动选择")):
     """返回当前风控状态 + Greeks 敞口 + 每个标的的行为画像。"""
-    account_id = settings.TIGER_ACCOUNT
+    print("[GET /ai/state] Starting request...")
+    
+    # 先获取真实的账户ID（从 Tiger API）
+    broker_client = make_option_broker_client()
+    account_id = await broker_client.get_account_id()
+    print(f"[GET /ai/state] Using account_id: {account_id}")
+    
     risk = RiskConfigService(session)
     eff = await risk.get_effective_state(account_id)
+    print(f"[GET /ai/state] Trade mode: {eff.effective_trade_mode.value}")
 
     # Greeks 敞口
-    broker_client = make_option_broker_client()
     expo_svc = OptionExposureService(session, broker_client)
     expo = await expo_svc.get_account_exposure(account_id)
+    print(f"[GET /ai/state] Equity: {expo.equity_usd}, Delta: {expo.total_delta_notional_usd}, Gamma: {expo.total_gamma_usd}")
+    
     eq = expo.equity_usd or 1.0
     delta_pct = expo.total_delta_notional_usd / eq
     gamma_pct = expo.total_gamma_usd / eq
@@ -75,8 +84,14 @@ async def get_ai_state(session: AsyncSession = Depends(get_session)):
 
     # 行为统计
     symbols = list(eff.symbol_behavior_tiers.keys())
+    print(f"[GET /ai/state] Symbols from effective_state: {symbols}")
+    # window_days: frontend 可传，也可使用数据库自动选择的 eff.window_days
+    effective_window = window_days if window_days is not None else eff.window_days
+    print(f"[GET /ai/state] window_days param: {window_days}, using: {effective_window}")
+    
     prof_svc = SymbolRiskProfileService(session)
-    behavior_stats = await prof_svc.get_behavior_stats(account_id, symbols)
+    behavior_stats = await prof_svc.get_behavior_stats(account_id, symbols, effective_window)
+    print(f"[GET /ai/state] Behavior stats retrieved for {len(behavior_stats)} symbols: {list(behavior_stats.keys())}")
 
     limits_view = LimitsView(
         max_order_notional_usd=eff.limits.max_order_notional_usd,
