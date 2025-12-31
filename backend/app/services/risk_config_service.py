@@ -37,15 +37,32 @@ class RiskConfigService:
         self.session = session
         self.profile_svc = SymbolRiskProfileService(session)
 
-    async def _get_relevant_symbols(self, account_id: str) -> Iterable[str]:
-        """从数据库获取实际有行为数据的标的列表"""
-        from sqlalchemy import select, distinct
+    async def _get_relevant_symbols(self, account_id: str, window_days: Optional[int] = None) -> Iterable[str]:
+        """从数据库获取实际有行为数据的标的列表。
+        
+        Args:
+            account_id: 账户ID
+            window_days: 可选，指定窗口期则只返回该窗口期有数据的标的
+        """
+        from sqlalchemy import select, distinct, and_
         from app.models.symbol_behavior_stats import SymbolBehaviorStats
         
-        print(f"[RiskConfigService] Querying symbols for account: {account_id}")
-        stmt = select(distinct(SymbolBehaviorStats.symbol)).where(
-            SymbolBehaviorStats.account_id == account_id
-        )
+        print(f"[RiskConfigService] Querying symbols for account: {account_id}, window_days: {window_days}")
+        
+        if window_days is not None:
+            # 如果指定了 window_days，只返回该窗口期有数据的标的
+            stmt = select(distinct(SymbolBehaviorStats.symbol)).where(
+                and_(
+                    SymbolBehaviorStats.account_id == account_id,
+                    SymbolBehaviorStats.window_days == window_days
+                )
+            )
+        else:
+            # 否则返回所有有数据的标的
+            stmt = select(distinct(SymbolBehaviorStats.symbol)).where(
+                SymbolBehaviorStats.account_id == account_id
+            )
+        
         result = await self.session.execute(stmt)
         symbols = [row[0] for row in result.all()]
         
@@ -83,11 +100,14 @@ class RiskConfigService:
     def _load_global_earnings_policy(self) -> EarningsShockPolicy:
         return EarningsShockPolicy()
 
-    async def get_effective_state(self, account_id: str) -> EffectiveRiskState:
-        symbols = list(await self._get_relevant_symbols(account_id))
+    async def get_effective_state(self, account_id: str, window_days: Optional[int] = None) -> EffectiveRiskState:
+        # 如果没有指定 window_days，先自动选择最小值
+        if window_days is None:
+            window_days = await self._get_latest_window_days(account_id)
+        
+        # 根据 window_days 获取相关标的（只返回该窗口期有数据的标的）
+        symbols = list(await self._get_relevant_symbols(account_id, window_days))
         profiles = await self.profile_svc.get_profiles(symbols)
-        # 使用最常见的 window_days 查询（优先查询较小的窗口期）
-        window_days = await self._get_latest_window_days(account_id)
         behaviors = await self.profile_svc.get_behavior_stats(account_id, symbols, window_days)
 
         base_shock = self._load_global_shock_policy()

@@ -215,21 +215,32 @@ class TigerOptionClient(OptionBrokerClient):
             
             if assets:
                 print(f"[TigerOptionClient] Got assets object: {type(assets)}")
-                # 优先使用 net_liquidation（净清算价值）
-                if hasattr(assets, 'summary') and assets.summary:
-                    net_liq = assets.summary.get('netLiquidation')
-                    if net_liq:
-                        print(f"[TigerOptionClient] Net liquidation: {net_liq}")
-                        return float(net_liq)
+                
+                # 如果是列表，取第一个元素
+                if isinstance(assets, list) and len(assets) > 0:
+                    asset = assets[0]
+                    print(f"[TigerOptionClient] Using first asset from list")
+                else:
+                    asset = assets
+                
+                # 优先使用 summary.net_liquidation（净清算价值）
+                if hasattr(asset, 'summary') and asset.summary:
+                    # summary 是一个对象，不是字典
+                    if hasattr(asset.summary, 'net_liquidation'):
+                        net_liq = asset.summary.net_liquidation
+                        # Tiger API 可能返回 inf，需要检查
+                        if net_liq and net_liq != float('inf'):
+                            print(f"[TigerOptionClient] Net liquidation: {net_liq}")
+                            return float(net_liq)
                 
                 # 降级尝试其他字段
                 for attr in ['net_liquidation', 'equity_with_loan', 'total_cash_balance']:
-                    value = getattr(assets, attr, None)
-                    if value:
+                    value = getattr(asset, attr, None)
+                    if value and value != float('inf'):
                         print(f"[TigerOptionClient] Using {attr}: {value}")
                         return float(value)
                 
-                print(f"[TigerOptionClient] Warning: Could not find equity value in assets")
+                print(f"[TigerOptionClient] Warning: Could not find valid equity value in assets")
             else:
                 print(f"[TigerOptionClient] Warning: assets is None")
                         

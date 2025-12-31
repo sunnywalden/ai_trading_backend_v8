@@ -49,7 +49,7 @@ async def get_ai_state(session: AsyncSession = Depends(get_session), window_days
     print(f"[GET /ai/state] Using account_id: {account_id}")
     
     risk = RiskConfigService(session)
-    eff = await risk.get_effective_state(account_id)
+    eff = await risk.get_effective_state(account_id, window_days)
     print(f"[GET /ai/state] Trade mode: {eff.effective_trade_mode.value}")
 
     # Greeks 敞口
