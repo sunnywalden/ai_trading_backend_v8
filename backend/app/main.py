@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Depends, Body, Query
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+from contextlib import asynccontextmanager
 
 from app.core.config import settings
 from app.engine.auto_hedge_engine import AutoHedgeEngine
@@ -12,13 +13,36 @@ from app.broker.factory import make_option_broker_client
 from app.schemas.ai_advice import AiAdviceRequest, AiAdviceResponse
 from app.services.ai_advice_service import AiAdviceService
 from app.services.behavior_scoring_service import BehaviorScoringService
+from app.routers import position_macro
+from app.jobs.scheduler import init_scheduler, start_scheduler, shutdown_scheduler
+from app.jobs.data_refresh_jobs import register_all_jobs
 
 DATABASE_URL = "sqlite+aiosqlite:///./demo.db"
 
 engine = create_async_engine(DATABASE_URL, echo=False, future=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
-app = FastAPI(title=settings.APP_NAME)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """应用生命周期管理：启动时初始化调度器，关闭时清理"""
+    # 启动时执行
+    scheduler = init_scheduler()
+    register_all_jobs(scheduler)
+    start_scheduler()
+    print("✓ Scheduler started with 6 periodic tasks")
+    
+    yield
+    
+    # 关闭时执行
+    shutdown_scheduler(wait=True)
+    print("✓ Scheduler shut down")
+
+
+app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
+
+# 注册路由
+app.include_router(position_macro.router, prefix="/api/v1", tags=["持仓评估与宏观风险"])
 
 
 async def get_session() -> AsyncSession:
@@ -180,3 +204,40 @@ async def rebuild_behavior_stats(
         "symbols_processed": list(metrics_map.keys()),
         "metrics": {sym: m.__dict__ for sym, m in metrics_map.items()},
     }
+
+
+@app.get("/admin/scheduler/jobs")
+async def get_scheduled_jobs():
+    """获取所有定时任务状态"""
+    from app.jobs.scheduler import get_jobs
+    try:
+        jobs = get_jobs()
+        return {
+            "status": "ok",
+            "total_jobs": len(jobs),
+            "jobs": jobs
+        }
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+
+@app.post("/admin/scheduler/jobs/{job_id}/pause")
+async def pause_scheduled_job(job_id: str):
+    """暂停指定的定时任务"""
+    from app.jobs.scheduler import pause_job
+    try:
+        pause_job(job_id)
+        return {"status": "ok", "message": f"Job {job_id} paused"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+
+@app.post("/admin/scheduler/jobs/{job_id}/resume")
+async def resume_scheduled_job(job_id: str):
+    """恢复指定的定时任务"""
+    from app.jobs.scheduler import resume_job
+    try:
+        resume_job(job_id)
+        return {"status": "ok", "message": f"Job {job_id} resumed"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}

@@ -9,6 +9,10 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from app.models.db import Base
 from app.models.symbol_behavior_stats import SymbolBehaviorStats
 from app.models.symbol_risk_profile import SymbolRiskProfile
+from app.models.macro_risk import MacroRiskScore, MacroIndicator, GeopoliticalEvent
+from app.models.technical_indicator import TechnicalIndicator
+from app.models.fundamental_data import FundamentalData
+from app.models.position_score import PositionScore
 
 DATABASE_URL = "sqlite+aiosqlite:///./demo.db"
 

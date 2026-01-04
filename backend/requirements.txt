@@ -6,3 +6,13 @@ sqlalchemy
 aiosqlite
 greenlet
 tigeropen
+
+# 持仓评估和宏观风险分析依赖
+yfinance>=0.2.37
+pandas-ta>=0.3.14b0
+fredapi>=0.5.1
+newsapi-python>=0.2.7
+openai>=1.12.0
+apscheduler>=3.10.4
+pandas>=2.0.0
+numpy>=1.24.0

@@ -44,6 +44,28 @@ class Settings(BaseSettings):
     # LLM / OpenAI 配置（用于 AI 决策助手）
     OPENAI_API_KEY: str | None = None
     OPENAI_MODEL: str = "gpt-4"
+    OPENAI_MAX_TOKENS: int = 500
+    OPENAI_TIMEOUT_SECONDS: int = 30
+
+    # FRED API 配置（宏观经济数据）
+    FRED_API_KEY: str | None = None
+
+    # News API 配置（地缘政治事件）
+    NEWS_API_KEY: str | None = None
+
+    # 数据缓存配置（小时）
+    CACHE_TTL_TECHNICAL_HOURS: int = 1
+    CACHE_TTL_FUNDAMENTAL_HOURS: int = 24
+    CACHE_TTL_MACRO_HOURS: int = 6
+    CACHE_TTL_GEOPOLITICAL_HOURS: int = 4
+
+    # 定时任务配置
+    ENABLE_SCHEDULER: bool = True
+    SCHEDULER_TECHNICAL_HOURS: int = 1
+    SCHEDULER_FUNDAMENTAL_HOURS: int = 24
+    SCHEDULER_MACRO_HOURS: int = 24
+    SCHEDULER_GEOPOLITICAL_HOURS: int = 4
+    SCHEDULER_RISK_HOURS: int = 6
 
     model_config = SettingsConfigDict(
         env_file=str(ENV_FILE) if ENV_FILE else ".env",
