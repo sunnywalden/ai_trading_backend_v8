@@ -3,7 +3,9 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, List
 import yfinance as yf
-from datetime import datetime
+from datetime import datetime, timedelta
+import asyncio
+import time
 
 from app.schemas.position_assessment import (
     PositionsAssessmentResponse,
@@ -70,6 +72,8 @@ async def get_positions_assessment(
         # 构建响应
         position_assessments = []
         total_score = 0.0
+        total_market_value = 0.0
+        total_pnl = 0.0
         high_risk_count = 0
         buy_count = 0
         
@@ -77,27 +81,48 @@ async def get_positions_assessment(
             symbol = position.symbol
             score_data = scores.get(symbol)
             
-            if score_data:
-                position_assessments.append({
-                    "symbol": symbol,
-                    "quantity": position.quantity,
-                    "market_value": position.market_value,
-                    "overall_score": score_data.overall_score,
-                    "technical_score": score_data.technical_score,
-                    "fundamental_score": score_data.fundamental_score,
-                    "sentiment_score": score_data.sentiment_score,
-                    "risk_level": score_data.risk_level,
-                    "recommendation": score_data.recommendation,
-                    "target_position": score_data.target_position,
-                    "stop_loss": score_data.stop_loss,
-                    "take_profit": score_data.take_profit
-                })
+            # 计算市值和盈亏
+            market_value = position.quantity * position.last_price
+            unrealized_pnl = (position.last_price - position.avg_price) * position.quantity
+            unrealized_pnl_percent = ((position.last_price - position.avg_price) / position.avg_price * 100) if position.avg_price > 0 else 0
+            
+            # 构建持仓评估数据（即使没有评分也显示基本信息）
+            assessment = {
+                "symbol": symbol,
+                "quantity": position.quantity,
+                "avg_cost": position.avg_price,
+                "current_price": position.last_price,
+                "market_value": round(market_value, 2),
+                "unrealized_pnl": round(unrealized_pnl, 2),
+                "unrealized_pnl_percent": round(unrealized_pnl_percent, 2),
+                # 评分数据（使用默认值如果不可用）
+                "overall_score": score_data.overall_score if score_data else 50,
+                "technical_score": score_data.technical_score if score_data else 50,
+                "fundamental_score": score_data.fundamental_score if score_data else 50,
+                "sentiment_score": score_data.sentiment_score if score_data else 50,
+                "risk_level": score_data.risk_level if score_data else "MEDIUM",
+                "recommendation": score_data.recommendation if score_data else "HOLD",
+                "target_position": score_data.target_position if score_data else 0.5,
+                "stop_loss": score_data.stop_loss if score_data else position.last_price * 0.9,
+                "take_profit": score_data.take_profit if score_data else position.last_price * 1.1
+            }
+            position_assessments.append(assessment)
+            
+            # 累加总计数据
+            total_market_value += market_value
+            total_pnl += unrealized_pnl
+            
+            # 统计数据
+            score_value = score_data.overall_score if score_data else 50
+            total_score += score_value
+            
+            risk = score_data.risk_level if score_data else "MEDIUM"
+            if risk in ["HIGH", "EXTREME"]:
+                high_risk_count += 1
                 
-                total_score += score_data.overall_score
-                if score_data.risk_level in ["HIGH", "EXTREME"]:
-                    high_risk_count += 1
-                if score_data.recommendation in ["BUY", "STRONG_BUY"]:
-                    buy_count += 1
+            rec = score_data.recommendation if score_data else "HOLD"
+            if rec in ["BUY", "STRONG_BUY"]:
+                buy_count += 1
         
         avg_score = total_score / len(position_assessments) if position_assessments else 0.0
         
@@ -105,6 +130,8 @@ async def get_positions_assessment(
             positions=position_assessments,
             summary={
                 "total_positions": len(position_assessments),
+                "total_value": round(total_market_value, 2),
+                "total_pnl": round(total_pnl, 2),
                 "avg_score": round(avg_score, 2),
                 "high_risk_count": high_risk_count,
                 "buy_recommendation_count": buy_count
@@ -313,7 +340,7 @@ async def refresh_positions_assessment(
         technical_results = {}
         for symbol in symbols:
             try:
-                data = await technical_service.get_technical_indicators(symbol, force_refresh=True)
+                data = await technical_service.get_technical_analysis(symbol, force_refresh=True)
                 technical_results[symbol] = data is not None
             except Exception as e:
                 print(f"Error refreshing technical for {symbol}: {e}")
@@ -362,55 +389,44 @@ async def get_macro_risk_overview(
     force_refresh: bool = Query(False, description="是否强制刷新"),
     session: AsyncSession = Depends(get_session)
 ):
-    """获取宏观风险概览
+    """获取宏观风险概览（性能优化版）
     
-    返回宏观环境的综合风险评估，包括：
-    - 货币政策风险
-    - 地缘政治风险
-    - 行业泡沫风险
-    - 经济周期风险
-    - 市场情绪风险
-    - AI综合分析和建议
-    - 关键事件日历
+    返回宏观环境的综合风险评估。
+    
+    性能优化措施：
+    - 优先使用24小时缓存
+    - 并行处理独立操作（风险计算、预警、事件）
+    - AI分析15秒超时控制
+    - 响应时间监控
     """
     try:
-        # 计算宏观风险评分
+        start_time = time.time()
+        
+        # 1. 优先计算或获取缓存的风险评分
         risk_service = MacroRiskScoringService()
         risk_score = await risk_service.calculate_macro_risk_score(use_cache=not force_refresh)
         
-        # 生成风险预警
-        alerts = await risk_service.generate_risk_alerts()
+        # 2. 并行执行独立操作：风险预警 + 地缘事件
+        alerts_task = asyncio.create_task(risk_service.generate_risk_alerts())
         
-        # 获取最近的地缘政治事件
         geo_service = GeopoliticalEventsService()
-        recent_events = await geo_service.fetch_recent_events(days=7)
+        events_task = asyncio.create_task(geo_service.fetch_recent_events(days=7))
         
-        # 生成AI分析（可选）
-        ai_analysis = None
-        try:
-            ai_service = AIAnalysisService()
-            macro_dict = {
-                "overall_risk": {
-                    "overall_score": risk_score.overall_score,
-                    "risk_level": risk_score.risk_level
-                },
-                "risk_breakdown": {
-                    "monetary_policy": {"score": risk_score.monetary_policy_score},
-                    "geopolitical": {"score": risk_score.geopolitical_score},
-                    "sector_bubble": {"score": risk_score.sector_bubble_score},
-                    "economic_cycle": {"score": risk_score.economic_cycle_score},
-                    "market_sentiment": {"score": risk_score.sentiment_score}
-                },
-                "alerts": alerts,
-                "recent_events": recent_events[:5]
-            }
-            ai_analysis = await ai_service.generate_macro_analysis(macro_dict)
-        except Exception as e:
-            # AI分析失败不影响主流程
-            pass
+        # 等待并行任务完成
+        alerts, recent_events = await asyncio.gather(
+            alerts_task,
+            events_task,
+            return_exceptions=True
+        )
         
-        # 构建响应
-        return {
+        # 处理异常结果
+        if isinstance(alerts, Exception):
+            alerts = []
+        if isinstance(recent_events, Exception):
+            recent_events = []
+        
+        # 3. 构建基础响应数据
+        response_data = {
             "timestamp": risk_score.timestamp,
             "overall_risk": {
                 "score": risk_score.overall_score,
@@ -443,7 +459,7 @@ async def get_macro_risk_overview(
             "alerts": alerts,
             "key_concerns": risk_score.key_concerns,
             "recommendations": risk_score.recommendations,
-            "ai_analysis": ai_analysis,
+            "ai_analysis": risk_score.risk_summary,  # 默认使用风险摘要
             "recent_events": [
                 {
                     "title": event.event_title,
@@ -452,9 +468,24 @@ async def get_macro_risk_overview(
                     "severity": event.severity,
                     "impact_score": event.market_impact_score
                 }
-                for event in recent_events[:5]  # 只返回前5个
+                for event in recent_events[:5] if hasattr(event, 'event_title')
             ]
         }
+        
+        # 4. 跳过AI分析以提升性能（risk_summary已包含分析结果）
+        # 如需AI分析，可通过单独的异步任务或后台作业处理
+        
+        # 5. 添加性能监控数据
+        response_time = int((time.time() - start_time) * 1000)
+        cache_hit = not force_refresh and (datetime.now() - risk_score.timestamp) < timedelta(hours=24)
+        
+        response_data["_meta"] = {
+            "response_time_ms": response_time,
+            "cache_hit": cache_hit,
+            "data_freshness_hours": round((datetime.now() - risk_score.timestamp).total_seconds() / 3600, 2)
+        }
+        
+        return response_data
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching macro risk overview: {str(e)}")

@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends, Body, Query
+from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from contextlib import asynccontextmanager
@@ -40,6 +41,15 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
+
+# 配置CORS中间件
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 生产环境应该配置具体的域名
+    allow_credentials=True,
+    allow_methods=["*"],  # 允许所有HTTP方法（包括OPTIONS）
+    allow_headers=["*"],  # 允许所有请求头
+)
 
 # 注册路由
 app.include_router(position_macro.router, prefix="/api/v1", tags=["持仓评估与宏观风险"])

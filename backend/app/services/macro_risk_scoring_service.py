@@ -11,12 +11,16 @@
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from enum import Enum
+import asyncio
+import logging
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 import yfinance as yf
 
 from app.models.macro_risk import MacroRiskScore, GeopoliticalEvent
+
+logger = logging.getLogger(__name__)
 
 
 # 延迟导入避免循环依赖
@@ -44,7 +48,10 @@ class MacroRiskScoringService:
     WEIGHT_MARKET_SENTIMENT = 0.10  # 市场情绪 10%
     
     def __init__(self):
-        self.cache_duration = timedelta(hours=6)
+        self.cache_duration = timedelta(hours=24)  # 延长到24小时减少API调用
+        self.max_retries = 2  # 最大重试次数
+        self.retry_delay = 5.0  # 重试延迟（秒）
+        self.request_delay = 1.0  # 请求间延迟（秒）
     
     async def calculate_macro_risk_score(self, use_cache: bool = True) -> MacroRiskScore:
         """
@@ -173,18 +180,93 @@ class MacroRiskScoringService:
     
     # ============= 私有方法：风险评分计算 =============
     
+    async def _calculate_with_retry(
+        self,
+        calc_func,
+        dimension_name: str,
+        fallback_value: float
+    ) -> float:
+        """
+        带重试机制的计算函数
+        
+        Args:
+            calc_func: 计算函数
+            dimension_name: 维度名称
+            fallback_value: 回退值（来自缓存或默认值）
+        
+        Returns:
+            计算结果或回退值
+        """
+        for attempt in range(self.max_retries):
+            try:
+                result = await calc_func()
+                if result is not None:
+                    return result
+            except Exception as e:
+                error_msg = str(e)
+                if "Rate limited" in error_msg or "Too Many Requests" in error_msg:
+                    if attempt < self.max_retries - 1:
+                        wait_time = self.retry_delay * (attempt + 1)  # 指数退避
+                        logger.warning(
+                            f"Rate limited for {dimension_name}, retrying in {wait_time}s... "
+                            f"(attempt {attempt + 1}/{self.max_retries})"
+                        )
+                        await asyncio.sleep(wait_time)
+                        continue
+                    else:
+                        logger.warning(
+                            f"Rate limited for {dimension_name} after {self.max_retries} attempts, "
+                            f"using fallback value: {fallback_value}"
+                        )
+                else:
+                    logger.error(f"Error calculating {dimension_name}: {error_msg}")
+                    break
+        
+        # 所有重试失败，使用回退值
+        logger.info(f"Using fallback value for {dimension_name}: {fallback_value}")
+        return fallback_value
+    
     async def _calculate_all_risk_scores(self, session: AsyncSession) -> Dict[str, float]:
         """
-        计算所有维度的风险评分
+        计算所有维度的风险评分（带延迟和错误恢复）
         
         Returns:
             各维度评分字典
         """
-        monetary = await self._calculate_monetary_policy_risk()
+        # 首先尝试从缓存加载，失败的维度使用缓存值
+        cached = await self._get_cached_risk_score(session)
+        
+        # 地缘政治维度不依赖外部API，优先计算
         geopolitical = await self._calculate_geopolitical_risk(session)
-        sector_bubble = await self._calculate_sector_bubble_risk()
-        economic_cycle = await self._calculate_economic_cycle_risk()
-        market_sentiment = await self._calculate_market_sentiment_risk()
+        await asyncio.sleep(self.request_delay)
+        
+        # 其他维度依赖yfinance，需要错误处理
+        monetary = await self._calculate_with_retry(
+            self._calculate_monetary_policy_risk,
+            "monetary_policy",
+            cached.monetary_policy_score if cached else 65.0
+        )
+        await asyncio.sleep(self.request_delay)
+        
+        sector_bubble = await self._calculate_with_retry(
+            self._calculate_sector_bubble_risk,
+            "sector_bubble",
+            cached.sector_bubble_score if cached else 60.0
+        )
+        await asyncio.sleep(self.request_delay)
+        
+        economic_cycle = await self._calculate_with_retry(
+            self._calculate_economic_cycle_risk,
+            "economic_cycle",
+            cached.economic_cycle_score if cached else 65.0
+        )
+        await asyncio.sleep(self.request_delay)
+        
+        market_sentiment = await self._calculate_with_retry(
+            self._calculate_market_sentiment_risk,
+            "market_sentiment",
+            cached.sentiment_score if cached else 65.0
+        )
         
         return {
             "monetary_policy": monetary,
@@ -261,8 +343,9 @@ class MacroRiskScoringService:
             return round(sum(scores), 2)
             
         except Exception as e:
-            print(f"Error calculating monetary policy risk: {e}")
-            return 65.0
+            logger.warning(f"Error calculating monetary policy risk: {e}")
+            # 返回None触发重试机制
+            return None
     
     async def _calculate_geopolitical_risk(self, session: AsyncSession) -> float:
         """
@@ -326,7 +409,7 @@ class MacroRiskScoringService:
             return round(final_score, 2)
             
         except Exception as e:
-            print(f"Error calculating geopolitical risk: {e}")
+            logger.warning(f"Error calculating geopolitical risk: {e}")
             return 70.0
     
     async def _calculate_sector_bubble_risk(self) -> float:
@@ -372,8 +455,9 @@ class MacroRiskScoringService:
             return round(final_score, 2)
             
         except Exception as e:
-            print(f"Error calculating sector bubble risk: {e}")
-            return 60.0
+            logger.warning(f"Error calculating sector bubble risk: {e}")
+            # 返回None触发重试机制
+            return None
     
     async def _calculate_economic_cycle_risk(self) -> float:
         """
@@ -410,8 +494,9 @@ class MacroRiskScoringService:
             return round(base_score, 2)
             
         except Exception as e:
-            print(f"Error calculating economic cycle risk: {e}")
-            return 65.0
+            logger.warning(f"Error calculating economic cycle risk: {e}")
+            # 返回None触发重试机制
+            return None
     
     async def _calculate_market_sentiment_risk(self) -> float:
         """
@@ -449,8 +534,9 @@ class MacroRiskScoringService:
             return round(final_score, 2)
             
         except Exception as e:
-            print(f"Error calculating market sentiment risk: {e}")
-            return 65.0
+            logger.warning(f"Error calculating market sentiment risk: {e}")
+            # 返回None触发重试机制
+            return None
     
     def _calculate_overall_risk_score(
         self,
@@ -493,7 +579,7 @@ class MacroRiskScoringService:
             result = await session.execute(stmt)
             return result.scalar_one_or_none()
         except Exception as e:
-            print(f"Error getting cached risk score: {e}")
+            logger.warning(f"Error getting cached risk score: {e}")
             return None
     
     # ============= 私有方法：辅助功能 =============

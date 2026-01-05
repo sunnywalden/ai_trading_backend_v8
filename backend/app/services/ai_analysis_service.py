@@ -7,12 +7,13 @@ AI分析服务 - 使用GPT生成持仓和宏观分析摘要
 3. 持仓综合评估AI建议
 4. 宏观风险AI解读
 
-回退策略: GPT-4 → GPT-3.5-turbo → 规则生成
+回退策略: 配置模型 → 智能回退 → 规则生成
+模型验证: 自动获取可用模型列表并验证配置
 """
 
 import logging
 from typing import Optional, Dict, Any, List
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 
 from app.core.config import settings
@@ -21,6 +22,9 @@ logger = logging.getLogger(__name__)
 
 # OpenAI客户端（延迟初始化）
 _openai_client = None
+# 可用模型列表缓存（24小时）
+_available_models_cache = None
+_models_cache_time = None
 
 
 def _get_openai_client():
@@ -46,13 +50,149 @@ def _get_openai_client():
     return _openai_client
 
 
+async def _get_available_models() -> List[str]:
+    """
+    获取OpenAI可用模型列表（带24小时缓存）
+    
+    Returns:
+        可用的聊天模型列表
+    """
+    global _available_models_cache, _models_cache_time
+    
+    # 检查缓存
+    if _available_models_cache and _models_cache_time:
+        if datetime.now() - _models_cache_time < timedelta(hours=24):
+            return _available_models_cache
+    
+    client = _get_openai_client()
+    if not client:
+        # 客户端未初始化，返回默认模型列表（基于实际API返回）
+        return ["gpt-5", "gpt-4-turbo", "gpt-4"]
+    
+    try:
+        # 获取所有模型
+        models_response = await client.models.list()
+        
+        # 过滤出聊天模型（gpt-5*, gpt-4*）
+        # 注意：基于实际API返回，gpt-3.5-turbo可能不可用
+        chat_models = []
+        for model in models_response.data:
+            model_id = model.id
+            if (model_id.startswith("gpt-5") or 
+                model_id.startswith("gpt-4")):
+                chat_models.append(model_id)
+        
+        # 按优先级排序（gpt-5 > gpt-4-turbo > gpt-4）
+        priority_order = []
+        
+        # 1. GPT-5系列（最新一代，最高优先级）
+        gpt5 = [m for m in chat_models if m.startswith("gpt-5")]
+        priority_order.extend(sorted(gpt5, reverse=True))
+        
+        # 2. GPT-4 Turbo系列
+        gpt4_turbo = [m for m in chat_models if "gpt-4-turbo" in m or "gpt-4-1106" in m or "gpt-4-0125" in m]
+        priority_order.extend(sorted(gpt4_turbo, reverse=True))
+        
+        # 3. GPT-4系列
+        gpt4 = [m for m in chat_models if m.startswith("gpt-4") and m not in priority_order]
+        priority_order.extend(sorted(gpt4, reverse=True))
+        
+        if priority_order:
+            _available_models_cache = priority_order
+            _models_cache_time = datetime.now()
+            logger.info(f"Fetched {len(priority_order)} available chat models from OpenAI")
+            return priority_order
+        else:
+            # 如果没有获取到模型，返回默认列表
+            logger.warning("No chat models found, using default list")
+            return ["gpt-5", "gpt-4-turbo", "gpt-4"]
+            
+    except Exception as e:
+        logger.warning(f"Failed to fetch available models: {str(e)}, using default list")
+        # 返回默认模型列表
+        return ["gpt-5", "gpt-4-turbo", "gpt-4"]
+
+
+def _select_best_models(configured_model: str, available_models: List[str]) -> List[str]:
+    """
+    选择最佳模型列表
+    
+    Args:
+        configured_model: 配置的模型
+        available_models: 可用模型列表
+    
+    Returns:
+        按优先级排序的模型列表
+    """
+    selected_models = []
+    
+    # 1. 如果配置的模型可用，优先使用
+    if configured_model in available_models:
+        selected_models.append(configured_model)
+        logger.info(f"Using configured model: {configured_model}")
+    else:
+        logger.warning(
+            f"Configured model '{configured_model}' not available. "
+            f"Available models: {', '.join(available_models[:3])}"
+        )
+    
+    # 2. 添加智能回退模型（基于实际可用模型）
+    fallback_preferences = [
+        "gpt-5.2",
+        "gpt-5.1",
+        "gpt-5",
+        "gpt-4-turbo",
+        "gpt-4-turbo-preview", 
+        "gpt-4-0125-preview",
+        "gpt-4-1106-preview",
+        "gpt-4"
+    ]
+    
+    for fallback in fallback_preferences:
+        if fallback in available_models and fallback not in selected_models:
+            selected_models.append(fallback)
+            # 最多添加3个回退模型
+            if len(selected_models) >= 3:
+                break
+    
+    # 3. 如果还不够3个，从可用模型中补充
+    for model in available_models:
+        if model not in selected_models:
+            selected_models.append(model)
+            if len(selected_models) >= 3:
+                break
+    
+    # 4. 确保至少有一个模型
+    if not selected_models:
+        selected_models = ["gpt-4"]
+        logger.warning("No models selected, using default: gpt-4")
+    
+    logger.info(f"Selected models (fallback order): {' → '.join(selected_models)}")
+    return selected_models
+
+
 class AIAnalysisService:
     """AI分析服务 - 基于GPT生成智能摘要和建议"""
     
     def __init__(self):
         self.client = _get_openai_client()
-        self.models = ["gpt-4", "gpt-3.5-turbo"]  # 回退顺序
         self.max_retries = 2
+        self.max_tokens = settings.OPENAI_MAX_TOKENS
+        self.timeout = settings.OPENAI_TIMEOUT_SECONDS
+        self._models = None  # 延迟初始化
+    
+    async def _get_models(self) -> List[str]:
+        """获取模型列表（延迟初始化）"""
+        if self._models is None:
+            available_models = await _get_available_models()
+            configured_model = settings.OPENAI_MODEL
+            self._models = _select_best_models(configured_model, available_models)
+        return self._models
+    
+    @property
+    async def models(self) -> List[str]:
+        """模型列表属性"""
+        return await self._get_models()
     
     async def generate_technical_summary(
         self,
@@ -161,14 +301,14 @@ class AIAnalysisService:
     async def _call_gpt(
         self,
         prompt: str,
-        max_tokens: int = 500,
+        max_tokens: Optional[int] = None,
         temperature: float = 0.7
     ) -> Optional[str]:
         """调用GPT API（带回退策略）
         
         Args:
             prompt: 提示词
-            max_tokens: 最大token数
+            max_tokens: 最大token数（如果为None则使用配置）
             temperature: 温度参数（0-1，越高越随机）
         
         Returns:
@@ -177,8 +317,15 @@ class AIAnalysisService:
         if not self.client:
             return None
         
+        # 使用配置的max_tokens
+        if max_tokens is None:
+            max_tokens = self.max_tokens
+        
+        # 获取模型列表
+        models = await self._get_models()
+        
         # 尝试不同的模型
-        for model in self.models:
+        for model in models:
             try:
                 response = await self.client.chat.completions.create(
                     model=model,
@@ -193,18 +340,26 @@ class AIAnalysisService:
                         }
                     ],
                     max_tokens=max_tokens,
-                    temperature=temperature
+                    temperature=temperature,
+                    timeout=self.timeout
                 )
                 
                 content = response.choices[0].message.content.strip()
-                logger.info(f"GPT response generated using {model}")
+                logger.info(f"GPT response generated using {model} (max_tokens={max_tokens}, timeout={self.timeout}s)")
                 return content
                 
             except Exception as e:
-                logger.warning(f"Failed to call {model}: {str(e)}")
+                error_msg = str(e)
+                # 区分连接错误和API错误
+                if "Connection" in error_msg or "timeout" in error_msg.lower():
+                    logger.warning(f"Failed to call {model}: Connection error. Check network or API endpoint.")
+                elif "API key" in error_msg or "authentication" in error_msg.lower():
+                    logger.warning(f"Failed to call {model}: Authentication error. Check OPENAI_API_KEY.")
+                else:
+                    logger.warning(f"Failed to call {model}: {error_msg}")
                 continue
         
-        logger.error("All GPT models failed, falling back to rule-based generation")
+        logger.info("All GPT models unavailable, using rule-based generation as fallback")
         return None
     
     def _build_technical_prompt(self, symbol: str, data: Dict[str, Any]) -> str:
