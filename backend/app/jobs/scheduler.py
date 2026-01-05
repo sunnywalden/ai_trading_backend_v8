@@ -6,7 +6,6 @@ APScheduler 调度器配置和初始化
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.executors.asyncio import AsyncIOExecutor
 import logging
@@ -160,21 +159,35 @@ def get_jobs():
     """获取所有任务信息"""
     scheduler = get_scheduler()
     jobs = scheduler.get_jobs()
-    return [
-        {
-            'id': job.id,
-            'name': job.name,
-            'next_run_time': job.next_run_time.strftime('%Y-%m-%d %H:%M:%S') if job.next_run_time else None,
-            'trigger': str(job.trigger)
-        }
-        for job in jobs
-    ]
+    return [format_job(job) for job in jobs]
 
 
 def get_job(job_id: str):
     """获取指定任务对象（不存在则返回 None）。"""
     scheduler = get_scheduler()
     return scheduler.get_job(job_id)
+
+
+def format_job(job):
+    if job is None:
+        return None
+    next_run = job.next_run_time.strftime('%Y-%m-%d %H:%M:%S') if job.next_run_time else None
+    trigger_repr = str(job.trigger)
+    tz = None
+    try:
+        tz_attr = getattr(job.trigger, 'timezone', None)
+        if tz_attr:
+            tz = tz_attr.zone if hasattr(tz_attr, 'zone') else str(tz_attr)
+    except Exception:
+        tz = None
+    return {
+        'id': job.id,
+        'name': job.name,
+        'next_run_time': next_run,
+        'trigger': trigger_repr,
+        'timezone': tz,
+        'status': 'active' if job.next_run_time else 'paused',
+    }
 
 
 def reschedule_job(job_id: str, cron_expr: str, timezone: str = "Asia/Shanghai"):

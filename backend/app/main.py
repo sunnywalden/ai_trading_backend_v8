@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, Body, Query
+from fastapi import FastAPI, Depends, Body, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, AsyncGenerator
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
@@ -12,6 +12,7 @@ from app.services.option_exposure_service import OptionExposureService
 from app.schemas.ai_state import AiStateView, LimitsView, SymbolBehaviorView, ExposureView
 from app.broker.factory import make_option_broker_client
 from app.schemas.ai_advice import AiAdviceRequest, AiAdviceResponse
+from app.schemas.scheduler import JobScheduleRequest
 from app.services.ai_advice_service import AiAdviceService
 from app.services.behavior_scoring_service import BehaviorScoringService
 from app.routers import position_macro
@@ -253,3 +254,24 @@ async def resume_scheduled_job(job_id: str):
         return {"status": "ok", "message": f"Job {job_id} resumed"}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
+
+
+@app.put("/admin/scheduler/jobs/{job_id}/schedule")
+async def update_job_schedule(job_id: str, payload: JobScheduleRequest):
+    """按小时/分钟/时区更新定时任务的触发 cron"""
+    from app.jobs.scheduler import reschedule_job, get_job, format_job
+
+    try:
+        cron_expr = f"{payload.minute} {payload.hour} * * *"
+        reschedule_job(job_id=job_id, cron_expr=cron_expr, timezone=payload.timezone)
+        job = get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+        job_info = format_job(job)
+        next_run = job_info.get("next_run_time") or "soon"
+        message = f"Job schedule updated successfully. Next run: {next_run}"
+        return {"status": "success", "message": message, "job": job_info}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
