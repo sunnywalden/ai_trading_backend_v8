@@ -110,6 +110,7 @@ class PotentialOpportunitiesService:
         self._fundamental = FundamentalAnalysisService()
         self._macro = MacroRiskScoringService()
         self._market = MarketDataProvider()
+        self._technical = TechnicalAnalysisService(self.session)
 
         # 并发控制（yfinance 容易限流，宁可慢一点也别全挂）
         self._semaphore = asyncio.Semaphore(3)
@@ -370,15 +371,18 @@ class PotentialOpportunitiesService:
             notes["idempotent"] = True
             return existing, notes
 
-        # 宏观风险快照（优先走缓存，避免拖慢扫描）
-        macro = None
-        try:
-            macro = await self._macro.calculate_macro_risk_score(use_cache=True)
-        except Exception as e:
-            notes["macro_risk_error"] = str(e)
+        # 同步启动宏观风险和 universe 构建，避免串行等待
+        macro_task = asyncio.create_task(self._macro.calculate_macro_risk_score(use_cache=True))
+        universe_task = asyncio.create_task(self.get_universe_symbols(universe_name, force_refresh=force_refresh))
 
+        macro = None
         effective_min_score = min_score
         effective_max_results = max_results
+
+        try:
+            macro = await macro_task
+        except Exception as e:
+            notes["macro_risk_error"] = str(e)
 
         if macro is not None:
             # 需求：HIGH/EXTREME 时提高阈值到 80
@@ -390,9 +394,14 @@ class PotentialOpportunitiesService:
                     "min_score": {"before": min_score, "after": effective_min_score},
                 }
 
-        symbols, universe_meta = await self.get_universe_symbols(universe_name, force_refresh=force_refresh)
-        if universe_meta:
-            notes["universe"] = universe_meta
+        symbols: List[str] = []
+        universe_meta: Dict[str, Any] = {}
+        try:
+            symbols, universe_meta = await universe_task
+            if universe_meta:
+                notes["universe"] = universe_meta
+        except Exception as e:
+            notes["universe_error"] = str(e)
 
         run = OpportunityScanRun(
             run_key=run_key,
@@ -460,9 +469,8 @@ class PotentialOpportunitiesService:
     async def _score_one_symbol(self, symbol: str, min_score: int, force_refresh: bool) -> Optional[ScoredSymbol]:
         async with self._semaphore:
             # 技术分析（使用缓存优先）
-            tech_service = TechnicalAnalysisService(self.session)
             try:
-                tech = await tech_service.get_technical_analysis(
+                tech = await self._technical.get_technical_analysis(
                     symbol=symbol,
                     timeframe="1D",
                     use_cache=not force_refresh,
