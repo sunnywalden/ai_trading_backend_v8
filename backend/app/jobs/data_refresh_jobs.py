@@ -21,6 +21,7 @@ from app.models.symbol_risk_profile import SymbolRiskProfile
 from app.services.macro_indicators_service import MacroIndicatorsService
 from app.services.macro_risk_scoring_service import MacroRiskScoringService
 from app.services.geopolitical_events_service import GeopoliticalEventsService
+from app.services.potential_opportunities_service import PotentialOpportunitiesService
 from app.broker.factory import make_option_broker_client
 from app.core.config import settings
 
@@ -107,7 +108,7 @@ async def refresh_fundamental_data_job():
         
         for symbol in symbols:
             try:
-                await fundamental_service.get_fundamental_analysis(symbol, use_cache=False)
+                await fundamental_service.get_fundamental_data(symbol, force_refresh=True)
                 success_count += 1
             except Exception as e:
                 logger.error(f"Failed to refresh fundamental data for {symbol}: {str(e)}")
@@ -274,6 +275,37 @@ async def cleanup_old_data_job():
         logger.error(f"Old data cleanup job failed: {str(e)}", exc_info=True)
 
 
+async def scan_daily_opportunities_job():
+    """任务7: 潜在机会扫描（中大型科技股）
+
+    频率: 每天北京时间 20:30
+    功能: 扫描股票池，计算技术/基本面/情绪评分，结合宏观风险产出 1-3 只候选并落库
+    """
+    try:
+        logger.info("Starting daily opportunities scan job")
+        start_time = datetime.now()
+
+        async with _get_session() as session:
+            svc = PotentialOpportunitiesService(session)
+            run, notes = await svc.scan_and_persist(
+                universe_name="US_LARGE_MID_TECH",
+                min_score=75,
+                max_results=3,
+                force_refresh=False,
+            )
+
+        elapsed = (datetime.now() - start_time).total_seconds()
+        logger.info(
+            f"Daily opportunities scan completed: "
+            f"qualified={run.qualified_symbols}/{run.total_symbols}, "
+            f"macro={run.macro_risk_level}/{run.macro_overall_score}, "
+            f"took {elapsed:.2f}s, notes={notes}"
+        )
+
+    except Exception as e:
+        logger.error(f"Daily opportunities scan job failed: {str(e)}", exc_info=True)
+
+
 def register_all_jobs(scheduler):
     """注册所有定时任务到调度器
     
@@ -340,6 +372,16 @@ def register_all_jobs(scheduler):
         name='清理旧数据',
         hour=3,
         minute=0
+    )
+
+    # 任务7: 潜在机会扫描 - 每天北京时间20:30
+    add_job(
+        func=scan_daily_opportunities_job,
+        trigger='cron',
+        id='scan_daily_opportunities_tech',
+        name='每日机会扫描-科技股(20:30)',
+        hour=20,
+        minute=30
     )
     
     logger.info("All scheduled jobs registered successfully")

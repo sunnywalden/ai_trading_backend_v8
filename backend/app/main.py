@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Depends, Body, Query
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional
+from typing import Optional, AsyncGenerator
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from contextlib import asynccontextmanager
 
@@ -15,6 +15,7 @@ from app.schemas.ai_advice import AiAdviceRequest, AiAdviceResponse
 from app.services.ai_advice_service import AiAdviceService
 from app.services.behavior_scoring_service import BehaviorScoringService
 from app.routers import position_macro
+from app.routers import opportunities
 from app.jobs.scheduler import init_scheduler, start_scheduler, shutdown_scheduler
 from app.jobs.data_refresh_jobs import register_all_jobs
 
@@ -31,7 +32,7 @@ async def lifespan(app: FastAPI):
     scheduler = init_scheduler()
     register_all_jobs(scheduler)
     start_scheduler()
-    print("✓ Scheduler started with 6 periodic tasks")
+    print("✓ Scheduler started with periodic tasks")
     
     yield
     
@@ -53,9 +54,10 @@ app.add_middleware(
 
 # 注册路由
 app.include_router(position_macro.router, prefix="/api/v1", tags=["持仓评估与宏观风险"])
+app.include_router(opportunities.router, prefix="/api/v1", tags=["潜在机会"])
 
 
-async def get_session() -> AsyncSession:
+async def get_session() -> AsyncGenerator[AsyncSession, None]:
     async with SessionLocal() as session:
         yield session
 

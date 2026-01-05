@@ -13,6 +13,8 @@ from app.models.macro_risk import MacroRiskScore, MacroIndicator, GeopoliticalEv
 from app.models.technical_indicator import TechnicalIndicator
 from app.models.fundamental_data import FundamentalData
 from app.models.position_score import PositionScore
+from app.models.opportunity_scan import OpportunityScanRun, OpportunityScanItem
+from app.models.symbol_profile_cache import SymbolProfileCache
 
 DATABASE_URL = "sqlite+aiosqlite:///./demo.db"
 

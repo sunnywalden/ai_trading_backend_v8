@@ -1,0 +1,174 @@
+"""潜在机会模块 API 路由"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+from typing import AsyncGenerator
+
+from app.schemas.opportunities import (
+    OpportunityLatestResponse,
+    OpportunityRunsResponse,
+    OpportunityScanRequest,
+    OpportunityScanResponse,
+    OpportunityRunView,
+    OpportunityRunSummaryView,
+    OpportunityItemView,
+    MacroRiskSnapshot,
+)
+from app.services.potential_opportunities_service import PotentialOpportunitiesService
+
+router = APIRouter()
+
+
+# 依赖项：数据库会话（延迟导入避免循环依赖）
+async def get_session() -> AsyncGenerator[AsyncSession, None]:
+    from app.main import SessionLocal
+    async with SessionLocal() as session:
+        yield session
+
+
+
+def _to_macro_snapshot(run) -> MacroRiskSnapshot:
+    return MacroRiskSnapshot(
+        overall_score=run.macro_overall_score,
+        risk_level=run.macro_risk_level,
+        risk_summary=run.macro_risk_summary,
+    )
+
+
+def _to_run_view(run) -> OpportunityRunView:
+    items = []
+    for idx, it in enumerate(run.items or [], start=1):
+        items.append(
+            OpportunityItemView(
+                rank=idx,
+                symbol=it.symbol,
+                current_price=it.current_price,
+                technical_score=it.technical_score or 0,
+                fundamental_score=it.fundamental_score or 0,
+                sentiment_score=it.sentiment_score or 0,
+                overall_score=it.overall_score or 0,
+                recommendation=it.recommendation,
+                reason=it.reason,
+            )
+        )
+
+    return OpportunityRunView(
+        run_id=run.id,
+        run_key=run.run_key,
+        status=run.status,
+        as_of=run.as_of,
+        universe_name=run.universe_name,
+        min_score=run.min_score,
+        max_results=run.max_results,
+        force_refresh=bool(run.force_refresh),
+        macro_risk=_to_macro_snapshot(run),
+        total_symbols=run.total_symbols or 0,
+        qualified_symbols=run.qualified_symbols or 0,
+        elapsed_ms=run.elapsed_ms,
+        items=items,
+    )
+
+
+def _to_run_summary(run) -> OpportunityRunSummaryView:
+    return OpportunityRunSummaryView(
+        run_id=run.id,
+        run_key=run.run_key,
+        status=run.status,
+        as_of=run.as_of,
+        universe_name=run.universe_name,
+        min_score=run.min_score,
+        max_results=run.max_results,
+        total_symbols=run.total_symbols or 0,
+        qualified_symbols=run.qualified_symbols or 0,
+        elapsed_ms=run.elapsed_ms,
+        macro_risk=_to_macro_snapshot(run),
+    )
+
+
+@router.get("/opportunities/latest", response_model=OpportunityLatestResponse)
+async def get_latest_opportunities(
+    universe_name: str = "US_LARGE_MID_TECH",
+    session: AsyncSession = Depends(get_session),
+):
+    svc = PotentialOpportunitiesService(session)
+    latest = await svc.get_latest_success_run(universe_name=universe_name)
+    if not latest:
+        return OpportunityLatestResponse(status="ok", latest=None)
+    return OpportunityLatestResponse(status="ok", latest=_to_run_view(latest))
+
+
+@router.get("/opportunities/runs", response_model=OpportunityRunsResponse)
+async def list_opportunity_runs(
+    limit: int = 20,
+    universe_name: str | None = None,
+    session: AsyncSession = Depends(get_session),
+):
+    svc = PotentialOpportunitiesService(session)
+    runs = await svc.list_runs(limit=limit, universe_name=universe_name)
+    return OpportunityRunsResponse(status="ok", runs=[_to_run_summary(r) for r in runs])
+
+
+@router.get("/opportunities/runs/{run_id}", response_model=OpportunityRunView)
+async def get_opportunity_run(
+    run_id: int,
+    session: AsyncSession = Depends(get_session),
+):
+    svc = PotentialOpportunitiesService(session)
+    run = await svc.get_run_by_id(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return _to_run_view(run)
+
+
+@router.post("/opportunities/scan", response_model=OpportunityScanResponse)
+async def scan_opportunities(
+    req: OpportunityScanRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    # 可选：更新定时任务触发时间（Linux crontab 5 段）
+    if req.schedule_cron:
+        try:
+            from app.jobs.scheduler import reschedule_job, get_job
+
+            job_id = "scan_daily_opportunities_tech"
+            reschedule_job(job_id=job_id, cron_expr=req.schedule_cron, timezone=req.schedule_timezone)
+            job = get_job(job_id)
+            next_run_time = None
+            try:
+                next_run_time = job.next_run_time.isoformat() if job and job.next_run_time else None
+            except Exception:
+                next_run_time = None
+
+            # 把调度变更写入 notes（不影响扫描主流程）
+            # 注意：notes 由 service 返回；这里先初始化一个占位，稍后 merge。
+            schedule_notes = {
+                "scheduler": {
+                    "job_id": job_id,
+                    "cron": req.schedule_cron,
+                    "timezone": req.schedule_timezone,
+                    "next_run_time": next_run_time,
+                }
+            }
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid schedule_cron: {e}")
+    else:
+        schedule_notes = None
+
+    svc = PotentialOpportunitiesService(session)
+    run, notes = await svc.scan_and_persist(
+        universe_name=req.universe_name,
+        min_score=req.min_score,
+        max_results=req.max_results,
+        force_refresh=req.force_refresh,
+    )
+    if schedule_notes:
+        if notes is None:
+            notes = {}
+        # 避免覆盖同名 key
+        if "scheduler" not in notes:
+            notes.update(schedule_notes)
+        else:
+            notes["scheduler_update"] = schedule_notes["scheduler"]
+    return OpportunityScanResponse(status="ok", run=_to_run_view(run), notes=notes)

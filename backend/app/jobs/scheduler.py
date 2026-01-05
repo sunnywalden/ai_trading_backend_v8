@@ -11,6 +11,7 @@ from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.executors.asyncio import AsyncIOExecutor
 import logging
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
@@ -168,3 +169,38 @@ def get_jobs():
         }
         for job in jobs
     ]
+
+
+def get_job(job_id: str):
+    """获取指定任务对象（不存在则返回 None）。"""
+    scheduler = get_scheduler()
+    return scheduler.get_job(job_id)
+
+
+def reschedule_job(job_id: str, cron_expr: str, timezone: str = "Asia/Shanghai"):
+    """按 Linux crontab 表达式重设指定任务的触发时间。
+
+    说明：
+    - cron_expr 必须为 5 段格式：minute hour day month day_of_week
+    - timezone 用于解释 cron_expr（默认 Asia/Shanghai）
+    """
+    scheduler = get_scheduler()
+
+    if not cron_expr or not cron_expr.strip():
+        raise ValueError("cron_expr is required")
+
+    parts = cron_expr.strip().split()
+    if len(parts) != 5:
+        raise ValueError(
+            "cron_expr must be Linux crontab 5-field format: 'min hour day month dow'"
+        )
+
+    tz = ZoneInfo(timezone)
+    trigger = CronTrigger.from_crontab(cron_expr.strip(), timezone=tz)
+
+    job = scheduler.get_job(job_id)
+    if not job:
+        raise ValueError(f"job not found: {job_id}")
+
+    scheduler.reschedule_job(job_id, trigger=trigger)
+    logger.info(f"Job rescheduled: {job_id}, cron='{cron_expr}', tz='{timezone}'")
