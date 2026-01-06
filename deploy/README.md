@@ -59,7 +59,7 @@ cp .env.example .env
 docker run --rm \
 	-p 8088:8088 \
 	--env-file ./.env \
-	ai-trading-backend:local
+	sunnywalden/ai-trading-backend:latest
 ```
 
 如使用 SQLite 且希望数据持久化，建议同时挂载 `/data` 并设置：

@@ -1,0 +1,54 @@
+version: "3.8"
+
+services:
+  backend:
+    # 默认使用你已推送的镜像；也可通过环境变量 BACKEND_IMAGE 覆盖
+    image: sunnywalden/ai-trading-backend:latest
+    container_name: ai-trading-backend
+    ports:
+      - "8088:8088"
+    # 推荐在仓库根目录创建 .env（cp .env.example .env），然后从 deploy/ 引用：
+    #   docker compose -f deploy/docker-compose.yml up -d
+    env_file:
+      - ../.env
+    environment:
+      # 容器内建议用绝对路径 SQLite，并挂载 /data 做持久化
+      - DATABASE_URL=${DATABASE_URL:-sqlite+aiosqlite:////data/demo.db}
+      # 多容器/可扩展部署时建议关闭 scheduler（避免重复跑任务）
+      - ENABLE_SCHEDULER=${ENABLE_SCHEDULER:-false}
+      # Tiger 私钥路径（如使用 Tiger）
+      - TIGER_PRIVATE_KEY_PATH=${TIGER_PRIVATE_KEY_PATH:-/keys/tiger_private_key.pem}
+    volumes:
+      # SQLite 持久化目录
+      - ../data:/data
+      # Tiger 私钥目录（可选：如果不使用 Tiger，可注释掉）
+      - ../backend/keys:/keys:ro
+    restart: unless-stopped
+    networks:
+      - ai-trading-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8088/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  frontend:
+    # 复用你现有前端 compose 的结构；可用 FRONTEND_IMAGE 覆盖
+    image: ai-trading-frontend:latest
+    container_name: ai-trading-frontend
+    ports:
+      - "8080:80"
+    environment:
+      - BACKEND_URL=http://backend:8088
+    restart: unless-stopped
+    networks:
+      - ai-trading-network
+    depends_on:
+      backend:
+        condition: service_healthy
+
+
+networks:
+  ai-trading-network:
+    driver: bridge
