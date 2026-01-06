@@ -217,8 +217,19 @@ class PositionScoringService:
             scores.append(rsi_sentiment)
         
         # MACD情绪 (正值看涨，负值看跌)
-        if technical_data.macd is not None and technical_data.macd_signal is not None:
-            macd_diff = technical_data.macd - technical_data.macd_signal
+        macd_value = None
+        macd_signal_line = None
+        if hasattr(technical_data, 'macd') and technical_data.macd is not None:
+            # TechnicalAnalysisDTO.macd 是对象（含 value/signal_line/histogram/status）
+            macd_value = technical_data.macd.value if hasattr(technical_data.macd, 'value') else technical_data.macd
+            macd_signal_line = (
+                technical_data.macd.signal_line
+                if hasattr(technical_data.macd, 'signal_line')
+                else None
+            )
+
+        if macd_value is not None and macd_signal_line is not None:
+            macd_diff = macd_value - macd_signal_line
             if macd_diff > 0:
                 macd_sentiment = min(70 + abs(macd_diff) * 100, 90)  # 看涨情绪
             else:

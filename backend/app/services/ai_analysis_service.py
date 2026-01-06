@@ -330,7 +330,9 @@ class AIAnalysisService:
         约束：不输出任何“趋势信心/可信度”数值。
         """
         prompt = self._build_daily_trend_prompt(symbol, daily_payload)
-        text = await self._call_gpt(prompt, max_tokens=350, temperature=0.5)
+        # GPT-5 系列在部分账号/路由下可能不支持自定义 temperature（仅支持默认值 1）。
+        # 为了兼容性，这里不主动降低 temperature。
+        text = await self._call_gpt(prompt, max_tokens=350, temperature=1.0)
         if text:
             return text
 
@@ -377,14 +379,18 @@ class AIAnalysisService:
                         },
                         {"role": "user", "content": prompt},
                     ],
-                    "temperature": temperature,
                     "timeout": self.timeout,
                 }
 
                 if model.startswith("gpt-5"):
                     request_kwargs["max_completion_tokens"] = max_tokens
+                    # GPT-5：某些路由只支持默认 temperature=1；非 1 的值会直接 400。
+                    # 为兼容性：temperature 不是 1 时不传该参数（让服务端使用默认值）。
+                    if temperature in (None, 1, 1.0):
+                        request_kwargs["temperature"] = 1
                 else:
                     request_kwargs["max_tokens"] = max_tokens
+                    request_kwargs["temperature"] = temperature
 
                 response = await self.client.chat.completions.create(**request_kwargs)
                 
