@@ -19,10 +19,9 @@ from app.routers import position_macro
 from app.routers import opportunities
 from app.jobs.scheduler import init_scheduler, start_scheduler, shutdown_scheduler
 from app.jobs.data_refresh_jobs import register_all_jobs
+from app.core.proxy import apply_proxy_env, ProxyConfig
 
-DATABASE_URL = "sqlite+aiosqlite:///./demo.db"
-
-engine = create_async_engine(DATABASE_URL, echo=False, future=True)
+engine = create_async_engine(settings.DATABASE_URL, echo=False, future=True)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 
@@ -30,6 +29,15 @@ SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSe
 async def lifespan(app: FastAPI):
     """应用生命周期管理：启动时初始化调度器，关闭时清理"""
     # 启动时执行
+    apply_proxy_env(
+        ProxyConfig(
+            enabled=settings.PROXY_ENABLED,
+            http_proxy=settings.HTTP_PROXY,
+            https_proxy=settings.HTTPS_PROXY,
+            no_proxy=settings.NO_PROXY,
+        )
+    )
+
     scheduler = init_scheduler()
     register_all_jobs(scheduler)
     start_scheduler()

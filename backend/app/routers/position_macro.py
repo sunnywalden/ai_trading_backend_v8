@@ -2,7 +2,6 @@
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, List
-import yfinance as yf
 from datetime import datetime, timedelta
 import asyncio
 import time
@@ -21,6 +20,7 @@ from app.services.macro_risk_scoring_service import MacroRiskScoringService
 from app.services.geopolitical_events_service import GeopoliticalEventsService
 from app.services.ai_analysis_service import AIAnalysisService
 from app.broker.factory import make_option_broker_client
+from app.providers.market_data_provider import MarketDataProvider
 
 router = APIRouter()
 
@@ -68,6 +68,7 @@ async def get_positions_assessment(
         # 批量计算评分
         scoring_service = PositionScoringService()
         scores = await scoring_service.get_all_position_scores(symbols, force_refresh=False)
+        technical_service = TechnicalAnalysisService(session)
         
         # 构建响应
         position_assessments = []
@@ -86,6 +87,13 @@ async def get_positions_assessment(
             unrealized_pnl = (position.last_price - position.avg_price) * position.quantity
             unrealized_pnl_percent = ((position.last_price - position.avg_price) / position.avg_price * 100) if position.avg_price > 0 else 0
             
+            snapshot = await technical_service.get_latest_trend_snapshot(
+                symbol,
+                account_id=account_id,
+                timeframe="1D"
+            )
+            trend_snapshot = snapshot.to_dict() if snapshot else None
+
             # 构建持仓评估数据（即使没有评分也显示基本信息）
             assessment = {
                 "symbol": symbol,
@@ -104,7 +112,8 @@ async def get_positions_assessment(
                 "recommendation": score_data.recommendation if score_data else "HOLD",
                 "target_position": score_data.target_position if score_data else 0.5,
                 "stop_loss": score_data.stop_loss if score_data else position.last_price * 0.9,
-                "take_profit": score_data.take_profit if score_data else position.last_price * 1.1
+                "take_profit": score_data.take_profit if score_data else position.last_price * 1.1,
+                "trend_snapshot": trend_snapshot
             }
             position_assessments.append(assessment)
             
@@ -159,7 +168,12 @@ async def get_technical_analysis(
     """
     try:
         service = TechnicalAnalysisService(session)
-        technical_data = await service.get_technical_analysis(symbol, force_refresh)
+        technical_data = await service.get_technical_analysis(
+            symbol,
+            timeframe=timeframe,
+            use_cache=not force_refresh,
+            account_id="DEMO"
+        )
         
         if not technical_data:
             raise HTTPException(status_code=404, detail=f"Technical data not found for {symbol}")
@@ -209,8 +223,8 @@ async def get_technical_analysis(
             bollinger_lower=technical_data.bollinger_bands.lower,
             support=technical_data.support_levels,
             resistance=technical_data.resistance_levels,
-            volume_ratio=0.0,  # TODO: 需要从technical_data计算
-            overall_score=0.0,  # TODO: 需要从technical_data计算
+            volume_ratio=technical_data.volume_ratio,
+            overall_score=float(technical_data.trend_strength),
             ai_summary=ai_summary,
             timestamp=technical_data.timestamp
         )
@@ -335,12 +349,17 @@ async def refresh_positions_assessment(
         if not symbols:
             return {"message": "No positions to refresh", "refreshed": []}
         
-        # 刷新技术面数据
+        # 刷新技术面数据（会写入日线趋势快照缓存表）
         technical_service = TechnicalAnalysisService(session)
         technical_results = {}
         for symbol in symbols:
             try:
-                data = await technical_service.get_technical_analysis(symbol, force_refresh=True)
+                data = await technical_service.get_technical_analysis(
+                    symbol,
+                    timeframe="1D",
+                    use_cache=False,
+                    account_id="DEMO"
+                )
                 technical_results[symbol] = data is not None
             except Exception as e:
                 print(f"Error refreshing technical for {symbol}: {e}")
@@ -353,19 +372,14 @@ async def refresh_positions_assessment(
         # 刷新综合评分
         scoring_service = PositionScoringService()
         score_results = {}
+        market_provider = MarketDataProvider()
         for symbol in symbols:
             try:
-                # 获取当前价格
-                ticker = yf.Ticker(symbol)
-                hist = ticker.history(period="1d")
-                if not hist.empty:
-                    current_price = hist['Close'].iloc[-1]
-                    score = await scoring_service.calculate_position_score(
-                        symbol, current_price, force_refresh=True
-                    )
-                    score_results[symbol] = score is not None
-                else:
-                    score_results[symbol] = False
+                current_price = await market_provider.get_current_price(symbol)
+                score = await scoring_service.calculate_position_score(
+                    symbol, current_price, force_refresh=True
+                )
+                score_results[symbol] = score is not None
             except Exception as e:
                 print(f"Error refreshing score for {symbol}: {e}")
                 score_results[symbol] = False
@@ -472,8 +486,32 @@ async def get_macro_risk_overview(
             ]
         }
         
-        # 4. 跳过AI分析以提升性能（risk_summary已包含分析结果）
-        # 如需AI分析，可通过单独的异步任务或后台作业处理
+        # 4. 异步生成AI分析（带超时控制）
+        try:
+            async def generate_ai_with_timeout():
+                ai_service = AIAnalysisService()
+                macro_dict = {
+                    "overall_risk": response_data["overall_risk"],
+                    "risk_breakdown": response_data["risk_breakdown"],
+                    "alerts": alerts,
+                    "recent_events": recent_events[:5]
+                }
+                return await ai_service.generate_macro_analysis(macro_dict)
+            
+            # 15秒超时限制
+            ai_analysis = await asyncio.wait_for(
+                generate_ai_with_timeout(),
+                timeout=15.0
+            )
+            if ai_analysis:
+                response_data["ai_analysis"] = ai_analysis
+                
+        except asyncio.TimeoutError:
+            # AI分析超时，保持默认值
+            pass
+        except Exception:
+            # AI分析失败，保持默认值
+            pass
         
         # 5. 添加性能监控数据
         response_time = int((time.time() - start_time) * 1000)
@@ -482,7 +520,7 @@ async def get_macro_risk_overview(
         response_data["_meta"] = {
             "response_time_ms": response_time,
             "cache_hit": cache_hit,
-            "data_freshness_hours": round((datetime.now() - risk_score.timestamp).total_seconds() / 3600, 2)
+            "data_freshness": (datetime.now() - risk_score.timestamp).total_seconds() / 3600  # 小时
         }
         
         return response_data

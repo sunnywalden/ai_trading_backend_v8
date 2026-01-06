@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.macro_risk import MacroIndicator
 from app.core.config import settings
+from app.core.proxy import apply_proxy_env, ProxyConfig
 
 
 # 延迟导入避免循环依赖
@@ -53,6 +54,15 @@ class MacroIndicatorsService:
     }
     
     def __init__(self):
+        # 让代理配置在“脚本模式/定时任务”下也生效（不依赖 FastAPI lifespan）
+        apply_proxy_env(
+            ProxyConfig(
+                enabled=settings.PROXY_ENABLED,
+                http_proxy=settings.HTTP_PROXY,
+                https_proxy=settings.HTTPS_PROXY,
+                no_proxy=settings.NO_PROXY,
+            )
+        )
         self.fred = Fred(api_key=settings.FRED_API_KEY) if settings.FRED_API_KEY else None
         self.cache_ttl_hours = settings.CACHE_TTL_MACRO_HOURS
 

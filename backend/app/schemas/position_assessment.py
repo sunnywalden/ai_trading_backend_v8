@@ -51,6 +51,7 @@ class TechnicalAnalysisDTO(BaseModel):
     trend_strength: int = Field(..., ge=0, le=100, description="趋势强度")
     description: str
     timestamp: datetime = Field(default_factory=datetime.now, description="分析时间戳")
+    volume_ratio: Optional[float] = Field(None, description="成交量与20日均量的比值")
 
     class RSI(BaseModel):
         value: float
@@ -150,6 +151,21 @@ class PositionRecommendationDTO(BaseModel):
     stop_loss: Optional[float]
     take_profit: Optional[float]
 
+class TrendSnapshotDTO(BaseModel):
+    """日线趋势快照"""
+    trend_direction: str
+    trend_strength: int
+    trend_description: str
+    bollinger_position: str
+    volume_ratio: Optional[float]
+    support_levels: List[float]
+    resistance_levels: List[float]
+    ai_summary: Optional[str]
+    rsi_value: Optional[float]
+    rsi_status: Optional[str]
+    macd_status: Optional[str]
+    timestamp: Optional[datetime]
+
 
 class RiskAlertDTO(BaseModel):
     """风险预警DTO"""
@@ -167,6 +183,8 @@ class PositionAssessmentDTO(BaseModel):
     unrealized_pnl: float
     pnl_pct: float
     weight: float
+
+    trend_snapshot: Optional[TrendSnapshotDTO]
 
     scores: PositionScoreDTO
     recommendation: PositionRecommendationDTO

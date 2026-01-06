@@ -13,6 +13,7 @@ from app.models.macro_risk import MacroRiskScore, MacroIndicator, GeopoliticalEv
 from app.models.technical_indicator import TechnicalIndicator
 from app.models.fundamental_data import FundamentalData
 from app.models.position_score import PositionScore
+from app.models.position_trend_snapshot import PositionTrendSnapshot
 from app.models.opportunity_scan import OpportunityScanRun, OpportunityScanItem
 from app.models.symbol_profile_cache import SymbolProfileCache
 
@@ -36,6 +37,7 @@ async def init_database():
     print("已创建的表：")
     print("  - symbol_behavior_stats")
     print("  - symbol_risk_profile")
+    print("  - position_trend_snapshots")
 
 
 if __name__ == "__main__":

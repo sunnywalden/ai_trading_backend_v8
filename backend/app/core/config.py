@@ -1,4 +1,5 @@
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -19,6 +20,10 @@ BASE_DIR = ENV_FILE.parent if ENV_FILE else Path(__file__).resolve().parents[3]
 
 class Settings(BaseSettings):
     APP_NAME: str = "AI Trading Risk & Auto-Hedge System"
+
+    # 数据库配置
+    # 默认使用项目根目录下的 demo.db（SQLite, async）
+    DATABASE_URL: str = "sqlite+aiosqlite:///./demo.db"
 
     # 交易模式：OFF / DRY_RUN / REAL
     TRADE_MODE: str = "DRY_RUN"
@@ -43,9 +48,20 @@ class Settings(BaseSettings):
 
     # LLM / OpenAI 配置（用于 AI 决策助手）
     OPENAI_API_KEY: str | None = None
+    # 可选：OpenAI API Base（代理/镜像/自建网关）。示例：https://your-proxy-url.com/v1
+    # 兼容文档中的 OPENAI_API_BASE 配置。
+    OPENAI_API_BASE: str | None = None
     OPENAI_MODEL: str = "gpt-4"
     OPENAI_MAX_TOKENS: int = 500
     OPENAI_TIMEOUT_SECONDS: int = 30
+
+    # ==================== 网络代理配置 ====================
+    # 通过配置管理代理开关；启用后会在应用启动时设置 HTTP(S)_PROXY/NO_PROXY 环境变量，
+    # 使 OpenAI SDK、fredapi（requests）等都能通过代理访问。
+    PROXY_ENABLED: bool = False
+    HTTP_PROXY: str | None = None
+    HTTPS_PROXY: str | None = None
+    NO_PROXY: str | None = None
 
     # FRED API 配置（宏观经济数据）
     FRED_API_KEY: str | None = None
@@ -82,6 +98,42 @@ class Settings(BaseSettings):
         if not resolved_path.is_absolute():
             resolved_path = BASE_DIR / resolved_path
         return str(resolved_path)
+
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def _resolve_database_url(cls, value: str | None) -> str:
+        """将 SQLite URL 中的相对路径稳定解析到项目根目录。
+
+        典型问题：
+        - 在仓库根目录执行 init_db.py 会创建 ./demo.db（根目录）
+        - 在 backend/ 目录启动 uvicorn 时，sqlite+aiosqlite:///./demo.db 指向 backend/demo.db
+
+        为避免“读写不同数据库文件”，这里把 sqlite URL 的相对路径部分按 BASE_DIR 解析为绝对路径。
+        """
+        if not value:
+            return "sqlite+aiosqlite:///./demo.db"
+
+        # 仅处理 sqlite URL
+        if not (value.startswith("sqlite+aiosqlite:///") or value.startswith("sqlite:///")):
+            return value
+
+        parts = urlsplit(value)
+
+        # parts.path 对于 sqlite URL 形如 '/./demo.db' 或 '/Users/.../demo.db'
+        raw_path = parts.path or ""
+        if raw_path.startswith("/"):
+            raw_path = raw_path[1:]
+
+        path_obj = Path(raw_path)
+
+        # 已是绝对路径（例如 'Users/...')：raw_path 不以 '.' 开头且在文件系统语义上是绝对路径时
+        # 但在去掉开头 '/' 后，Path 视角不再是绝对；因此用原始 parts.path 判断。
+        if parts.path.startswith("/") and not parts.path.startswith("/."):
+            return value
+
+        resolved = (BASE_DIR / path_obj).resolve()
+        new_path = "/" + str(resolved)
+        return urlunsplit((parts.scheme, parts.netloc, new_path, parts.query, parts.fragment))
 
 
 settings = Settings()

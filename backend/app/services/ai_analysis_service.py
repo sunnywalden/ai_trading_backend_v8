@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 import json
 
 from app.core.config import settings
+from app.core.proxy import apply_proxy_env, ProxyConfig
 
 logger = logging.getLogger(__name__)
 
@@ -32,13 +33,31 @@ def _get_openai_client():
     global _openai_client
     
     if _openai_client is None:
+        # 让代理配置在“脚本模式”下也生效（不依赖 FastAPI lifespan）
+        apply_proxy_env(
+            ProxyConfig(
+                enabled=settings.PROXY_ENABLED,
+                http_proxy=settings.HTTP_PROXY,
+                https_proxy=settings.HTTPS_PROXY,
+                no_proxy=settings.NO_PROXY,
+            )
+        )
+
         if not settings.OPENAI_API_KEY:
             logger.warning("OPENAI_API_KEY not configured, AI analysis will use rule-based fallback")
             return None
         
         try:
             from openai import AsyncOpenAI
-            _openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+            # 代理：统一由应用启动时设置的 HTTP(S)_PROXY/NO_PROXY 环境变量接管（httpx 默认 trust_env=True）
+            # Base URL：支持通过代理/镜像站点转发 OpenAI API
+            if settings.OPENAI_API_BASE:
+                _openai_client = AsyncOpenAI(
+                    api_key=settings.OPENAI_API_KEY,
+                    base_url=settings.OPENAI_API_BASE,
+                )
+            else:
+                _openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
             logger.info("OpenAI client initialized successfully")
         except ImportError:
             logger.error("openai package not installed, run: pip install openai")
@@ -297,6 +316,23 @@ class AIAnalysisService:
             analysis = self._rule_based_macro_analysis(macro_data)
         
         return analysis
+
+    async def generate_daily_trend_conclusion(
+        self,
+        symbol: str,
+        daily_payload: Dict[str, Any]
+    ) -> str:
+        """基于日线行情数据生成走势分析结论（华尔街交易员视角）
+
+        约束：不输出任何“趋势信心/可信度”数值。
+        """
+        prompt = self._build_daily_trend_prompt(symbol, daily_payload)
+        text = await self._call_gpt(prompt, max_tokens=350, temperature=0.5)
+        if text:
+            return text
+
+        # 回退：复用技术面规则摘要
+        return self._rule_based_technical_summary(symbol, daily_payload)
     
     async def _call_gpt(
         self,
@@ -382,6 +418,41 @@ class AIAnalysisService:
 支撑/阻力: {data.get('support_resistance', {})}
 
 请用一段话总结技术面状况，并给出明确的操作建议（持有/买入/减仓/观望）。
+"""
+
+    def _build_daily_trend_prompt(self, symbol: str, data: Dict[str, Any]) -> str:
+        """构建日线走势分析提示词（强调交易员视角与可执行结论）"""
+        trend = data.get("trend", {})
+        mom = data.get("momentum", {})
+        levels = data.get("levels", {})
+        stats = data.get("stats", {})
+        recent = data.get("recent_ohlcv", [])
+
+        # 只取最近10根用于展示，减少token
+        recent_tail = recent[-10:] if isinstance(recent, list) else []
+
+        return f"""
+你是顶级华尔街交易员（偏实战、控风险、讲条件触发），请基于【日线】数据给出 {symbol} 的短/中期走势结论。
+
+严格约束：
+1) 不要输出任何“趋势信心/可信度”数值或百分比。
+2) 用中文输出，尽量短句，像交易台晨会。
+
+输入（摘要）：
+- 时间框架: {data.get('timeframe')}
+- 趋势: direction={trend.get('trend_direction')} strength={trend.get('trend_strength')} bollinger={trend.get('bollinger_position')} volume_ratio={trend.get('volume_ratio')}
+- 动量: RSI={mom.get('rsi_value')}({mom.get('rsi_status')}) MACD_status={mom.get('macd_status')}
+- 关键位: support={levels.get('support')} resistance={levels.get('resistance')}
+- 统计: 5D回报={stats.get('return_5d')} 20D回报={stats.get('return_20d')} 20D波动={stats.get('vol_20d')}
+- 最近10根日线OHLCV(从旧到新): {json.dumps(recent_tail, ensure_ascii=False)}
+
+请输出固定结构：
+【一句话结论】
+【短期(1-2周)】方向/节奏/触发条件
+【中期(1-3个月)】核心路径与关键破位/站稳条件
+【关键价位】上方/下方最重要的2-3个价位（来自支撑阻力）
+【交易计划】如果做多/做空分别怎么做（入场条件、止损逻辑、加减仓规则）
+【风险点】2-3条（例如波动扩张、假突破、量能背离）
 """
     
     def _build_fundamental_prompt(self, symbol: str, data: Dict[str, Any]) -> str:

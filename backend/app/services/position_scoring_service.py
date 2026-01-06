@@ -78,7 +78,10 @@ class PositionScoringService:
                 technical_data = None
                 try:
                     technical_data = await technical_service.get_technical_analysis(
-                        symbol, force_refresh
+                        symbol,
+                        timeframe="1D",
+                        use_cache=not force_refresh,
+                        account_id="DEMO"
                     )
                     if technical_data:
                         # TechnicalAnalysisDTO没有overall_score，需要根据其他指标计算
@@ -425,7 +428,7 @@ class PositionScoringService:
         
         用于风险预警
         """
-        async with get_session() as session:
+        async with self._get_session() as session:
             stmt = select(PositionScore).where(
                 PositionScore.risk_level.in_([
                     RiskLevel.HIGH.value, 
@@ -443,7 +446,7 @@ class PositionScoringService:
         
         用于寻找投资机会
         """
-        async with get_session() as session:
+        async with self._get_session() as session:
             stmt = select(PositionScore).where(
                 PositionScore.overall_score >= min_score,
                 PositionScore.recommendation.in_([

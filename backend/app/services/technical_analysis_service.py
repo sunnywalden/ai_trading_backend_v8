@@ -1,10 +1,12 @@
 """技术分析服务"""
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, delete
 from datetime import datetime, date
+import json
 
 from app.models.technical_indicator import TechnicalIndicator
+from app.models.position_trend_snapshot import PositionTrendSnapshot
 from app.providers.market_data_provider import MarketDataProvider
 from app.providers.technical_calculator import TechnicalIndicatorCalculator
 from app.schemas.position_assessment import TechnicalAnalysisDTO
@@ -22,7 +24,8 @@ class TechnicalAnalysisService:
         self,
         symbol: str,
         timeframe: str = "1D",
-        use_cache: bool = True
+        use_cache: bool = True,
+        account_id: str = "DEMO"
     ) -> TechnicalAnalysisDTO:
         """获取技术分析
         
@@ -35,7 +38,7 @@ class TechnicalAnalysisService:
         if use_cache:
             cached = await self._get_cached_indicators(symbol, timeframe)
             if cached:
-                return await self._build_technical_analysis(symbol, cached)
+                return await self._build_technical_analysis(symbol, cached, timeframe, account_id)
         
         # 2. 从市场获取最新数据
         df = await self.market_provider.get_historical_data(symbol, period="1y", interval="1d")
@@ -50,7 +53,7 @@ class TechnicalAnalysisService:
         await self._save_indicators_to_cache(symbol, df, timeframe)
         
         # 5. 构建分析结果
-        return await self._build_technical_analysis(symbol, df.iloc[-1].to_dict())
+        return await self._build_technical_analysis(symbol, df.iloc[-1].to_dict(), timeframe, account_id)
     
     async def _get_cached_indicators(
         self,
@@ -128,7 +131,9 @@ class TechnicalAnalysisService:
     async def _build_technical_analysis(
         self,
         symbol: str,
-        indicators: Dict
+        indicators: Dict,
+        timeframe: str,
+        account_id: str
     ) -> TechnicalAnalysisDTO:
         """构建技术分析结果"""
         # 获取历史数据用于趋势和支撑阻力分析
@@ -157,11 +162,97 @@ class TechnicalAnalysisService:
         # 支撑阻力位
         support_levels, resistance_levels = self.calculator.identify_support_resistance(df)
         
-        # 生成AI总结
-        ai_summary = self._generate_ai_summary(
-            trend_direction, trend_strength, rsi_status, macd_signal, bb_position
-        )
+        latest_row = df.iloc[-1]
+        volume_ratio = None
+        volume_sma_20 = latest_row.get('Volume_SMA_20')
+        current_volume = latest_row.get('Volume')
+        if volume_sma_20 and volume_sma_20 > 0 and current_volume:
+            volume_ratio = float(current_volume) / float(volume_sma_20)
+
+        # 生成AI总结：优先调用OpenAI（基于日线走势/指标给出结论），失败则回退到规则摘要
+        ai_summary = None
+        try:
+            from app.services.ai_analysis_service import AIAnalysisService
+
+            # 压缩后的日线序列（避免token过大）：最近30根K线 + 关键统计
+            recent = df.tail(30).copy()
+            ohlcv = []
+            for idx, row in recent.iterrows():
+                ohlcv.append(
+                    {
+                        "date": str(getattr(idx, "date", lambda: idx)()),
+                        "open": float(row.get("Open", 0) or 0),
+                        "high": float(row.get("High", 0) or 0),
+                        "low": float(row.get("Low", 0) or 0),
+                        "close": float(row.get("Close", 0) or 0),
+                        "volume": float(row.get("Volume", 0) or 0),
+                    }
+                )
+
+            ret_5d = float(recent["Close"].pct_change(5).iloc[-1]) if "Close" in recent.columns and len(recent) > 6 else None
+            ret_20d = float(recent["Close"].pct_change(20).iloc[-1]) if "Close" in recent.columns and len(recent) > 21 else None
+            vol_20d = float(recent["Close"].pct_change().tail(20).std()) if "Close" in recent.columns and len(recent) > 21 else None
+
+            payload = {
+                "timeframe": timeframe,
+                "source": "tiger_or_cache",
+                "trend": {
+                    "trend_direction": trend_direction,
+                    "trend_strength": trend_strength,
+                    "bollinger_position": bb_position,
+                    "volume_ratio": volume_ratio,
+                },
+                "momentum": {
+                    "rsi_value": rsi_value,
+                    "rsi_status": rsi_status,
+                    "macd_status": macd_signal,
+                    "macd": float(indicators.get("MACD", 0) or 0),
+                    "macd_signal": float(indicators.get("MACD_signal", 0) or 0),
+                },
+                "levels": {
+                    "support": support_levels,
+                    "resistance": resistance_levels,
+                },
+                "stats": {
+                    "return_5d": ret_5d,
+                    "return_20d": ret_20d,
+                    "vol_20d": vol_20d,
+                },
+                "recent_ohlcv": ohlcv,
+                "instructions": {
+                    "style": "顶级华尔街交易员视角",
+                    "constraints": ["不要输出任何趋势置信度/可信度数值"],
+                },
+            }
+
+            ai_service = AIAnalysisService()
+            ai_summary = await ai_service.generate_daily_trend_conclusion(symbol, payload)
+        except Exception:
+            ai_summary = None
+
+        if not ai_summary:
+            ai_summary = self._generate_ai_summary(
+                trend_direction, trend_strength, rsi_status, macd_signal, bb_position
+            )
         
+        await self._save_trend_snapshot(
+            symbol=symbol,
+            timeframe=timeframe,
+            account_id=account_id,
+            trend_direction=trend_direction,
+            trend_strength=trend_strength,
+            trend_description=f"{trend_direction} trend with {trend_strength}% strength",
+            rsi_value=rsi_value,
+            rsi_status=rsi_status,
+            macd_status=macd_signal,
+            macd_signal=float(indicators.get('MACD', 0)),
+            bollinger_position=bb_position,
+            volume_ratio=volume_ratio,
+            support_levels=support_levels,
+            resistance_levels=resistance_levels,
+            ai_summary=ai_summary
+        )
+ 
         return TechnicalAnalysisDTO(
             trend_direction=trend_direction,
             trend_strength=trend_strength,
@@ -187,7 +278,8 @@ class TechnicalAnalysisService:
             ),
             support_levels=support_levels,
             resistance_levels=resistance_levels,
-            ai_summary=ai_summary
+            ai_summary=ai_summary,
+            volume_ratio=volume_ratio
         )
     
     def _generate_ai_summary(
@@ -219,3 +311,71 @@ class TechnicalAnalysisService:
             summary_parts.append("MACD死叉，注意风险")
         
         return "，".join(summary_parts)
+
+    async def _save_trend_snapshot(
+        self,
+        symbol: str,
+        timeframe: str,
+        account_id: str,
+        trend_direction: str,
+        trend_strength: int,
+        trend_description: str,
+        rsi_value: float,
+        rsi_status: str,
+        macd_status: str,
+        macd_signal: float,
+        bollinger_position: str,
+        volume_ratio: Optional[float],
+        support_levels: List[float],
+        resistance_levels: List[float],
+        ai_summary: str
+    ):
+        """写入日线趋势快照缓存"""
+        start_of_day = datetime.combine(date.today(), datetime.min.time())
+        await self.session.execute(
+            delete(PositionTrendSnapshot).where(
+                PositionTrendSnapshot.symbol == symbol,
+                PositionTrendSnapshot.account_id == account_id,
+                PositionTrendSnapshot.timeframe == timeframe,
+                PositionTrendSnapshot.timestamp >= start_of_day
+            )
+        )
+
+        snapshot = PositionTrendSnapshot(
+            account_id=account_id,
+            symbol=symbol,
+            timeframe=timeframe,
+            trend_direction=trend_direction,
+            trend_strength=trend_strength,
+            trend_description=trend_description,
+            rsi_value=rsi_value,
+            rsi_status=rsi_status,
+            macd_status=macd_status,
+            macd_signal=macd_signal,
+            bollinger_position=bollinger_position,
+            volume_ratio=volume_ratio,
+            support_levels=json.dumps(support_levels or []),
+            resistance_levels=json.dumps(resistance_levels or []),
+            ai_summary=ai_summary
+        )
+
+        self.session.add(snapshot)
+        await self.session.commit()
+
+    async def get_latest_trend_snapshot(
+        self,
+        symbol: str,
+        account_id: str = "DEMO",
+        timeframe: str = "1D"
+    ) -> Optional[PositionTrendSnapshot]:
+        """获取最近一次的趋势快照"""
+        today = date.today()
+        stmt = select(PositionTrendSnapshot).where(
+            PositionTrendSnapshot.symbol == symbol,
+            PositionTrendSnapshot.account_id == account_id,
+            PositionTrendSnapshot.timeframe == timeframe,
+            PositionTrendSnapshot.timestamp >= datetime.combine(today, datetime.min.time())
+        ).order_by(PositionTrendSnapshot.timestamp.desc())
+
+        result = await self.session.execute(stmt)
+        return result.scalars().first()
