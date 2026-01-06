@@ -30,6 +30,43 @@
 
 ### 1.2 本地运行
 
+### 1.2.1 使用 `.env`（推荐）
+
+本项目使用 `pydantic-settings` 读取环境变量，并会在启动时从仓库中向上查找最近的 `.env` 文件（见 `backend/app/core/config.py`）。
+
+建议做法：
+
+1) 在仓库根目录从模板生成 `.env`（不要提交到 Git）：
+
+```bash
+cp .env.example .env
+```
+
+2) 编辑 `.env`，按需填写（常见项）：
+
+- `DATABASE_URL`：本地可继续用默认 `sqlite+aiosqlite:///./demo.db`；容器内建议用绝对路径（如 `sqlite+aiosqlite:////data/demo.db`）
+- `OPENAI_API_KEY` / `OPENAI_MODEL` / `OPENAI_API_BASE`
+- Tiger：`TIGER_ID`、`TIGER_PRIVATE_KEY_PATH`、`TIGER_ACCOUNT`
+- 代理：`PROXY_ENABLED` + `HTTP_PROXY/HTTPS_PROXY/NO_PROXY`
+
+> 注意：镜像构建时不会把 `.env` 打包进镜像（仓库根目录的 `.dockerignore` 已忽略 `.env*`）。
+
+### 1.2.2 Docker 运行时注入 `.env`
+
+如果你用 Docker 在本机运行，推荐用 `--env-file` 传入 `.env`：
+
+```bash
+docker run --rm \
+	-p 8088:8088 \
+	--env-file ./.env \
+	ai-trading-backend:local
+```
+
+如使用 SQLite 且希望数据持久化，建议同时挂载 `/data` 并设置：
+
+- `.env` 中：`DATABASE_URL=sqlite+aiosqlite:////data/demo.db`
+- 运行时：`-v $(pwd)/data:/data`
+
 关键环境变量（最小集合）：
 
 - `DATABASE_URL`：建议 `sqlite+aiosqlite:////data/demo.db`
@@ -47,6 +84,8 @@
 ---
 
 ## 2) Kubernetes 部署（kubectl）
+
+> K8s 中通常不直接使用 `.env` 文件；推荐把非敏感配置放入 ConfigMap，把密钥放入 Secret。
 
 ### 2.1 准备镜像
 
@@ -66,6 +105,13 @@
 4) `deploy/k8s/secret.yaml`
 
 > 注意：`deploy/k8s/secret.yaml` 里包含占位的 `OPENAI_API_KEY`，请替换。
+
+如果你已经有一份本地 `.env`，可以把内容拆分成：
+
+- 非敏感项（例如 `DATABASE_URL`、`OPENAI_MODEL`、`ENABLE_SCHEDULER`）→ 写入 `deploy/k8s/configmap.yaml`
+- 敏感项（例如 `OPENAI_API_KEY`、`FRED_API_KEY`、`NEWS_API_KEY`、`TIGER_ID`）→ 写入 `deploy/k8s/secret.yaml`
+
+然后由 `deployment.yaml` 使用 `envFrom` 注入到容器中。
 
 ### 2.3 Tiger 私钥（可选）
 
