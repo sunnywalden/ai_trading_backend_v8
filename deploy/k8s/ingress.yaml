@@ -1,0 +1,20 @@
+# 可选：如集群有 Ingress Controller（nginx/traefik 等）再启用
+# apiVersion: networking.k8s.io/v1
+# kind: Ingress
+# metadata:
+#   name: ai-trading-backend
+#   namespace: ai-trading
+#   annotations:
+#     nginx.ingress.kubernetes.io/rewrite-target: /
+# spec:
+#   rules:
+#     - host: ai-trading.example.com
+#       http:
+#         paths:
+#           - path: /
+#             pathType: Prefix
+#             backend:
+#               service:
+#                 name: ai-trading-backend
+#                 port:
+#                   number: 80

@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-trading-backend
+  namespace: ai-trading
+spec:
+  type: ClusterIP
+  selector:
+    app: ai-trading-backend
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8088

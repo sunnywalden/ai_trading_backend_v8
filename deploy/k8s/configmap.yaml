@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ai-trading-config
+  namespace: ai-trading
+data:
+  APP_NAME: "AI Trading Backend V8"
+  TRADE_MODE: "DRY_RUN"
+
+  # 建议：容器内使用绝对路径的 SQLite，配合 volume 持久化（见 pvc.yaml/deployment.yaml）
+  DATABASE_URL: "sqlite+aiosqlite:////data/demo.db"
+
+  # Tiger
+  TIGER_ACCOUNT: "demo-account"
+  TIGER_QUOTE_MODE: "DELAYED"
+  QUOTE_DATA_WARNING: "true"
+
+  # OpenAI
+  OPENAI_MODEL: "gpt-5"
+  OPENAI_API_BASE: ""  # 例如 https://your-proxy.example.com/v1
+
+  # 代理（如不需要可保持 false）
+  PROXY_ENABLED: "false"
+  HTTP_PROXY: ""
+  HTTPS_PROXY: ""
+  NO_PROXY: "localhost,127.0.0.1"
+
+  # 调度器：K8s 多副本时建议关闭，避免重复跑任务；或保持 replicas=1
+  ENABLE_SCHEDULER: "false"

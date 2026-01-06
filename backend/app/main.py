@@ -38,16 +38,21 @@ async def lifespan(app: FastAPI):
         )
     )
 
-    scheduler = init_scheduler()
-    register_all_jobs(scheduler)
-    start_scheduler()
-    print("✓ Scheduler started with periodic tasks")
+    scheduler = None
+    if settings.ENABLE_SCHEDULER:
+        scheduler = init_scheduler()
+        register_all_jobs(scheduler)
+        start_scheduler()
+        print("✓ Scheduler started with periodic tasks")
+    else:
+        print("• Scheduler disabled (ENABLE_SCHEDULER=false)")
     
     yield
     
     # 关闭时执行
-    shutdown_scheduler(wait=True)
-    print("✓ Scheduler shut down")
+    if settings.ENABLE_SCHEDULER:
+        shutdown_scheduler(wait=True)
+        print("✓ Scheduler shut down")
 
 
 app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
