@@ -174,7 +174,9 @@ class FundamentalAnalysisService:
         ).order_by(FundamentalData.fiscal_date.desc())
         
         result = await session.execute(stmt)
-        return result.scalar_one_or_none()
+        # 这里可能命中多行（例如同一天多次写入），scalar_one_or_none 会抛 Multiple rows 错误。
+        # 由于已按日期倒序排序，取最新一行即可。
+        return result.scalars().first()
 
     async def _fetch_fundamental_from_yfinance(self, symbol: str) -> Optional[Dict[str, Any]]:
         """

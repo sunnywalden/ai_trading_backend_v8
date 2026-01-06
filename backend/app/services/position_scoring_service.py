@@ -198,8 +198,12 @@ class PositionScoringService:
         scores = []
         
         # RSI情绪 (30-70为中性)
-        if technical_data.rsi is not None:
-            rsi = technical_data.rsi
+        rsi = None
+        if hasattr(technical_data, 'rsi') and technical_data.rsi is not None:
+            # TechnicalAnalysisDTO.rsi 是一个对象（含 value/status/signal），不是数值
+            rsi = technical_data.rsi.value if hasattr(technical_data.rsi, 'value') else technical_data.rsi
+
+        if rsi is not None:
             if 40 <= rsi <= 60:
                 rsi_sentiment = 70  # 中性偏好
             elif 30 <= rsi < 40:
@@ -339,9 +343,17 @@ class PositionScoringService:
         stop_loss = current_price * (1 - stop_loss_pct)
         
         # 计算止盈位
-        # 优先使用阻力位
-        if technical_data and technical_data.resistance:
-            take_profit = technical_data.resistance
+        # 优先使用阻力位（TechnicalAnalysisDTO 里通常是 resistance_levels: List[float]）
+        take_profit = None
+        resistance_levels = None
+        if technical_data is not None:
+            if hasattr(technical_data, 'resistance_levels'):
+                resistance_levels = getattr(technical_data, 'resistance_levels')
+            elif hasattr(technical_data, 'resistance'):
+                resistance_levels = getattr(technical_data, 'resistance')
+
+        if isinstance(resistance_levels, list) and resistance_levels:
+            take_profit = float(resistance_levels[0])
         else:
             # 使用固定比例
             if risk_level == RiskLevel.LOW:
@@ -353,7 +365,7 @@ class PositionScoringService:
             
             take_profit = current_price * (1 + take_profit_pct)
         
-        return round(stop_loss, 2), round(take_profit, 2)
+        return round(stop_loss, 2), round(float(take_profit), 2)
 
     async def get_all_position_scores(
         self, 

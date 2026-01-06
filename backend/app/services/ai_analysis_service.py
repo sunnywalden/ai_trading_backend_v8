@@ -93,12 +93,15 @@ async def _get_available_models() -> List[str]:
         models_response = await client.models.list()
         
         # 过滤出聊天模型（gpt-5*, gpt-4*）
-        # 注意：基于实际API返回，gpt-3.5-turbo可能不可用
+        # 注意：OpenAI 的模型列表里可能包含同前缀但不支持 chat.completions 的模型（例如部分 *-pro-*）。
+        # 这里做一个保守过滤，避免把明显非 chat 模型加入候选。
         chat_models = []
         for model in models_response.data:
             model_id = model.id
-            if (model_id.startswith("gpt-5") or 
-                model_id.startswith("gpt-4")):
+            if (model_id.startswith("gpt-5") or model_id.startswith("gpt-4")):
+                # 经验规则：跳过明显不是 chat 的“pro”变体，避免走 /v1/chat/completions 报错
+                if "-pro-" in model_id:
+                    continue
                 chat_models.append(model_id)
         
         # 按优先级排序（gpt-5 > gpt-4-turbo > gpt-4）
@@ -363,22 +366,27 @@ class AIAnalysisService:
         # 尝试不同的模型
         for model in models:
             try:
-                response = await self.client.chat.completions.create(
-                    model=model,
-                    messages=[
+                # GPT-5 系列在 chat.completions 上不支持 max_tokens，需要改用 max_completion_tokens。
+                # 为了兼容 GPT-4 等老模型，这里按模型前缀做参数分流。
+                request_kwargs = {
+                    "model": model,
+                    "messages": [
                         {
                             "role": "system",
-                            "content": "你是一位专业的投资分析师，擅长提供简洁、准确、实用的投资建议。请用中文回答。"
+                            "content": "你是一位专业的投资分析师，擅长提供简洁、准确、实用的投资建议。请用中文回答。",
                         },
-                        {
-                            "role": "user",
-                            "content": prompt
-                        }
+                        {"role": "user", "content": prompt},
                     ],
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    timeout=self.timeout
-                )
+                    "temperature": temperature,
+                    "timeout": self.timeout,
+                }
+
+                if model.startswith("gpt-5"):
+                    request_kwargs["max_completion_tokens"] = max_tokens
+                else:
+                    request_kwargs["max_tokens"] = max_tokens
+
+                response = await self.client.chat.completions.create(**request_kwargs)
                 
                 content = response.choices[0].message.content.strip()
                 logger.info(f"GPT response generated using {model} (max_tokens={max_tokens}, timeout={self.timeout}s)")

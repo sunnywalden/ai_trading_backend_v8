@@ -168,11 +168,15 @@ async def get_technical_analysis(
     """
     try:
         service = TechnicalAnalysisService(session)
+
+        # 使用真实账户ID写入/读取趋势快照，避免与 assessment 端点（真实 account_id）不一致
+        trade_client = make_option_broker_client()
+        account_id = await trade_client.get_account_id()
         technical_data = await service.get_technical_analysis(
             symbol,
             timeframe=timeframe,
             use_cache=not force_refresh,
-            account_id="DEMO"
+            account_id=account_id
         )
         
         if not technical_data:
@@ -345,6 +349,9 @@ async def refresh_positions_assessment(
             account_id = await trade_client.get_account_id()
             positions = await trade_client.list_underlying_positions(account_id)
             symbols = [p.symbol for p in positions]
+        else:
+            trade_client = make_option_broker_client()
+            account_id = await trade_client.get_account_id()
         
         if not symbols:
             return {"message": "No positions to refresh", "refreshed": []}
@@ -358,7 +365,7 @@ async def refresh_positions_assessment(
                     symbol,
                     timeframe="1D",
                     use_cache=False,
-                    account_id="DEMO"
+                    account_id=account_id
                 )
                 technical_results[symbol] = data is not None
             except Exception as e:
