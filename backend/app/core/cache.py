@@ -45,6 +45,12 @@ class RedisCache:
             return False
         return await redis_client.delete(self._make_key(key)) > 0
 
+    async def exists(self, key: str) -> bool:
+        """检查键是否存在"""
+        if not redis_client:
+            return False
+        return await redis_client.exists(self._make_key(key)) > 0
+
     async def flush_all(self) -> bool:
         if not redis_client:
             return False
