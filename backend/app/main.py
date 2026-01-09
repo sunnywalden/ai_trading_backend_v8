@@ -18,6 +18,7 @@ from app.services.ai_advice_service import AiAdviceService
 from app.services.behavior_scoring_service import BehaviorScoringService
 from app.routers import position_macro
 from app.routers import opportunities
+from app.routers import api_monitoring
 from app.jobs.scheduler import init_scheduler, start_scheduler, shutdown_scheduler
 from app.jobs.data_refresh_jobs import register_all_jobs
 from app.core.proxy import apply_proxy_env, ProxyConfig
@@ -56,6 +57,13 @@ async def lifespan(app: FastAPI):
         await redis_client.close()
         print("✓ Redis connection closed")
 
+    # 显式释放数据库异步引擎，避免 aiomysql 在事件循环关闭时触发 __del__ 异常
+    try:
+        await engine.dispose()
+        print("✓ Database engine disposed")
+    except Exception as e:
+        print(f"⚠ Failed to dispose engine gracefully: {e}")
+
 
 app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
 
@@ -71,6 +79,7 @@ app.add_middleware(
 # 注册路由
 app.include_router(position_macro.router, prefix="/api/v1", tags=["持仓评估与宏观风险"])
 app.include_router(opportunities.router, prefix="/api/v1", tags=["潜在机会"])
+app.include_router(api_monitoring.router, prefix="/api/v1", tags=["API监控"])
 
 
 @app.get("/health")

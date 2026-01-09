@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from enum import Enum
 import re
+import time
 
 from newsapi import NewsApiClient
 from sqlalchemy import select, and_
@@ -22,6 +23,8 @@ import yfinance as yf
 
 from app.models.macro_risk import GeopoliticalEvent
 from app.core.config import settings
+from app.core.cache import cache
+from app.services.api_monitoring_service import api_monitor, APIProvider
 
 
 # 延迟导入避免循环依赖
@@ -272,7 +275,7 @@ class GeopoliticalEventsService:
 
     async def _fetch_from_news_api(self, days: int) -> List[GeopoliticalEvent]:
         """
-        从News API获取地缘政治新闻
+        从News API获取地缘政治新闻（带Redis缓存和监控）
         
         Args:
             days: 获取最近N天的新闻
@@ -280,6 +283,26 @@ class GeopoliticalEventsService:
         Returns:
             GeopoliticalEvent对象列表
         """
+        # 1. 尝试从Redis缓存获取
+        redis_key = f"news_api:geopolitical_events:{days}d"
+        cached_events = await cache.get(redis_key)
+        if cached_events:
+            print(f"[NewsAPI] Using Redis cache for {days} days events")
+            # 将缓存的字典转换回对象
+            return [self._dict_to_event(event_dict) for event_dict in cached_events]
+        
+        # 2. 检查API调用限制
+        rate_status = await api_monitor.check_rate_limit_status(APIProvider.NEWS_API)
+        if not rate_status["can_call"]:
+            print(f"[NewsAPI] Rate limit reached: {rate_status['reason']}")
+            return []
+        
+        # 3. 调用API
+        start_time = time.time()
+        success = False
+        error_msg = None
+        events = []
+        
         try:
             from_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
             
@@ -295,17 +318,32 @@ class GeopoliticalEventsService:
                 page_size=50
             )
             
-            events = []
             for article in articles.get('articles', []):
                 event = self._article_to_event(article)
                 if event:
                     events.append(event)
             
-            return events
+            # 缓存到Redis（4小时TTL）
+            events_dict = [self._event_to_dict(e) for e in events]
+            await cache.set(redis_key, events_dict, expire=self.cache_ttl_hours * 3600)
+            success = True
+            print(f"[NewsAPI] Successfully fetched {len(events)} events")
             
         except Exception as e:
+            error_msg = str(e)
             print(f"Error fetching from News API: {e}")
-            return []
+        
+        # 4. 记录API调用
+        response_time = (time.time() - start_time) * 1000
+        await api_monitor.record_api_call(
+            provider=APIProvider.NEWS_API,
+            endpoint="get_everything",
+            success=success,
+            response_time_ms=response_time,
+            error_message=error_msg
+        )
+        
+        return events
 
     def _article_to_event(self, article: Dict) -> Optional[GeopoliticalEvent]:
         """
@@ -547,3 +585,36 @@ class GeopoliticalEventsService:
         union = words1.union(words2)
         
         return len(intersection) / len(union) if union else 0.0
+    
+    def _event_to_dict(self, event: GeopoliticalEvent) -> Dict[str, Any]:
+        """将GeopoliticalEvent对象转换为字典（用于Redis缓存）"""
+        return {
+            "event_type": event.event_type,
+            "event_title": event.event_title,
+            "description": event.description,
+            "event_date": event.event_date.isoformat() if event.event_date else None,
+            "source": event.source,
+            "category": event.category,
+            "severity": event.severity,
+            "affected_regions": event.affected_regions,
+            "affected_industries": event.affected_industries,
+            "market_impact_score": event.market_impact_score,
+            "source_url": event.source_url
+        }
+    
+    def _dict_to_event(self, data: Dict[str, Any]) -> GeopoliticalEvent:
+        """将字典转换回GeopoliticalEvent对象（从Redis缓存恢复）"""
+        return GeopoliticalEvent(
+            event_type=data.get("event_type"),
+            event_title=data.get("event_title"),
+            description=data.get("description"),
+            event_date=datetime.fromisoformat(data["event_date"]) if data.get("event_date") else None,
+            source=data.get("source"),
+            category=data.get("category"),
+            severity=data.get("severity"),
+            affected_regions=data.get("affected_regions"),
+            affected_industries=data.get("affected_industries"),
+            market_impact_score=data.get("market_impact_score"),
+            source_url=data.get("source_url"),
+            created_at=datetime.now()
+        )

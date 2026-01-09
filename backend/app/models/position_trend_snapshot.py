@@ -53,6 +53,7 @@ class PositionTrendSnapshot(Base):
     def to_dict(self) -> dict:
         return {
             "symbol": self.symbol,
+            "timeframe": self.timeframe,
             "trend_direction": self.trend_direction,
             "trend_strength": self.trend_strength,
             "trend_description": self.trend_description,

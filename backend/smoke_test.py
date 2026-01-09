@@ -48,7 +48,7 @@ def print_info(msg: str):
 
 
 class SmokeTest:
-    def __init__(self, base_url: str = "http://127.0.0.1:8090"):
+    def __init__(self, base_url: str = "http://127.0.0.1:8088"):
         self.base_url = base_url
         self.client: Optional[httpx.AsyncClient] = None
         self.cache = RedisCache(redis_client)
@@ -65,6 +65,14 @@ class SmokeTest:
         """清理测试环境"""
         if self.client:
             await self.client.aclose()
+
+        # Ensure DB engine is disposed in the test process to prevent aiomysql
+        # Connection.__del__ running after the event loop is closed
+        try:
+            await engine.dispose()
+            print_info("数据库 engine 已释放 (dispose)")
+        except Exception as e:
+            print_info(f"数据库 engine 释放失败（可忽略）: {e}")
     
     async def test_health_api(self):
         """测试 1: 健康检查 API"""
@@ -316,6 +324,164 @@ class SmokeTest:
             print_error(f"调度器状态检查异常: {e}")
             return False
     
+    async def test_api_monitoring_health(self):
+        """测试 9: API监控服务健康检查"""
+        print_test("API监控服务健康检查")
+        try:
+            response = await self.client.get("/api/v1/monitoring/health")
+            if response.status_code == 200:
+                data = response.json()
+                print_success(f"API监控服务正常运行")
+                print_info(f"  - 状态: {data.get('status')}")
+                print_info(f"  - 总API数: {data.get('total_apis')}")
+                print_info(f"  - 正常: {data.get('normal')} | 警告: {data.get('warning')} | 临界: {data.get('critical')}")
+                print_info(f"  - 告警阈值: 警告 {data.get('rate_limit_thresholds', {}).get('warning')}, 临界 {data.get('rate_limit_thresholds', {}).get('critical')}")
+                return True
+            else:
+                print_error(f"API监控健康检查失败: HTTP {response.status_code}")
+                return False
+        except Exception as e:
+            print_error(f"API监控健康检查异常: {e}")
+            return False
+    
+    async def test_api_monitoring_stats(self):
+        """测试 10: API调用统计"""
+        print_test("API调用统计")
+        try:
+            response = await self.client.get("/api/v1/monitoring/stats?time_range=day")
+            if response.status_code == 200:
+                data = response.json()
+                print_success(f"获取API统计成功（{len(data)} 个提供商）")
+                
+                # 显示各API的统计信息
+                for stat in data:
+                    provider = stat.get('provider')
+                    total_calls = stat.get('total_calls', 0)
+                    success_rate = stat.get('success_rate', 0)
+                    usage_percent = stat.get('usage_percent', 0)
+                    status = stat.get('status', 'unknown')
+                    
+                    status_icon = '✓' if status == 'normal' else ('⚠' if status == 'warning' else '🚨')
+                    print_info(f"  {status_icon} {provider}:")
+                    print_info(f"    · 今日调用: {total_calls} 次")
+                    print_info(f"    · 成功率: {success_rate}%")
+                    print_info(f"    · 配额使用: {usage_percent}%")
+                    print_info(f"    · 状态: {status}")
+                
+                return True
+            else:
+                print_error(f"获取API统计失败: HTTP {response.status_code}")
+                return False
+        except Exception as e:
+            print_error(f"API统计测试异常: {e}")
+            return False
+    
+    async def test_api_monitoring_policies(self):
+        """测试 11: API Rate Limit策略"""
+        print_test("API Rate Limit策略")
+        try:
+            response = await self.client.get("/api/v1/monitoring/policies")
+            if response.status_code == 200:
+                data = response.json()
+                print_success(f"获取Rate Limit策略成功（{len(data)} 个API）")
+                
+                # 显示部分策略信息
+                for provider, policy in list(data.items())[:3]:  # 只显示前3个
+                    print_info(f"  {provider}:")
+                    daily = policy.get('daily_limit')
+                    hourly = policy.get('hourly_limit')
+                    print_info(f"    · 日限制: {daily or '无限制'}")
+                    print_info(f"    · 小时限制: {hourly or '无限制'}")
+                    print_info(f"    · 说明: {policy.get('description', 'N/A')[:60]}...")
+                
+                return True
+            else:
+                print_error(f"获取Rate Limit策略失败: HTTP {response.status_code}")
+                return False
+        except Exception as e:
+            print_error(f"Rate Limit策略测试异常: {e}")
+            return False
+    
+    async def test_api_monitoring_report(self):
+        """测试 12: API监控报告"""
+        print_test("API监控报告")
+        try:
+            response = await self.client.get("/api/v1/monitoring/report")
+            if response.status_code == 200:
+                data = response.json()
+                summary = data.get('summary', {})
+                
+                print_success(f"生成监控报告成功")
+                print_info(f"  报告时间: {data.get('generated_at')}")
+                print_info(f"  总提供商: {summary.get('total_providers')}")
+                print_info(f"  临界告警: {summary.get('critical_alerts')}")
+                print_info(f"  警告数量: {summary.get('warnings')}")
+                print_info(f"  今日错误: {summary.get('total_errors_today')}")
+                
+                # 显示告警信息
+                critical_alerts = data.get('critical_alerts', [])
+                warnings = data.get('warnings', [])
+                
+                if critical_alerts:
+                    print_info(f"  🚨 临界告警:")
+                    for alert in critical_alerts:
+                        print_info(f"    - {alert.get('provider')}: {alert.get('message')}")
+                
+                if warnings:
+                    print_info(f"  ⚠️  警告:")
+                    for warning in warnings[:2]:  # 只显示前2个
+                        print_info(f"    - {warning.get('provider')}: {warning.get('message')}")
+                
+                # 显示最近错误
+                recent_errors = data.get('recent_errors', [])
+                if recent_errors:
+                    print_info(f"  最近错误 (前2条):")
+                    for error in recent_errors[:2]:
+                        print_info(f"    - [{error.get('timestamp')}] {error.get('provider')}.{error.get('endpoint')}")
+                        print_info(f"      错误: {error.get('error', 'N/A')[:50]}...")
+                
+                return True
+            else:
+                print_error(f"生成监控报告失败: HTTP {response.status_code}")
+                return False
+        except Exception as e:
+            print_error(f"监控报告测试异常: {e}")
+            return False
+    
+    async def test_api_rate_limit_check(self):
+        """测试 13: Rate Limit状态检查"""
+        print_test("Rate Limit状态检查")
+        try:
+            # 检查几个主要API的Rate Limit状态
+            providers_to_check = ['FRED', 'NewsAPI', 'Tiger']
+            all_passed = True
+            
+            for provider in providers_to_check:
+                response = await self.client.get(f"/api/v1/monitoring/rate-limit/{provider}")
+                if response.status_code == 200:
+                    data = response.json()
+                    can_call = data.get('can_call')
+                    status = data.get('status')
+                    usage = data.get('usage_percent', 0)
+                    
+                    icon = '✓' if can_call else '✗'
+                    print_info(f"  {icon} {provider}: 可调用={can_call}, 状态={status}, 使用率={usage}%")
+                    
+                    if data.get('suggestion'):
+                        print_info(f"    建议: {data.get('suggestion')}")
+                else:
+                    print_error(f"检查 {provider} Rate Limit失败: HTTP {response.status_code}")
+                    all_passed = False
+            
+            if all_passed:
+                print_success(f"Rate Limit状态检查完成")
+                return True
+            else:
+                return False
+        except Exception as e:
+            print_error(f"Rate Limit检查测试异常: {e}")
+            return False
+    
     async def run_all_tests(self):
         """运行所有测试"""
         print(f"\n{BLUE}{'='*60}{RESET}")
@@ -342,6 +508,13 @@ class SmokeTest:
         
         # 测试 8: 调度器
         results['scheduler_info'] = await self.test_scheduler_info()
+        
+        # 测试 9-13: API监控功能
+        results['api_monitoring_health'] = await self.test_api_monitoring_health()
+        results['api_monitoring_stats'] = await self.test_api_monitoring_stats()
+        results['api_monitoring_policies'] = await self.test_api_monitoring_policies()
+        results['api_monitoring_report'] = await self.test_api_monitoring_report()
+        results['api_rate_limit_check'] = await self.test_api_rate_limit_check()
         
         # 统计结果
         print(f"\n{BLUE}{'='*60}{RESET}")

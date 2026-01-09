@@ -1,5 +1,5 @@
 from typing import List
-from datetime import datetime
+from datetime import datetime, date
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
@@ -55,37 +55,81 @@ class TigerOptionClient(OptionBrokerClient):
 
         try:
             print(f"[TigerOptionClient] Fetching underlying positions for account: {account_id}")
+            
             # 获取美股持仓
-            positions = await self._run_in_executor(
+            us_positions = await self._run_in_executor(
                 self.trade_client.get_positions,
                 sec_type=SecurityType.STK,
                 market=Market.US
             )
             
-            print(f"[TigerOptionClient] Got {len(positions) if positions else 0} underlying positions")
+            print(f"[TigerOptionClient] Got {len(us_positions) if us_positions else 0} US underlying positions")
 
-            if positions:
-                for pos in positions:
+            if us_positions:
+                for pos in us_positions:
                     if not pos.contract or not pos.contract.symbol:
+                        print(f"[TigerOptionClient] Skipping position without contract/symbol")
+                        continue
+                    
+                    symbol = pos.contract.symbol
+                    quantity = int(pos.quantity or 0)
+                    
+                    # 跳过数量为0的持仓
+                    if quantity == 0:
+                        print(f"[TigerOptionClient] Skipping {symbol} with zero quantity")
                         continue
 
+                    print(f"[TigerOptionClient] US Position: {symbol}, qty={quantity}")
+                    
                     underlying = UnderlyingPosition(
-                    symbol=pos.contract.symbol,
-                    market="US",
-                    quantity=int(pos.quantity or 0),
-                    avg_price=float(pos.average_cost or 0),
-                    last_price=float(pos.market_price or 0),
-                    currency=pos.contract.currency or "USD",
-                )
-                results.append(underlying)
+                        symbol=symbol,
+                        market="US",
+                        quantity=quantity,
+                        avg_price=float(pos.average_cost or 0),
+                        last_price=float(pos.market_price or 0),
+                        currency=pos.contract.currency or "USD",
+                    )
+                    results.append(underlying)
 
-            # 如果需要支持港股，可以再查询一次
-            # hk_positions = await self._run_in_executor(
-            #     self.trade_client.get_positions,
-            #     sec_type=SecurityType.STK,
-            #     market=Market.HK
-            # )
-            # ... 类似处理 ...
+            # 获取港股持仓
+            try:
+                hk_positions = await self._run_in_executor(
+                    self.trade_client.get_positions,
+                    sec_type=SecurityType.STK,
+                    market=Market.HK
+                )
+                
+                print(f"[TigerOptionClient] Got {len(hk_positions) if hk_positions else 0} HK underlying positions")
+                
+                if hk_positions:
+                    for pos in hk_positions:
+                        if not pos.contract or not pos.contract.symbol:
+                            print(f"[TigerOptionClient] Skipping HK position without contract/symbol")
+                            continue
+                        
+                        symbol = pos.contract.symbol
+                        quantity = int(pos.quantity or 0)
+                        
+                        # 跳过数量为0的持仓
+                        if quantity == 0:
+                            print(f"[TigerOptionClient] Skipping HK {symbol} with zero quantity")
+                            continue
+                        
+                        print(f"[TigerOptionClient] HK Position: {symbol}, qty={quantity}")
+                        
+                        underlying = UnderlyingPosition(
+                            symbol=symbol,
+                            market="HK",
+                            quantity=quantity,
+                            avg_price=float(pos.average_cost or 0),
+                            last_price=float(pos.market_price or 0),
+                            currency=pos.contract.currency or "HKD",
+                        )
+                        results.append(underlying)
+            except Exception as hk_error:
+                print(f"[TigerOptionClient] Error fetching HK positions: {hk_error}")
+            
+            print(f"[TigerOptionClient] Total positions to return: {len(results)}")
 
         except Exception as e:
             print(f"[TigerOptionClient] Error fetching underlying positions: {e}")
@@ -143,6 +187,19 @@ class TigerOptionClient(OptionBrokerClient):
                 contract_obj = pos.contract
                 symbol = contract_obj.symbol
 
+                # 解析 expiry - Tiger API 可能返回字符串或 date 对象
+                raw_expiry = getattr(contract_obj, 'expiry', None)
+                if isinstance(raw_expiry, str):
+                    try:
+                        expiry_date = datetime.strptime(raw_expiry, '%Y-%m-%d').date()
+                    except ValueError:
+                        # 如果格式不匹配，使用当前日期作为默认值
+                        expiry_date = datetime.now().date()
+                elif isinstance(raw_expiry, date):
+                    expiry_date = raw_expiry
+                else:
+                    expiry_date = datetime.now().date()
+
                 # 解析期权合约信息
                 contract = OptionContract(
                     broker_symbol=symbol,
@@ -150,7 +207,7 @@ class TigerOptionClient(OptionBrokerClient):
                     market="US",
                     right=getattr(contract_obj, 'right', 'CALL'),
                     strike=float(getattr(contract_obj, 'strike', 0)),
-                    expiry=getattr(contract_obj, 'expiry', datetime.now().date()),
+                    expiry=expiry_date,
                     multiplier=int(getattr(contract_obj, 'multiplier', 100)),
                     currency=getattr(contract_obj, 'currency', 'USD'),
                 )
