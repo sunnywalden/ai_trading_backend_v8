@@ -48,7 +48,7 @@ class Settings(BaseSettings):
         return f"sqlite+aiosqlite:///{path}"
 
     # Redis 配置
-    REDIS_HOST: str = "localhost"
+    REDIS_HOST: str = "192.168.2.233"
     REDIS_PORT: int = 6379
     REDIS_PASSWORD: str | None = None
     REDIS_DB: int = 0
