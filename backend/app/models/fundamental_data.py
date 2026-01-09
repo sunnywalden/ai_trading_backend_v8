@@ -7,9 +7,9 @@ class FundamentalData(Base):
     __tablename__ = "fundamental_data"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    symbol = Column(String, nullable=False, index=True)
+    symbol = Column(String(16), nullable=False, index=True)
     fiscal_date = Column(Date, nullable=False)
-    data_type = Column(String, default='QUARTERLY')
+    data_type = Column(String(16), default='QUARTERLY')
 
     # 估值
     market_cap = Column(BigInteger)

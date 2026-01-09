@@ -25,22 +25,22 @@ class OpportunityScanRun(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
 
     # 幂等键（例如：2026-01-05|US_LARGE_MID_TECH|min75|max3）
-    run_key = Column(String, nullable=False)
+    run_key = Column(String(255), nullable=False)
 
     # 扫描参数
     as_of = Column(DateTime, nullable=False)
-    universe_name = Column(String, nullable=False, index=True)
+    universe_name = Column(String(64), nullable=False, index=True)
     min_score = Column(Integer, nullable=False, default=75)
     max_results = Column(Integer, nullable=False, default=3)
     force_refresh = Column(Integer, nullable=False, default=0)  # 0/1
 
     # 宏观风险快照
     macro_overall_score = Column(Integer)
-    macro_risk_level = Column(String)
+    macro_risk_level = Column(String(16))
     macro_risk_summary = Column(Text)
 
     # 执行元数据
-    status = Column(String, nullable=False, default="SUCCESS")  # SUCCESS/FAILED/SKIPPED
+    status = Column(String(16), nullable=False, default="SUCCESS")  # SUCCESS/FAILED/SKIPPED
     error_message = Column(Text)
     total_symbols = Column(Integer, default=0)
     qualified_symbols = Column(Integer, default=0)
@@ -67,7 +67,7 @@ class OpportunityScanItem(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     run_id = Column(Integer, ForeignKey("opportunity_scan_runs.id", ondelete="CASCADE"), nullable=False, index=True)
 
-    symbol = Column(String, nullable=False, index=True)
+    symbol = Column(String(16), nullable=False, index=True)
 
     # 三维评分 + 综合评分
     technical_score = Column(Integer)
@@ -75,7 +75,7 @@ class OpportunityScanItem(Base):
     sentiment_score = Column(Integer)
     overall_score = Column(Integer)
 
-    recommendation = Column(String)  # BUY / STRONG_BUY 等（与 PositionScoringService 一致）
+    recommendation = Column(String(32))  # BUY / STRONG_BUY 等（与 PositionScoringService 一致）
     reason = Column(Text)  # 简要原因（JSON 或纯文本）
 
     current_price = Column(Float)

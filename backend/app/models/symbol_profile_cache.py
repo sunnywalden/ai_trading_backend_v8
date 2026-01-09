@@ -16,10 +16,10 @@ class SymbolProfileCache(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
 
-    symbol = Column(String, nullable=False)
+    symbol = Column(String(16), nullable=False)
     market_cap = Column(BigInteger)
-    sector = Column(String)
-    industry = Column(String)
+    sector = Column(String(64))
+    industry = Column(String(64))
 
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 

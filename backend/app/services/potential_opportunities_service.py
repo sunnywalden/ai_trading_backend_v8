@@ -30,6 +30,7 @@ from app.services.fundamental_analysis_service import FundamentalAnalysisService
 from app.services.macro_risk_scoring_service import MacroRiskScoringService
 from app.providers.market_data_provider import MarketDataProvider
 from app.models.symbol_profile_cache import SymbolProfileCache
+from app.core.cache import cache
 
 
 BJ_TZ = ZoneInfo("Asia/Shanghai")
@@ -59,10 +60,6 @@ _UNIVERSE_SEED_SYMBOLS: List[str] = [
     "AKAM", "FSLY", "GDDY", "SPLK", "FTNT", "CHKP", "S", "NET", "PANW",
 ]
 
-
-# 进程内缓存：减少 yfinance.info 调用次数
-_PROFILE_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
-_UNIVERSE_CACHE: Dict[str, Tuple[float, List[str]]] = {}
 
 _PROFILE_CACHE_TTL_SECONDS = 6 * 60 * 60  # 6h
 _UNIVERSE_CACHE_TTL_SECONDS = 6 * 60 * 60  # 6h
@@ -120,16 +117,15 @@ class PotentialOpportunitiesService:
 
         要求：按市值/行业筛选（中大型科技股）。
         """
-        now = time.time()
         meta: Dict[str, Any] = {}
+        redis_key = f"universe:{universe_name}"
 
-        cached = _UNIVERSE_CACHE.get(universe_name)
-        if cached and not force_refresh:
-            ts, symbols = cached
-            if now - ts < _UNIVERSE_CACHE_TTL_SECONDS:
+        if not force_refresh:
+            cached_symbols = await cache.get(redis_key)
+            if cached_symbols:
                 meta["cache_hit"] = True
                 meta["fallback_used"] = False
-                return list(symbols), meta
+                return list(cached_symbols), meta
 
         # 目前只实现 US_LARGE_MID_TECH
         seed = list(dict.fromkeys(_UNIVERSE_SEED_SYMBOLS))
@@ -142,7 +138,7 @@ class PotentialOpportunitiesService:
         else:
             meta["fallback_used"] = False
 
-        _UNIVERSE_CACHE[universe_name] = (now, symbols)
+        await cache.set(redis_key, symbols, expire=_UNIVERSE_CACHE_TTL_SECONDS)
         return list(symbols), meta
 
     async def _build_large_mid_tech_universe(self, seed_symbols: List[str]) -> List[str]:
@@ -231,21 +227,20 @@ class PotentialOpportunitiesService:
         return False
 
     async def _get_symbol_profile(self, symbol: str) -> Dict[str, Any]:
-        """获取 symbol 的 yfinance profile（带进程内缓存）。"""
-        now = time.time()
-        cached = _PROFILE_CACHE.get(symbol)
-        if cached:
-            ts, profile = cached
-            if now - ts < _PROFILE_CACHE_TTL_SECONDS:
-                return profile
+        """获取 symbol 的 yfinance profile（带 Redis 和 DB 缓存）。"""
+        # 1) 先查 Redis 缓存
+        redis_key = f"profile:{symbol}"
+        cached_profile = await cache.get(redis_key)
+        if cached_profile:
+            return cached_profile
 
-        # 1) 先查 DB 缓存（跨进程/重启可复用）
+        # 2) 再查 DB 缓存
         db_cached = await self._get_profile_from_db(symbol)
         if db_cached:
-            _PROFILE_CACHE[symbol] = (now, db_cached)
+            await cache.set(redis_key, db_cached, expire=_PROFILE_CACHE_TTL_SECONDS)
             return db_cached
 
-        # 2) 再尝试 yfinance.info（阻塞 IO；并发量由 semaphore 控制，避免触发更严重的限流。）
+        # 3) 再尝试 yfinance.info
         try:
             ticker = self._market.get_ticker(symbol)
             info = ticker.info or {}
@@ -255,11 +250,11 @@ class PotentialOpportunitiesService:
                 "industry": info.get("industry"),
             }
             await self._upsert_profile_to_db(symbol, profile)
-            _PROFILE_CACHE[symbol] = (now, profile)
+            await cache.set(redis_key, profile, expire=_PROFILE_CACHE_TTL_SECONDS)
             return profile
         except Exception:
             profile = {}
-            _PROFILE_CACHE[symbol] = (now, profile)
+            await cache.set(redis_key, profile, expire=3600)  # 错误也缓存 1h，避免持续重试
             return profile
 
     async def _get_profile_from_db(self, symbol: str) -> Dict[str, Any]:
