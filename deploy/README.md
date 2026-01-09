@@ -69,7 +69,7 @@ docker run --rm \
 
 关键环境变量（最小集合）：
 
-- `DATABASE_URL`：建议 `sqlite+aiosqlite:////data/demo.db`
+- `DATABASE_URL`：建议 `sqlite+aiosqlite:////data/demo.db`（或 MySQL URI，例如 `mysql+aiomysql://user:pwd@host:3306/dbname`）
 - `TRADE_MODE`：`DRY_RUN` / `REAL` / `OFF`
 
 可选能力：
@@ -78,8 +78,112 @@ docker run --rm \
 - OpenAI：`OPENAI_API_KEY`、`OPENAI_MODEL`、`OPENAI_API_BASE`
 - 代理：`PROXY_ENABLED` + `HTTP_PROXY/HTTPS_PROXY/NO_PROXY`
 
+---
+
+### Redis 与 MySQL（前置依赖）
+
+本项目在生产或完整部署时通常依赖 Redis（缓存、监控计数）和 MySQL（持久化）。可选使用 SQLite 作为轻量替代。
+
+- Redis envs（示例）:
+  - `REDIS_ENABLED=true`
+  - `REDIS_HOST=redis.example.local`
+  - `REDIS_PORT=6379`
+  - `REDIS_DB=0`
+  - `REDIS_PASSWORD=`（如果有）
+  - 也可使用 `REDIS_URL=redis://:password@host:6379/0`
+
+- MySQL（示例）：
+  - `DATABASE_URL=mysql+aiomysql://user:password@mysql:3306/ai_trading`
+
+> Docker Compose：项目包含 `deploy/docker-compose.yml`，适合在同一主机上快速运行 `db + redis + backend` 用于本地集成测试。
+
+---
+
+### 初始化数据库与迁移
+
+仓库提供简单的初始化脚本：
+
+- `python init_db.py`：创建并初始化必要表（调用 `engine.dispose()` 后优雅退出）
+- `python create_position_macro_tables.py`：创建特定的 schema 表（如有需要）
+
+在容器中执行这些脚本时请确保 `DATABASE_URL` 环境变量已正确注入（或在 Kubernetes 使用 Job 运行初始化）。
+
+---
+
+### API 监控（Monitoring）与健康检查
+
+系统内置 API 调用频率监控（FRED/NewsAPI/Tiger/Yahoo/OpenAI），并提供一组 REST 端点：
+
+- `GET /api/v1/monitoring/health` — 汇总健康/告警状态
+- `GET /api/v1/monitoring/stats` — 获取各 API 的调用统计（支持 `time_range=day|hour|minute`）
+- `GET /api/v1/monitoring/report` — 生成一次性监控报告（包括错误样本与策略）
+- `GET /api/v1/monitoring/rate-limit/{provider}` — 检查某个 API 的限额状态
+- `GET /api/v1/monitoring/policies` — 查看内置的 Rate Limit 策略
+
+这些端点默认随服务启用并依赖 Redis 存储采样与计数。
+
+---
+
+### 前端开发注意（代理 / CORS）
+
+- 前端开发服务器（例如 Vite）在开发时通常运行在 `http://localhost:5173`，请配置代理把 `/api` 转发到后端（示例 Vite 配置）：
+
+```js
+// vite.config.js (示例)
+export default defineConfig({
+  server: {
+    proxy: {
+      '/api': {
+        target: 'http://127.0.0.1:8088',
+        changeOrigin: true,
+        secure: false,
+      }
+    }
+  }
+})
+```
+
+- 后端已配置 CORS（开发环境允许所有来源），生产部署请务必限制 `allow_origins`。
+
+---
+
+### Smoke tests 与 CI（验证部署健康）
+
+项目包含端到端 Smoke Test 脚本：`smoke_test.py`（也存在 `scripts/test_scripts/smoke_test.py`）。建议在部署后或 CI 管道中运行：
+
+```bash
+python scripts/test_scripts/smoke_test.py
+```
+
+它会验证：健康端点、关键 API、Redis 缓存、数据库写读、调度器基本信息以及 API 监控端点（共 13 项测试）。
+
+---
+
+### 运行与监控（示例）
+
+开发（可热重载）:
+
+```bash
+# 在 backend/ 下
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8088
+```
+
+生产（建议）：
+
+- 运行 Uvicorn/ Gunicorn + Uvicorn workers
+- 端口：容器对外暴露 `8088`
+
+> 重要：确保在应用关闭阶段显式释放异步 DB engine（`await engine.dispose()`）与 Redis client（`await redis_client.close()`），以避免在事件循环关闭后出现 aiomysql 的 `Connection.__del__` 警告。
+
+---
+
 健康检查：
-- `GET /health`
+- `GET /health`（服务基础健康）
+- `GET /api/v1/monitoring/health`（监控子系统健康）
+
+---
+
+以上补充将有助于生产部署和本地调试。如需我把这些更改提交到仓库（并推送一个 commit），我可以现在提交并推送。
 
 ---
 
