@@ -4,8 +4,24 @@
 >
 > - 根级：health / ai / admin / run-auto-hedge-once
 > - `/api/v1`：positions / macro / opportunities
+>
+> 注意：本文档已包含“API 监控（Rate Limit）”部分，原文件 `docs/API_Monitoring.md` 已合并（并标记为已合并/弃用）。
 
 Base URL 以你的启动参数为准（示例：`http://localhost:8088`）。
+
+---
+
+## 目录
+
+- Health（根级）
+- AI（根级）
+- Admin（根级）
+- Positions（/api/v1）
+- Macro（/api/v1）
+- Opportunities（/api/v1）
+- **API 监控与 Rate Limit 管理**（新，来自 `API_Monitoring.md`）
+
+---
 
 ## Health（根级）
 
@@ -132,3 +148,141 @@ Base URL 以你的启动参数为准（示例：`http://localhost:8088`）。
 - 用途：触发扫描并落库；可选更新定时任务 cron
 - 请求关键字段：`universe_name/min_score/max_results/force_refresh/schedule_cron?/schedule_timezone?`
 - 响应关键字段：`{ status, run, notes? }`
+
+---
+
+## API 监控与 Rate Limit 管理（新）
+
+为确保系统稳定运行并遵守各外部API的使用限制，系统实现了完整的 API 调用监控与 Rate Limit 管理模块。
+
+### 概述
+
+系统自动跟踪并记录外部 API 的调用（按日/小时/分钟），包括成功率、错误、响应时间与端点级统计；并基于策略计算配额使用率，触发智能告警。
+
+### 覆盖的外部 API
+
+- FRED（宏观经济指标）
+- NewsAPI（地缘政治新闻）
+- Tiger（行情数据）
+- Yahoo Finance（备用行情）
+- OpenAI（AI 决策助手）
+
+### 监控指标
+
+- 调用次数（日/小时/分钟）
+- 成功/失败次数（错误详情）
+- 平均/分位响应时间（ms）
+- 端点级统计与错误样本
+
+### Rate Limit 策略（截至 2026-01-09）
+
+| API | 日限制 | 小时限制 | 分钟限制 | 备注 |
+|-----|--------:|---------:|---------:|------|
+| FRED | 120,000 | - | - | 建议控制在合理范围 |
+| News API | 100 | - | - | 免费版限制 |
+| Tiger | - | 3,600 | 60 | 约 1 请求/秒 |
+| Yahoo Finance | 2,000 | 100 | 5 | 非官方 API，避免被限 |
+| OpenAI | - | - | 3 | 取决于订阅级别 |
+
+### 智能告警
+
+- 警告阈值：达到日配额的 **70%** 则发出警告
+- 临界阈值：达到日配额的 **90%** 则标记为临界
+- 告警内容包含使用率、剩余次数、建议操作（缓降/降级/重试策略）
+
+### 缓存与采样
+
+- 外部数据通过 Redis 缓存（避免重复、降低调用）：
+  - 宏观指标：6–24 小时
+  - 地缘政治事件：4–24 小时
+  - 市场数据：5 分钟–1 小时
+- 监控计数与错误样本也保存在 Redis（短期滚动窗口）
+
+### API 端点（监控）
+
+- GET /api/v1/monitoring/stats/{provider}?time_range=day
+- GET /api/v1/monitoring/stats?time_range=day
+- GET /api/v1/monitoring/report
+- GET /api/v1/monitoring/rate-limit/{provider}
+- GET /api/v1/monitoring/policies
+- GET /api/v1/monitoring/policies/{provider}
+- GET /api/v1/monitoring/health
+
+#### 示例（部分）
+
+- 获取 NewsAPI 的限制状态：
+  GET /api/v1/monitoring/rate-limit/NewsAPI
+
+返回示例：
+
+```json
+{
+  "provider": "NewsAPI",
+  "can_call": true,
+  "status": "warning",
+  "usage_percent": 72.0,
+  "remaining": 28,
+  "reason": "",
+  "suggestion": "接近限额 (72.0%)，建议减少调用"
+}
+```
+
+### 配置（.env）
+
+确保 Redis 已配置并启用：
+
+```env
+REDIS_ENABLED=true
+REDIS_HOST=192.168.2.233
+REDIS_PORT=6379
+REDIS_DB=0
+```
+
+缓存TTL：
+
+```env
+CACHE_TTL_TECHNICAL_HOURS=1
+CACHE_TTL_FUNDAMENTAL_HOURS=24
+CACHE_TTL_MACRO_HOURS=24
+CACHE_TTL_GEOPOLITICAL_HOURS=24
+```
+
+### 故障排查要点
+
+- 若监控端点返回 404，检查 `api_monitoring` 路由是否已按 `/api/v1` 正确注册
+- 若 Redis 无法连接，检查环境变量与 `REDIS_ENABLED`
+- 当监控数据异常偏高时，可在 Redis 中查看计数键并排查上游调用方
+
+### 日志示例
+
+```
+[FRED] Using Redis cache for fed_funds_rate
+[FRED] Successfully fetched and cached cpi
+⚠️  NewsAPI 接近限额：已使用 72.00%，剩余 28 次
+🚨 NewsAPI 达到临界阈值：已使用 91.00%，剩余 9 次
+```
+
+### 最佳实践
+
+1. 定期查看 `/api/v1/monitoring/report` 并设自动报警（邮件/Slack）
+2. 根据业务峰值调整缓存 TTL，避免短平快重复调用
+3. 在关键路径加入本地队列/退避以处理瞬时突发调用
+4. 定期更新 Rate Limit 策略文档（供应商可能调整限制）
+
+---
+
+## 更新历史
+
+- **2026-01-09**: 合并 `API_Monitoring.md`（API 监控模块）到主文档；补充监控端点与操作说明
+- 其它历史记录请见各相关文件头部注释
+
+---
+
+## 相关文档
+
+- [Configuration.md](Configuration.md) - 系统配置说明
+- [Operations/Scheduler.md](Operations/Scheduler.md) - 调度器与运维
+
+---
+
+*此处展示了合并后的集中文档：API 使用说明与监控指南均在本文件中。若需对监控进行更详细的设计说明，请参见项目内服务实现 `app/services/api_monitoring_service.py`。*

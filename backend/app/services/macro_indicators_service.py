@@ -15,10 +15,13 @@ import yfinance as yf
 from fredapi import Fred
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
+import time
 
 from app.models.macro_risk import MacroIndicator
 from app.core.config import settings
 from app.core.proxy import apply_proxy_env, ProxyConfig
+from app.core.cache import cache
+from app.services.api_monitoring_service import api_monitor, APIProvider
 
 
 # 延迟导入避免循环依赖
@@ -264,7 +267,7 @@ class MacroIndicatorsService:
         lookback_days: int = 365
     ) -> Optional[Dict[str, Any]]:
         """
-        从FRED API获取单个指标
+        从FRED API获取单个指标（带Redis缓存和监控）
         
         Args:
             indicator_name: 指标名称
@@ -277,6 +280,25 @@ class MacroIndicatorsService:
         if not self.fred:
             return None
         
+        # 1. 尝试从Redis缓存获取
+        redis_key = f"fred_indicator:{indicator_name}:{series_id}"
+        cached_data = await cache.get(redis_key)
+        if cached_data:
+            print(f"[FRED] Using Redis cache for {indicator_name}")
+            return cached_data
+        
+        # 2. 检查API调用限制
+        rate_status = await api_monitor.check_rate_limit_status(APIProvider.FRED)
+        if not rate_status["can_call"]:
+            print(f"[FRED] Rate limit reached: {rate_status['reason']}")
+            return None
+        
+        # 3. 调用API
+        start_time = time.time()
+        success = False
+        error_msg = None
+        result = None
+        
         try:
             end_date = datetime.now()
             start_date = end_date - timedelta(days=lookback_days)
@@ -288,42 +310,89 @@ class MacroIndicatorsService:
             )
             
             if series.empty:
-                return None
-            
-            # 获取最新值
-            latest_value = float(series.iloc[-1])
-            latest_date = series.index[-1]
-            
-            # 计算变化
-            change_1m = self._calculate_change(series, 30)
-            change_3m = self._calculate_change(series, 90)
-            change_1y = self._calculate_change(series, 365)
-            
-            return {
-                "value": latest_value,
-                "date": latest_date,
-                "change_1m": change_1m,
-                "change_3m": change_3m,
-                "change_1y": change_1y,
-                "unit": self._get_unit(indicator_name),
-                "timestamp": datetime.now()
-            }
+                error_msg = "Empty series returned"
+            else:
+                # 获取最新值
+                latest_value = float(series.iloc[-1])
+                latest_date = series.index[-1]
+                
+                # 计算变化
+                change_1m = self._calculate_change(series, 30)
+                change_3m = self._calculate_change(series, 90)
+                change_1y = self._calculate_change(series, 365)
+                
+                result = {
+                    "value": latest_value,
+                    "date": latest_date,
+                    "change_1m": change_1m,
+                    "change_3m": change_3m,
+                    "change_1y": change_1y,
+                    "unit": self._get_unit(indicator_name),
+                    "timestamp": datetime.now()
+                }
+                
+                # 缓存到Redis（6小时TTL）
+                await cache.set(redis_key, result, expire=self.cache_ttl_hours * 3600)
+                success = True
+                print(f"[FRED] Successfully fetched and cached {indicator_name}")
             
         except Exception as e:
+            error_msg = str(e)
             print(f"Error fetching {indicator_name} from FRED: {e}")
-            return None
+        
+        # 4. 记录API调用
+        response_time = (time.time() - start_time) * 1000  # 转换为毫秒
+        await api_monitor.record_api_call(
+            provider=APIProvider.FRED,
+            endpoint=f"get_series:{series_id}",
+            success=success,
+            response_time_ms=response_time,
+            error_message=error_msg
+        )
+        
+        return result
 
     async def _fetch_vix(self) -> Optional[float]:
-        """获取VIX恐慌指数"""
+        """获取VIX恐慌指数（带Redis缓存和监控）"""
+        # 1. 尝试从Redis缓存获取
+        redis_key = "market_indicator:vix"
+        cached_vix = await cache.get(redis_key, is_json=False)
+        if cached_vix:
+            print("[VIX] Using Redis cache")
+            return float(cached_vix)
+        
+        # 2. 调用API
+        start_time = time.time()
+        success = False
+        error_msg = None
+        result = None
+        
         try:
             vix = yf.Ticker("^VIX")
             data = vix.history(period="1d")
             if not data.empty:
-                return float(data["Close"].iloc[-1])
-            return None
+                result = float(data["Close"].iloc[-1])
+                # 缓存1小时
+                await cache.set(redis_key, str(result), expire=3600, is_json=False)
+                success = True
+                print(f"[VIX] Successfully fetched: {result}")
+            else:
+                error_msg = "Empty data returned"
         except Exception as e:
+            error_msg = str(e)
             print(f"Error fetching VIX: {e}")
-            return None
+        
+        # 3. 记录API调用
+        response_time = (time.time() - start_time) * 1000
+        await api_monitor.record_api_call(
+            provider=APIProvider.YAHOO_FINANCE,
+            endpoint="get_vix",
+            success=success,
+            response_time_ms=response_time,
+            error_message=error_msg
+        )
+        
+        return result
 
     def _calculate_change(self, series, days: int) -> float:
         """计算时间段内的变化率"""

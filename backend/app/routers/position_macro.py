@@ -87,11 +87,65 @@ async def get_positions_assessment(
             unrealized_pnl = (position.last_price - position.avg_price) * position.quantity
             unrealized_pnl_percent = ((position.last_price - position.avg_price) / position.avg_price * 100) if position.avg_price > 0 else 0
             
+            # 获取趋势快照，如果没有则生成
             snapshot = await technical_service.get_latest_trend_snapshot(
                 symbol,
                 account_id=account_id,
                 timeframe="1D"
             )
+            
+            # 如果没有今日快照，尝试生成
+            if not snapshot:
+                try:
+                    await technical_service.get_technical_analysis(
+                        symbol,
+                        timeframe="1D",
+                        use_cache=False,
+                        account_id=account_id
+                    )
+                    # 重新获取快照
+                    snapshot = await technical_service.get_latest_trend_snapshot(
+                        symbol,
+                        account_id=account_id,
+                        timeframe="1D"
+                    )
+                except Exception as e:
+                    print(f"[PositionAssessment] Error generating snapshot for {symbol}: {e}")
+                    # 新股或数据源不可用时，生成默认snapshot
+                    from datetime import datetime
+                    error_str = str(e)
+                    
+                    # 根据错误类型生成不同的提示
+                    if "Rate" in error_str or "Too Many" in error_str:
+                        ai_summary = f"{symbol} 数据源暂时受限，请稍后重试。建议等待1-2分钟后刷新。"
+                        trend_desc = "数据源暂时不可用"
+                    elif "insufficient" in error_str.lower() or len(error_str) == 0:
+                        ai_summary = f"{symbol} 可能为新上市股票，历史数据不足。建议关注基本面信息和市场动态。"
+                        trend_desc = "历史数据不足（新上市股票）"
+                    else:
+                        ai_summary = f"{symbol} 技术分析暂时不可用，请稍后重试。如问题持续，请联系技术支持。"
+                        trend_desc = "数据获取异常"
+                    
+                    snapshot = type('obj', (object,), {
+                        'to_dict': lambda: {
+                            "symbol": symbol,
+                            "timeframe": "1D",
+                            "trend_direction": "INSUFFICIENT_DATA",
+                            "trend_strength": 0,
+                            "trend_description": trend_desc,
+                            "rsi_value": None,
+                            "rsi_status": "INSUFFICIENT_DATA",
+                            "macd_status": "INSUFFICIENT_DATA",
+                            "macd_signal": None,
+                            "bollinger_position": "INSUFFICIENT_DATA",
+                            "volume_ratio": None,
+                            "support_levels": [],
+                            "resistance_levels": [],
+                            "ai_summary": ai_summary,
+                            "timestamp": datetime.now().isoformat()
+                        }
+                    })()
+            
             trend_snapshot = snapshot.to_dict() if snapshot else None
 
             # 构建持仓评估数据（即使没有评分也显示基本信息）

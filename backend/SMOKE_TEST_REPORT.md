@@ -12,7 +12,7 @@
 
 ## 测试结果概览
 
-✅ **所有测试通过: 8/8 (100%)**
+✅ **所有测试通过: 13/13 (100%)**
 
 ### 测试项详情
 
@@ -107,6 +107,54 @@
   - behavior_rebuild_job: 定期重建行为统计
 - **说明**: APScheduler 正常运行，周期任务已注册
 
+#### 9. API监控服务健康检查 ✅
+- **端点**: `GET /api/v1/monitoring/health`
+- **状态**: ✓ 通过
+- **响应数据**:
+  - 状态: healthy
+  - 总API数: 5 (FRED, NewsAPI, Tiger, YahooFinance, OpenAI)
+  - 正常/警告/临界: 5/0/0
+  - 告警阈值: 警告 70%, 临界 90%
+- **说明**: API监控服务正常运行，所有外部API状态正常
+
+#### 10. API调用统计 ✅
+- **端点**: `GET /api/v1/monitoring/stats?time_range=day`
+- **状态**: ✓ 通过
+- **监控指标** (示例):
+  - FRED: 今日调用 0次, 成功率 100%, 配额使用 0%, 状态 normal
+  - NewsAPI: 今日调用 0次, 成功率 100%, 配额使用 0%, 状态 normal
+  - Tiger: 今日调用 0次, 成功率 100%, 配额使用 0%, 状态 normal
+- **说明**: 成功获取所有API提供商的调用统计，Redis计数器正常工作
+
+#### 11. API Rate Limit策略 ✅
+- **端点**: `GET /api/v1/monitoring/policies`
+- **状态**: ✓ 通过
+- **策略信息** (部分):
+  - FRED: 日限制 120,000次, 说明 "FRED API免费无限制，但建议控制在120K/天以内"
+  - NewsAPI: 日限制 100次, 说明 "News API免费版: 100请求/天"
+  - Tiger: 小时限制 3,600次, 分钟限制 60次, 说明 "Tiger API免费延迟行情，建议控制频率"
+- **说明**: 成功获取所有API的Rate Limit策略，包含文档链接和更新日期
+
+#### 12. API监控报告 ✅
+- **端点**: `GET /api/v1/monitoring/report`
+- **状态**: ✓ 通过
+- **报告内容**:
+  - 总提供商: 5
+  - 临界告警: 0
+  - 警告数量: 0
+  - 今日错误: 0
+  - 包含日/时统计、告警信息、最近错误、Rate Limit策略汇总
+- **说明**: 成功生成完整监控报告，所有数据结构正确
+
+#### 13. Rate Limit状态检查 ✅
+- **端点**: `GET /api/v1/monitoring/rate-limit/{provider}`
+- **状态**: ✓ 通过
+- **检查结果**:
+  - FRED: 可调用=true, 状态=normal, 使用率=0%
+  - NewsAPI: 可调用=true, 状态=normal, 使用率=0%
+  - Tiger: 可调用=true, 状态=normal, 使用率=0%
+- **说明**: Rate Limit检查功能正常，可在API调用前预先检查配额状态
+
 ---
 
 ## 技术架构验证
@@ -142,6 +190,15 @@
 - [x] 报复性交易识别
 - [x] 多维度行为评分
 - [x] 数据库持久化
+
+### ✅ API监控系统 (新增)
+- [x] 实时调用统计（日/时/分钟级别）
+- [x] 成功率和响应时间监控
+- [x] Rate Limit策略管理
+- [x] 智能告警（70%警告，90%临界）
+- [x] Redis计数器存储
+- [x] 错误详情追踪
+- [x] 5个外部API集成（FRED/NewsAPI/Tiger/Yahoo/OpenAI）
 
 ### ✅ 券商集成 (Tiger Broker)
 - [x] 持仓数据获取
