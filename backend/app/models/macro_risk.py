@@ -19,7 +19,7 @@ class MacroRiskScore(Base):
 
     # 综合评分
     overall_score = Column(Integer)
-    risk_level = Column(String)  # LOW/MEDIUM/HIGH/EXTREME
+    risk_level = Column(String(16))  # LOW/MEDIUM/HIGH/EXTREME
 
     # AI分析
     risk_summary = Column(Text)
@@ -36,7 +36,7 @@ class MacroIndicator(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     timestamp = Column(DateTime, default=func.now(), nullable=False)
-    indicator_type = Column(String, nullable=False)  # MONETARY/ECONOMIC/SENTIMENT
+    indicator_type = Column(String(32), nullable=False)  # MONETARY/ECONOMIC/SENTIMENT
 
     # 货币政策
     fed_rate = Column(Float)
@@ -63,16 +63,16 @@ class GeopoliticalEvent(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     event_date = Column(DateTime, nullable=False)
-    event_type = Column(String)  # TRADE_WAR/MILITARY/ELECTION/SANCTION
-    region = Column(String)
-    title = Column(String)
+    event_type = Column(String(32))  # TRADE_WAR/MILITARY/ELECTION/SANCTION
+    region = Column(String(64))
+    title = Column(String(128))
     description = Column(Text)
 
     # 影响评估
-    severity = Column(String)  # LOW/MEDIUM/HIGH/CRITICAL
+    severity = Column(String(16))  # LOW/MEDIUM/HIGH/CRITICAL
     affected_sectors = Column(Text)  # JSON array
     market_impact_score = Column(Integer)
 
     # 来源
-    news_source = Column(String)
-    news_url = Column(String)
+    news_source = Column(String(128))
+    news_url = Column(String(256))

@@ -9,22 +9,22 @@ class PositionTrendSnapshot(Base):
     __tablename__ = "position_trend_snapshots"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    account_id = Column(String, nullable=False, index=True)
-    symbol = Column(String, nullable=False, index=True)
-    timeframe = Column(String, default="1D", nullable=False)
+    account_id = Column(String(64), nullable=False, index=True)
+    symbol = Column(String(16), nullable=False, index=True)
+    timeframe = Column(String(8), default="1D", nullable=False)
     timestamp = Column(DateTime, default=func.now(), nullable=False)
 
     # 趋势评分
-    trend_direction = Column(String)
+    trend_direction = Column(String(16))
     trend_strength = Column(Integer)
-    trend_description = Column(String)
+    trend_description = Column(String(128))
 
     # 指标快照
     rsi_value = Column(Float)
-    rsi_status = Column(String)
-    macd_status = Column(String)
+    rsi_status = Column(String(16))
+    macd_status = Column(String(16))
     macd_signal = Column(Float)
-    bollinger_position = Column(String)
+    bollinger_position = Column(String(32))
     volume_ratio = Column(Float)
 
     # 支撑阻力

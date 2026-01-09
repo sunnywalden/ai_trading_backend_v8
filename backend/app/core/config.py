@@ -1,5 +1,5 @@
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit, quote_plus
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -22,8 +22,42 @@ class Settings(BaseSettings):
     APP_NAME: str = "AI Trading Risk & Auto-Hedge System"
 
     # 数据库配置
-    # 默认使用项目根目录下的 demo.db（SQLite, async）
-    DATABASE_URL: str = "sqlite+aiosqlite:///./demo.db"
+    DB_TYPE: str = "sqlite"  # sqlite / mysql
+    SQLITE_DB_PATH: str = "./demo.db"
+    MYSQL_HOST: str = "localhost"
+    MYSQL_PORT: int = 3306
+    MYSQL_USER: str = "root"
+    MYSQL_PASSWORD: str = "password"
+    MYSQL_DB: str = "ai_trading"
+
+    @property
+    def DATABASE_URL(self) -> str:
+        if self.DB_TYPE == "mysql":
+            # 去掉可能的包裹引号（single/double quote）并对用户名/密码进行 URL 编码
+            user = quote_plus(str(self.MYSQL_USER).strip("'\"")) if self.MYSQL_USER else ""
+            pwd = quote_plus(str(self.MYSQL_PASSWORD).strip("'\"")) if self.MYSQL_PASSWORD else ""
+            return f"mysql+aiomysql://{user}:{pwd}@{self.MYSQL_HOST}:{self.MYSQL_PORT}/{self.MYSQL_DB}"
+
+        # 处理 SQLite 路径解析逻辑
+        path = self.SQLITE_DB_PATH
+        if path.startswith("./"):
+            path = str((BASE_DIR / path[2:]).resolve())
+        elif not Path(path).is_absolute():
+            path = str((BASE_DIR / path).resolve())
+
+        return f"sqlite+aiosqlite:///{path}"
+
+    # Redis 配置
+    REDIS_HOST: str = "localhost"
+    REDIS_PORT: int = 6379
+    REDIS_PASSWORD: str | None = None
+    REDIS_DB: int = 0
+    REDIS_ENABLED: bool = True
+
+    @property
+    def REDIS_URL(self) -> str:
+        password_str = f":{self.REDIS_PASSWORD}@" if self.REDIS_PASSWORD else ""
+        return f"redis://{password_str}{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
 
     # 交易模式：OFF / DRY_RUN / REAL
     TRADE_MODE: str = "DRY_RUN"
@@ -98,42 +132,6 @@ class Settings(BaseSettings):
         if not resolved_path.is_absolute():
             resolved_path = BASE_DIR / resolved_path
         return str(resolved_path)
-
-    @field_validator("DATABASE_URL", mode="before")
-    @classmethod
-    def _resolve_database_url(cls, value: str | None) -> str:
-        """将 SQLite URL 中的相对路径稳定解析到项目根目录。
-
-        典型问题：
-        - 在仓库根目录执行 init_db.py 会创建 ./demo.db（根目录）
-        - 在 backend/ 目录启动 uvicorn 时，sqlite+aiosqlite:///./demo.db 指向 backend/demo.db
-
-        为避免“读写不同数据库文件”，这里把 sqlite URL 的相对路径部分按 BASE_DIR 解析为绝对路径。
-        """
-        if not value:
-            return "sqlite+aiosqlite:///./demo.db"
-
-        # 仅处理 sqlite URL
-        if not (value.startswith("sqlite+aiosqlite:///") or value.startswith("sqlite:///")):
-            return value
-
-        parts = urlsplit(value)
-
-        # parts.path 对于 sqlite URL 形如 '/./demo.db' 或 '/Users/.../demo.db'
-        raw_path = parts.path or ""
-        if raw_path.startswith("/"):
-            raw_path = raw_path[1:]
-
-        path_obj = Path(raw_path)
-
-        # 已是绝对路径（例如 'Users/...')：raw_path 不以 '.' 开头且在文件系统语义上是绝对路径时
-        # 但在去掉开头 '/' 后，Path 视角不再是绝对；因此用原始 parts.path 判断。
-        if parts.path.startswith("/") and not parts.path.startswith("/."):
-            return value
-
-        resolved = (BASE_DIR / path_obj).resolve()
-        new_path = "/" + str(resolved)
-        return urlunsplit((parts.scheme, parts.netloc, new_path, parts.query, parts.fragment))
 
 
 settings = Settings()

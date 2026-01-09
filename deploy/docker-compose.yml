@@ -1,6 +1,36 @@
 version: "3.8"
 
 services:
+  mysql:
+    image: mysql:8.0
+    container_name: ai-trading-mysql
+    environment:
+      - MYSQL_DATABASE=ai_trading
+      - MYSQL_ROOT_PASSWORD=password
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - ai-trading-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+
+  redis:
+    image: redis:alpine
+    container_name: ai-trading-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - ai-trading-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   backend:
     # 默认使用你已推送的镜像；也可通过环境变量 BACKEND_IMAGE 覆盖
     image: sunnywalden/ai-trading-backend:latest
@@ -13,19 +43,26 @@ services:
       - ../.env
     environment:
       # 容器内建议用绝对路径 SQLite，并挂载 /data 做持久化
-      - DATABASE_URL=${DATABASE_URL:-sqlite+aiosqlite:////data/demo.db}
+      - DB_TYPE=${DB_TYPE:-mysql}
+      - MYSQL_HOST=mysql
+      - REDIS_HOST=redis
       # 多容器/可扩展部署时建议关闭 scheduler（避免重复跑任务）
       - ENABLE_SCHEDULER=${ENABLE_SCHEDULER:-false}
       # Tiger 私钥路径（如使用 Tiger）
       - TIGER_PRIVATE_KEY_PATH=${TIGER_PRIVATE_KEY_PATH:-/keys/tiger_private_key.pem}
     volumes:
-      # SQLite 持久化目录
+      # 数据库/数据持久化目录
       - ../data:/data
       # Tiger 私钥目录（可选：如果不使用 Tiger，可注释掉）
       - ../backend/keys:/keys:ro
     restart: unless-stopped
     networks:
       - ai-trading-network
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8088/health"]
       interval: 30s
@@ -48,7 +85,9 @@ services:
       backend:
         condition: service_healthy
 
-
 networks:
   ai-trading-network:
     driver: bridge
+
+volumes:
+  mysql_data:

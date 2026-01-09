@@ -8,9 +8,9 @@ class TechnicalIndicator(Base):
     __tablename__ = "technical_indicators"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    symbol = Column(String, nullable=False, index=True)
+    symbol = Column(String(16), nullable=False, index=True)
     timestamp = Column(DateTime, default=func.now(), nullable=False)
-    timeframe = Column(String, default='1D')
+    timeframe = Column(String(8), default='1D')
 
     # 价格数据
     close_price = Column(Float)

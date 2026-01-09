@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 # 延迟导入避免循环依赖
 def _get_session():
-    from app.main import SessionLocal
+    from app.models.db import SessionLocal
     return SessionLocal()
 
 

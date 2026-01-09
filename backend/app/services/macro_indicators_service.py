@@ -23,7 +23,7 @@ from app.core.proxy import apply_proxy_env, ProxyConfig
 
 # 延迟导入避免循环依赖
 def _get_session():
-    from app.main import SessionLocal
+    from app.models.db import SessionLocal
     return SessionLocal()
 
 

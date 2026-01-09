@@ -27,7 +27,7 @@ router = APIRouter()
 
 # 依赖项：数据库会话（延迟导入避免循环依赖）
 async def get_session():
-    from app.main import SessionLocal
+    from app.models.db import SessionLocal
     async with SessionLocal() as session:
         yield session
 

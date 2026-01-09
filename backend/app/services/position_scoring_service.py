@@ -47,7 +47,7 @@ class PositionScoringService:
 
     def _get_session(self):
         """延迟导入session避免循环依赖"""
-        from app.main import SessionLocal
+        from app.models.db import SessionLocal
         return SessionLocal()
 
     async def calculate_position_score(

@@ -1,10 +1,11 @@
 from fastapi import FastAPI, Depends, Body, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, AsyncGenerator
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 from contextlib import asynccontextmanager
 
 from app.core.config import settings
+from app.models.db import engine, SessionLocal, get_session, redis_client
 from app.engine.auto_hedge_engine import AutoHedgeEngine
 from app.services.risk_config_service import RiskConfigService
 from app.services.symbol_risk_profile_service import SymbolRiskProfileService
@@ -20,9 +21,6 @@ from app.routers import opportunities
 from app.jobs.scheduler import init_scheduler, start_scheduler, shutdown_scheduler
 from app.jobs.data_refresh_jobs import register_all_jobs
 from app.core.proxy import apply_proxy_env, ProxyConfig
-
-engine = create_async_engine(settings.DATABASE_URL, echo=False, future=True)
-SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 
 @asynccontextmanager
@@ -53,6 +51,10 @@ async def lifespan(app: FastAPI):
     if settings.ENABLE_SCHEDULER:
         shutdown_scheduler(wait=True)
         print("✓ Scheduler shut down")
+    
+    if redis_client:
+        await redis_client.close()
+        print("✓ Redis connection closed")
 
 
 app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
@@ -69,11 +71,6 @@ app.add_middleware(
 # 注册路由
 app.include_router(position_macro.router, prefix="/api/v1", tags=["持仓评估与宏观风险"])
 app.include_router(opportunities.router, prefix="/api/v1", tags=["潜在机会"])
-
-
-async def get_session() -> AsyncGenerator[AsyncSession, None]:
-    async with SessionLocal() as session:
-        yield session
 
 
 @app.get("/health")
