@@ -103,26 +103,50 @@ class TechnicalAnalysisService:
         """保存指标到缓存"""
         latest = df.iloc[-1]
         
+        # 安全获取并转换值（处理 None/NaN）
+        def safe_float(val, default=0.0):
+            try:
+                if val is None or (hasattr(val, '__iter__') and len(str(val)) == 0):
+                    return default
+                result = float(val)
+                # 检测 NaN（numpy.nan 或 pandas NaN）
+                if result != result:  # NaN != NaN 始终为 True
+                    return default
+                return result
+            except (ValueError, TypeError):
+                return default
+        
+        def safe_int(val, default=0):
+            try:
+                if val is None:
+                    return default
+                result = float(val)  # 先转 float 以处理 NaN
+                if result != result:  # 检测 NaN
+                    return default
+                return int(result)
+            except (ValueError, TypeError):
+                return default
+        
         indicator = TechnicalIndicator(
             symbol=symbol,
             timeframe=timeframe,
-            close_price=float(latest['Close']),
-            volume=int(latest['Volume']),
-            ma_5=float(latest.get('MA_5', 0)),
-            ma_10=float(latest.get('MA_10', 0)),
-            ma_20=float(latest.get('MA_20', 0)),
-            ma_50=float(latest.get('MA_50', 0)),
-            ma_200=float(latest.get('MA_200', 0)),
-            rsi_14=float(latest.get('RSI_14', 0)),
-            macd=float(latest.get('MACD', 0)),
-            macd_signal=float(latest.get('MACD_signal', 0)),
-            macd_histogram=float(latest.get('MACD_histogram', 0)),
-            atr_14=float(latest.get('ATR_14', 0)),
-            bb_upper=float(latest.get('BB_upper', 0)),
-            bb_middle=float(latest.get('BB_middle', 0)),
-            bb_lower=float(latest.get('BB_lower', 0)),
-            volume_sma_20=int(latest.get('Volume_SMA_20', 0)),
-            obv=int(latest.get('OBV', 0)),
+            close_price=safe_float(latest.get('Close')),
+            volume=safe_int(latest.get('Volume')),
+            ma_5=safe_float(latest.get('MA_5')),
+            ma_10=safe_float(latest.get('MA_10')),
+            ma_20=safe_float(latest.get('MA_20')),
+            ma_50=safe_float(latest.get('MA_50')),
+            ma_200=safe_float(latest.get('MA_200')),
+            rsi_14=safe_float(latest.get('RSI_14')),
+            macd=safe_float(latest.get('MACD')),
+            macd_signal=safe_float(latest.get('MACD_signal')),
+            macd_histogram=safe_float(latest.get('MACD_histogram')),
+            atr_14=safe_float(latest.get('ATR_14')),
+            bb_upper=safe_float(latest.get('BB_upper')),
+            bb_middle=safe_float(latest.get('BB_middle')),
+            bb_lower=safe_float(latest.get('BB_lower')),
+            volume_sma_20=safe_int(latest.get('Volume_SMA_20')),
+            obv=safe_int(latest.get('OBV')),
         )
         
         self.session.add(indicator)
@@ -150,13 +174,22 @@ class TechnicalAnalysisService:
         # MACD分析
         macd_signal = self.calculator.identify_macd_signal(df)
         
-        # 布林带分析
-        current_price = indicators['Close']
+        # 布林带分析 - 安全获取价格
+        current_price = indicators.get('Close')
+        if current_price is None or current_price == 0:
+            # 尝试从 df 获取最后价格
+            if not df.empty and 'Close' in df.columns:
+                current_price = float(df.iloc[-1]['Close']) if df.iloc[-1].get('Close') else 0.0
+            else:
+                current_price = 0.0
+        else:
+            current_price = float(current_price)
+        
         bb_position = self.calculator.calculate_bollinger_position(
             current_price,
-            indicators.get('BB_upper', 0),
-            indicators.get('BB_middle', 0),
-            indicators.get('BB_lower', 0)
+            float(indicators.get('BB_upper') or 0),
+            float(indicators.get('BB_middle') or 0),
+            float(indicators.get('BB_lower') or 0)
         )
         
         # 支撑阻力位

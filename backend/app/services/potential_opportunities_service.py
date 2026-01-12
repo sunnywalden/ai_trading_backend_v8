@@ -441,14 +441,34 @@ class PotentialOpportunitiesService:
         run.elapsed_ms = elapsed_ms
 
         # 若存在旧 run（失败/跳过），先删除再写新（避免 unique run_key 冲突）
-        if existing is not None:
-            await self.session.delete(existing)
-            await self.session.flush()
+        try:
+            if existing is not None:
+                await self.session.delete(existing)
+                await self.session.flush()
 
-        self.session.add(run)
-        await self.session.commit()
-        await self.session.refresh(run)
-        return run, notes
+            self.session.add(run)
+            await self.session.commit()
+            await self.session.refresh(run)
+            return run, notes
+        except Exception as e:
+            # 回滚当前事务，标记 run 为 FAILED 并保存失败原因到 notes
+            await self.session.rollback()
+            if notes is None:
+                notes = {}
+            notes["error"] = str(e)
+            run.status = "FAILED"
+
+            # 尝试持久化失败的 run（若仍失败则抛出原始异常）
+            try:
+                self.session.add(run)
+                await self.session.commit()
+                await self.session.refresh(run)
+            except Exception:
+                # 无法记录失败 run，重新抛出原始异常供上层日志记录
+                raise e
+
+            # 抛出原始异常，让调用方知道发生了错误（同时我们已保存 FAILED 状态）
+            raise e
 
     async def _scan_symbols(self, symbols: List[str], min_score: int, force_refresh: bool) -> List[ScoredSymbol]:
         tasks = [self._score_one_symbol(sym, min_score=min_score, force_refresh=force_refresh) for sym in symbols]

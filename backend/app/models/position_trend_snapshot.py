@@ -22,7 +22,7 @@ class PositionTrendSnapshot(Base):
     # 指标快照
     rsi_value = Column(Float)
     rsi_status = Column(String(16))
-    macd_status = Column(String(16))
+    macd_status = Column(String(64))  # 增大长度以容纳如 BULLISH_CROSSOVER 等状态
     macd_signal = Column(Float)
     bollinger_position = Column(String(32))
     volume_ratio = Column(Float)

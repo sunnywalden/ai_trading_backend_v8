@@ -306,6 +306,34 @@ async def scan_daily_opportunities_job():
         logger.error(f"Daily opportunities scan job failed: {str(e)}", exc_info=True)
 
 
+async def manual_opportunity_scan_job(universe_name: str, min_score: int, max_results: int, force_refresh: bool):
+    """一次性手动触发的机会扫描任务（用于 API 触发的后台任务）。
+
+    参数会在 job 调度时以 positional args 传入。
+    """
+    try:
+        logger.info(f"Starting manual opportunities scan job: universe={universe_name}, min={min_score}, max_results={max_results}, force_refresh={force_refresh}")
+        start_time = datetime.now()
+
+        async with _get_session() as session:
+            svc = PotentialOpportunitiesService(session)
+            run, notes = await svc.scan_and_persist(
+                universe_name=universe_name,
+                min_score=min_score,
+                max_results=max_results,
+                force_refresh=force_refresh,
+            )
+
+        elapsed = (datetime.now() - start_time).total_seconds()
+        logger.info(
+            f"Manual opportunities scan completed: qualified={run.qualified_symbols}/{run.total_symbols}, "
+            f"macro={run.macro_risk_level}/{run.macro_overall_score}, took {elapsed:.2f}s, notes={notes}"
+        )
+
+    except Exception as e:
+        logger.error(f"Manual opportunities scan job failed: {str(e)}", exc_info=True)
+
+
 def register_all_jobs(scheduler):
     """注册所有定时任务到调度器
     

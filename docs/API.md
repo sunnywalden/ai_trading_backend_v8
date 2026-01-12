@@ -145,9 +145,11 @@ Base URL 以你的启动参数为准（示例：`http://localhost:8088`）。
 
 ### POST /api/v1/opportunities/scan
 
-- 用途：触发扫描并落库；可选更新定时任务 cron
+- 用途：触发扫描并落库（**异步返回**）。请求会立即返回一个带 `status=SCHEDULED` 的占位 run，并在后台异步执行扫描任务，实际扫描完成后会写入或替换最终的 run 记录。
 - 请求关键字段：`universe_name/min_score/max_results/force_refresh/schedule_cron?/schedule_timezone?`
-- 响应关键字段：`{ status, run, notes? }`
+- 响应关键字段：
+  - `{ status, run, notes? }`：其中 `run.status` 在接口返回时可能为 `SCHEDULED`（占位），`notes` 会包含 `scheduled_job_id` 和 `scheduled_run_id`，可用于后续查询和追踪。  
+  - 建议客户端在收到响应后轮询 `GET /api/v1/opportunities/runs` 或 `GET /api/v1/opportunities/runs/{run_id}` 来获取最终结果（`status=SUCCESS` 或 `FAILED`）。
 
 ---
 
