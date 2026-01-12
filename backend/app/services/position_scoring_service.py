@@ -429,7 +429,8 @@ class PositionScoringService:
             ).order_by(PositionScore.timestamp.desc())
             
             result = await session.execute(stmt)
-            cached_score = result.scalar_one_or_none()
+            # 使用 scalars().first() 而不是 scalar_one_or_none() 以处理可能的重复记录
+            cached_score = result.scalars().first()
             
             if cached_score:
                 # 为缓存的对象添加动态计算的属性

@@ -17,8 +17,17 @@ from app.schemas.opportunities import (
     MacroRiskSnapshot,
 )
 from app.services.potential_opportunities_service import PotentialOpportunitiesService
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+import time
+
+from app.models.opportunity_scan import OpportunityScanRun
+from app.jobs.scheduler import add_job
+from app.jobs.data_refresh_jobs import manual_opportunity_scan_job
 
 router = APIRouter()
+
+BJ_TZ = ZoneInfo("Asia/Shanghai")
 
 
 # 依赖项：数据库会话（延迟导入避免循环依赖）
@@ -157,18 +166,62 @@ async def scan_opportunities(
         schedule_notes = None
 
     svc = PotentialOpportunitiesService(session)
-    run, notes = await svc.scan_and_persist(
+
+    # 立即返回：创建一个 SCHEDULED placeholder run，调度一个一键（date）任务让调度器在后台执行真正的扫描。
+    as_of_bj = datetime.now(tz=BJ_TZ)
+    run_key = svc._build_run_key(as_of_bj, req.universe_name, req.min_score, req.max_results, req.force_refresh)
+
+    # 幂等性检查：如果已存在相同 run_key 的成功扫描，直接返回
+    from sqlalchemy import select
+    existing_stmt = select(OpportunityScanRun).where(OpportunityScanRun.run_key == run_key)
+    existing_run = (await session.execute(existing_stmt)).scalars().first()
+    
+    if existing_run and existing_run.status == "SUCCESS":
+        # 已有成功 run，直接返回（幂等）
+        notes = {"idempotent": True, "message": "Same-day scan already exists with SUCCESS status"}
+        return OpportunityScanResponse(status="ok", run=_to_run_view(existing_run), notes=notes)
+
+    # 删除已存在的 SCHEDULED/FAILED run（避免 unique constraint 冲突）
+    if existing_run:
+        await session.delete(existing_run)
+        await session.flush()
+
+    placeholder = OpportunityScanRun(
+        run_key=run_key,
+        as_of=as_of_bj,
         universe_name=req.universe_name,
         min_score=req.min_score,
         max_results=req.max_results,
-        force_refresh=req.force_refresh,
+        force_refresh=1 if req.force_refresh else 0,
+        status="SCHEDULED",
+        total_symbols=0,
+        qualified_symbols=0,
     )
+
+    # 持久化占位 run
+    session.add(placeholder)
+    await session.commit()
+    await session.refresh(placeholder)
+
+    # 调度后台一次性任务（尽量短延迟以避免阻塞当前请求）
+    job_id = f"manual_scan_{placeholder.id}_{int(time.time())}"
+    run_date = datetime.now(tz=BJ_TZ) + timedelta(seconds=1)
+
+    add_job(
+        func=manual_opportunity_scan_job,
+        trigger="date",
+        id=job_id,
+        name="手动潜在机会扫描",
+        run_date=run_date,
+        args=(req.universe_name, req.min_score, req.max_results, req.force_refresh),
+    )
+
+    # 构造返回 notes，包含调度信息及可能的 schedule 更新提示
+    notes = {"scheduled_job_id": job_id, "scheduled_run_id": placeholder.id}
     if schedule_notes:
-        if notes is None:
-            notes = {}
-        # 避免覆盖同名 key
         if "scheduler" not in notes:
             notes.update(schedule_notes)
         else:
             notes["scheduler_update"] = schedule_notes["scheduler"]
-    return OpportunityScanResponse(status="ok", run=_to_run_view(run), notes=notes)
+
+    return OpportunityScanResponse(status="ok", run=_to_run_view(placeholder), notes=notes)

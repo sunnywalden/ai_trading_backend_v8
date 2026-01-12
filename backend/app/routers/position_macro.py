@@ -82,10 +82,19 @@ async def get_positions_assessment(
             symbol = position.symbol
             score_data = scores.get(symbol)
             
+            # 安全获取价格（处理 None 情况）
+            last_price = position.last_price if position.last_price is not None else position.avg_price
+            avg_price = position.avg_price if position.avg_price is not None else 0.0
+            
+            # 如果两个价格都为 None/0，跳过该持仓（数据不完整）
+            if last_price is None or last_price == 0:
+                print(f"[PositionAssessment] Skipping {symbol}: last_price unavailable")
+                continue
+            
             # 计算市值和盈亏
-            market_value = position.quantity * position.last_price
-            unrealized_pnl = (position.last_price - position.avg_price) * position.quantity
-            unrealized_pnl_percent = ((position.last_price - position.avg_price) / position.avg_price * 100) if position.avg_price > 0 else 0
+            market_value = position.quantity * last_price
+            unrealized_pnl = (last_price - avg_price) * position.quantity
+            unrealized_pnl_percent = ((last_price - avg_price) / avg_price * 100) if avg_price > 0 else 0.0
             
             # 获取趋势快照，如果没有则生成
             snapshot = await technical_service.get_latest_trend_snapshot(
@@ -127,7 +136,7 @@ async def get_positions_assessment(
                         trend_desc = "数据获取异常"
                     
                     snapshot = type('obj', (object,), {
-                        'to_dict': lambda: {
+                        'to_dict': lambda self: {
                             "symbol": symbol,
                             "timeframe": "1D",
                             "trend_direction": "INSUFFICIENT_DATA",
@@ -152,8 +161,8 @@ async def get_positions_assessment(
             assessment = {
                 "symbol": symbol,
                 "quantity": position.quantity,
-                "avg_cost": position.avg_price,
-                "current_price": position.last_price,
+                "avg_cost": avg_price,
+                "current_price": last_price,
                 "market_value": round(market_value, 2),
                 "unrealized_pnl": round(unrealized_pnl, 2),
                 "unrealized_pnl_percent": round(unrealized_pnl_percent, 2),
@@ -165,8 +174,8 @@ async def get_positions_assessment(
                 "risk_level": score_data.risk_level if score_data else "MEDIUM",
                 "recommendation": score_data.recommendation if score_data else "HOLD",
                 "target_position": score_data.target_position if score_data else 0.5,
-                "stop_loss": score_data.stop_loss if score_data else position.last_price * 0.9,
-                "take_profit": score_data.take_profit if score_data else position.last_price * 1.1,
+                "stop_loss": score_data.stop_loss if score_data else last_price * 0.9,
+                "take_profit": score_data.take_profit if score_data else last_price * 1.1,
                 "trend_snapshot": trend_snapshot
             }
             position_assessments.append(assessment)
