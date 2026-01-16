@@ -1,11 +1,13 @@
 from fastapi import FastAPI, Depends, Body, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import ORJSONResponse
 from typing import Optional, AsyncGenerator
 from sqlalchemy.ext.asyncio import AsyncSession
 from contextlib import asynccontextmanager
 
 from app.core.config import settings
-from app.models.db import engine, SessionLocal, get_session, redis_client
+from app.models.db import engine, SessionLocal, get_session, redis_client, ensure_mysql_indexes
 from app.engine.auto_hedge_engine import AutoHedgeEngine
 from app.services.risk_config_service import RiskConfigService
 from app.services.symbol_risk_profile_service import SymbolRiskProfileService
@@ -19,9 +21,11 @@ from app.services.behavior_scoring_service import BehaviorScoringService
 from app.routers import position_macro
 from app.routers import opportunities
 from app.routers import api_monitoring
-from app.jobs.scheduler import init_scheduler, start_scheduler, shutdown_scheduler
+from app.jobs.scheduler import init_scheduler, start_scheduler, shutdown_scheduler, add_job
 from app.jobs.data_refresh_jobs import register_all_jobs
 from app.core.proxy import apply_proxy_env, ProxyConfig
+from datetime import datetime
+from app.core.cache import cache
 
 
 @asynccontextmanager
@@ -45,6 +49,14 @@ async def lifespan(app: FastAPI):
         print("✓ Scheduler started with periodic tasks")
     else:
         print("• Scheduler disabled (ENABLE_SCHEDULER=false)")
+
+    # 启动时检查/创建MySQL索引
+    try:
+        await ensure_mysql_indexes()
+        if settings.DB_TYPE == "mysql":
+            print("✓ MySQL indexes checked/ensured")
+    except Exception as e:
+        print(f"⚠ Failed to ensure MySQL indexes: {e}")
     
     yield
     
@@ -65,7 +77,7 @@ async def lifespan(app: FastAPI):
         print(f"⚠ Failed to dispose engine gracefully: {e}")
 
 
-app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
+app = FastAPI(title=settings.APP_NAME, lifespan=lifespan, default_response_class=ORJSONResponse)
 
 # 配置CORS中间件
 app.add_middleware(
@@ -75,6 +87,9 @@ app.add_middleware(
     allow_methods=["*"],  # 允许所有HTTP方法（包括OPTIONS）
     allow_headers=["*"],  # 允许所有请求头
 )
+
+# 启用GZip压缩（大响应显著减小体积）
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 # 注册路由
 app.include_router(position_macro.router, prefix="/api/v1", tags=["持仓评估与宏观风险"])
@@ -87,15 +102,19 @@ async def health():
     return {"status": "ok", "mode": settings.TRADE_MODE}
 
 
-@app.post("/run-auto-hedge-once")
+@app.post("/api/v1/run-auto-hedge-once")
 async def run_auto_hedge_once(session: AsyncSession = Depends(get_session)):
     engine = AutoHedgeEngine(session)
     await engine.run_once()
     return {"status": "ok", "detail": "auto-hedge executed (or simulated)"}
 
 
-@app.get("/ai/state", response_model=AiStateView)
-async def get_ai_state(session: AsyncSession = Depends(get_session), window_days: Optional[int] = Query(None, description="窗口期（天），可选，前端可传入以覆盖自动选择")):
+@app.get("/api/v1/ai/state", response_model=AiStateView)
+async def get_ai_state(
+    session: AsyncSession = Depends(get_session),
+    window_days: Optional[int] = Query(None, description="窗口期（天），可选，前端可传入以覆盖自动选择"),
+    force_refresh: bool = Query(False, description="是否强制刷新缓存")
+):
     """返回当前风控状态 + Greeks 敞口 + 每个标的的行为画像。"""
     print("[GET /ai/state] Starting request...")
     
@@ -103,6 +122,13 @@ async def get_ai_state(session: AsyncSession = Depends(get_session), window_days
     broker_client = make_option_broker_client()
     account_id = await broker_client.get_account_id()
     print(f"[GET /ai/state] Using account_id: {account_id}")
+
+    # 短TTL缓存（提升高频查询性能）
+    cache_key = f"ai_state:{account_id}:{window_days or 'auto'}"
+    if not force_refresh:
+        cached_state = await cache.get(cache_key)
+        if cached_state:
+            return cached_state
     
     risk = RiskConfigService(session)
     eff = await risk.get_effective_state(account_id, window_days)
@@ -190,15 +216,24 @@ async def get_ai_state(session: AsyncSession = Depends(get_session), window_days
             )
         symbol_views[sym] = bv
 
-    return AiStateView(
+    ai_state = AiStateView(
         trade_mode=eff.effective_trade_mode.value,
         limits=limits_view,
         exposure=exposure_view,
         symbols=symbol_views,
     )
 
+    # 写入缓存（30秒）
+    try:
+        payload = ai_state.model_dump() if hasattr(ai_state, "model_dump") else ai_state.dict()
+        await cache.set(cache_key, payload, expire=30)
+    except Exception:
+        pass
 
-@app.post("/ai/advice", response_model=AiAdviceResponse)
+    return ai_state
+
+
+@app.post("/api/v1/ai/advice", response_model=AiAdviceResponse)
 async def ai_advice(req: AiAdviceRequest, session: AsyncSession = Depends(get_session)):
     """AI 决策助手接口。
 
@@ -210,10 +245,11 @@ async def ai_advice(req: AiAdviceRequest, session: AsyncSession = Depends(get_se
     return await svc.get_advice(req)
 
 
-@app.post("/admin/behavior/rebuild")
+@app.post("/api/v1/admin/behavior/rebuild")
 async def rebuild_behavior_stats(
     payload: dict = Body(...),
     session: AsyncSession = Depends(get_session),
+    async_run: bool = Query(False, description="是否异步执行")
 ):
     """重计算最近 N 天的行为评分（基于老虎历史成交 + 盈亏数据）。
 
@@ -225,6 +261,30 @@ async def rebuild_behavior_stats(
     """
     account_id = payload.get("account_id") or settings.TIGER_ACCOUNT
     window_days = payload.get("window_days", 60)
+
+    async def _run_behavior_rebuild_job(run_account_id: str, run_window_days: int):
+        async with SessionLocal() as local_session:
+            svc = BehaviorScoringService(local_session)
+            await svc.run_for_account(run_account_id, run_window_days)
+
+    if async_run:
+        if not settings.ENABLE_SCHEDULER:
+            raise HTTPException(status_code=400, detail="Scheduler disabled, cannot run async job")
+        job_id = f"behavior_rebuild:{account_id}:{int(datetime.now().timestamp())}"
+        add_job(
+            _run_behavior_rebuild_job,
+            trigger="date",
+            id=job_id,
+            name="behavior_rebuild",
+            run_date=datetime.now(),
+            args=[account_id, window_days],
+        )
+        return {
+            "status": "scheduled",
+            "job_id": job_id,
+            "account_id": account_id,
+            "window_days": window_days,
+        }
 
     svc = BehaviorScoringService(session)
     metrics_map = await svc.run_for_account(account_id, window_days)
@@ -238,7 +298,7 @@ async def rebuild_behavior_stats(
     }
 
 
-@app.get("/admin/scheduler/jobs")
+@app.get("/api/v1/admin/scheduler/jobs")
 async def get_scheduled_jobs():
     """获取所有定时任务状态"""
     from app.jobs.scheduler import get_jobs
@@ -253,7 +313,7 @@ async def get_scheduled_jobs():
         return {"status": "error", "detail": str(e)}
 
 
-@app.post("/admin/scheduler/jobs/{job_id}/pause")
+@app.post("/api/v1/admin/scheduler/jobs/{job_id}/pause")
 async def pause_scheduled_job(job_id: str):
     """暂停指定的定时任务"""
     from app.jobs.scheduler import pause_job
@@ -264,7 +324,7 @@ async def pause_scheduled_job(job_id: str):
         return {"status": "error", "detail": str(e)}
 
 
-@app.post("/admin/scheduler/jobs/{job_id}/resume")
+@app.post("/api/v1/admin/scheduler/jobs/{job_id}/resume")
 async def resume_scheduled_job(job_id: str):
     """恢复指定的定时任务"""
     from app.jobs.scheduler import resume_job
@@ -275,7 +335,7 @@ async def resume_scheduled_job(job_id: str):
         return {"status": "error", "detail": str(e)}
 
 
-@app.put("/admin/scheduler/jobs/{job_id}/schedule")
+@app.put("/api/v1/admin/scheduler/jobs/{job_id}/schedule")
 async def update_job_schedule(job_id: str, payload: JobScheduleRequest):
     """按小时/分钟/时区更新定时任务的触发 cron"""
     from app.jobs.scheduler import reschedule_job, get_job, format_job

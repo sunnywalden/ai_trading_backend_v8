@@ -2,6 +2,7 @@ fastapi
 uvicorn
 pydantic
 pydantic-settings
+orjson
 sqlalchemy
 aiosqlite
 aiomysql
@@ -18,5 +19,5 @@ newsapi-python>=0.2.7
 openai>=1.12.0
 apscheduler>=3.10.4
 pandas>=2.0.0
-# Pin numpy to 2.2.4 to maintain compatibility with numba used in project
-numpy==2.2.4
+# numpy版本放宽以满足pandas-ta依赖
+numpy>=2.2.6

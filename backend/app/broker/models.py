@@ -44,3 +44,4 @@ class UnderlyingPosition:
     avg_price: float
     last_price: float
     currency: str
+    name: Optional[str] = None  # 股票名称（对于港股显示中文名）

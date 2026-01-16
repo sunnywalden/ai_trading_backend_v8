@@ -127,29 +127,66 @@ class TechnicalAnalysisService:
             except (ValueError, TypeError):
                 return default
         
-        indicator = TechnicalIndicator(
-            symbol=symbol,
-            timeframe=timeframe,
-            close_price=safe_float(latest.get('Close')),
-            volume=safe_int(latest.get('Volume')),
-            ma_5=safe_float(latest.get('MA_5')),
-            ma_10=safe_float(latest.get('MA_10')),
-            ma_20=safe_float(latest.get('MA_20')),
-            ma_50=safe_float(latest.get('MA_50')),
-            ma_200=safe_float(latest.get('MA_200')),
-            rsi_14=safe_float(latest.get('RSI_14')),
-            macd=safe_float(latest.get('MACD')),
-            macd_signal=safe_float(latest.get('MACD_signal')),
-            macd_histogram=safe_float(latest.get('MACD_histogram')),
-            atr_14=safe_float(latest.get('ATR_14')),
-            bb_upper=safe_float(latest.get('BB_upper')),
-            bb_middle=safe_float(latest.get('BB_middle')),
-            bb_lower=safe_float(latest.get('BB_lower')),
-            volume_sma_20=safe_int(latest.get('Volume_SMA_20')),
-            obv=safe_int(latest.get('OBV')),
-        )
+        # 先查询是否已存在相同的记录（按symbol+timeframe+今天的时间戳）
+        from sqlalchemy import select, and_, func as sql_func
+        from datetime import date
         
-        self.session.add(indicator)
+        stmt = select(TechnicalIndicator).where(
+            and_(
+                TechnicalIndicator.symbol == symbol,
+                TechnicalIndicator.timeframe == timeframe,
+                sql_func.date(TechnicalIndicator.timestamp) == date.today()
+            )
+        ).order_by(TechnicalIndicator.id.desc()).limit(1)
+        
+        result = await self.session.execute(stmt)
+        existing = result.scalar_one_or_none()
+        
+        if existing:
+            # 更新现有记录
+            existing.close_price = safe_float(latest.get('Close'))
+            existing.volume = safe_int(latest.get('Volume'))
+            existing.ma_5 = safe_float(latest.get('MA_5'))
+            existing.ma_10 = safe_float(latest.get('MA_10'))
+            existing.ma_20 = safe_float(latest.get('MA_20'))
+            existing.ma_50 = safe_float(latest.get('MA_50'))
+            existing.ma_200 = safe_float(latest.get('MA_200'))
+            existing.rsi_14 = safe_float(latest.get('RSI_14'))
+            existing.macd = safe_float(latest.get('MACD'))
+            existing.macd_signal = safe_float(latest.get('MACD_signal'))
+            existing.macd_histogram = safe_float(latest.get('MACD_histogram'))
+            existing.atr_14 = safe_float(latest.get('ATR_14'))
+            existing.bb_upper = safe_float(latest.get('BB_upper'))
+            existing.bb_middle = safe_float(latest.get('BB_middle'))
+            existing.bb_lower = safe_float(latest.get('BB_lower'))
+            existing.volume_sma_20 = safe_int(latest.get('Volume_SMA_20'))
+            existing.obv = safe_int(latest.get('OBV'))
+            existing.timestamp = sql_func.now()  # 更新时间戳
+        else:
+            # 插入新记录
+            indicator = TechnicalIndicator(
+                symbol=symbol,
+                timeframe=timeframe,
+                close_price=safe_float(latest.get('Close')),
+                volume=safe_int(latest.get('Volume')),
+                ma_5=safe_float(latest.get('MA_5')),
+                ma_10=safe_float(latest.get('MA_10')),
+                ma_20=safe_float(latest.get('MA_20')),
+                ma_50=safe_float(latest.get('MA_50')),
+                ma_200=safe_float(latest.get('MA_200')),
+                rsi_14=safe_float(latest.get('RSI_14')),
+                macd=safe_float(latest.get('MACD')),
+                macd_signal=safe_float(latest.get('MACD_signal')),
+                macd_histogram=safe_float(latest.get('MACD_histogram')),
+                atr_14=safe_float(latest.get('ATR_14')),
+                bb_upper=safe_float(latest.get('BB_upper')),
+                bb_middle=safe_float(latest.get('BB_middle')),
+                bb_lower=safe_float(latest.get('BB_lower')),
+                volume_sma_20=safe_int(latest.get('Volume_SMA_20')),
+                obv=safe_int(latest.get('OBV')),
+            )
+            self.session.add(indicator)
+        
         await self.session.commit()
     
     async def _build_technical_analysis(

@@ -1,12 +1,22 @@
 """持仓日线趋势快照模型"""
 import json
-from sqlalchemy import Column, Integer, String, Float, DateTime, Text
+from sqlalchemy import Column, Integer, String, Float, DateTime, Text, Index
 from sqlalchemy.sql import func
 from app.models.db import Base
 
 
 class PositionTrendSnapshot(Base):
     __tablename__ = "position_trend_snapshots"
+
+    __table_args__ = (
+        Index(
+            "ix_trend_account_symbol_timeframe_ts",
+            "account_id",
+            "symbol",
+            "timeframe",
+            "timestamp",
+        ),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     account_id = Column(String(64), nullable=False, index=True)

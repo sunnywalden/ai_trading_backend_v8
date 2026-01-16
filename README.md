@@ -145,6 +145,8 @@ cd backend
 pip install -r requirements.txt
 ```
 
+说明：已启用 `orjson` 作为 FastAPI 的高性能 JSON 序列化依赖（提升接口响应速度）。
+
 ### 配置 Tiger API（可选）
 
 如需连接真实 Tiger API，请参考 [`docs/Integrations/Tiger.md`](docs/Integrations/Tiger.md) 完成配置。
@@ -171,7 +173,7 @@ python -m app.main
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-访问 API 文档：http://localhost:8000/docs
+访问 API 文档：[http://localhost:8000/docs](http://localhost:8000/docs)
 
 ### 运行行为评分任务
 

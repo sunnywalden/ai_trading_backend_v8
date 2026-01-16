@@ -47,6 +47,7 @@ class MarketDataProvider:
         self.cache_duration = 300  # 5分钟缓存
         self._tiger_quote_client = None
         self._executor = ThreadPoolExecutor(max_workers=4)
+        self._ext_api_semaphore = asyncio.Semaphore(settings.EXTERNAL_API_CONCURRENCY)
         
         # K线数据缓存: {(symbol, period, interval): (data, timestamp)}
         self._bars_cache: Dict[tuple, tuple] = {}
@@ -77,6 +78,11 @@ class MarketDataProvider:
         if kwargs:
             return await loop.run_in_executor(self._executor, lambda: func(*args, **kwargs))
         return await loop.run_in_executor(self._executor, func, *args)
+
+    async def _run_external(self, func, *args, **kwargs):
+        """外部API调用并发控制"""
+        async with self._ext_api_semaphore:
+            return await self._run_in_executor(func, *args, **kwargs)
 
     def _period_to_limit(self, period: str) -> int:
         """将 yfinance 风格的 period 映射为 Tiger bars limit（按交易日粗略估算）"""
@@ -187,7 +193,7 @@ class MarketDataProvider:
                 await self._wait_for_rate_limit(symbol)
                 print(f"[MarketData] Attempting Tiger API for price of {symbol}")
                 
-                df = await self._run_in_executor(self._tiger_quote_client.get_stock_briefs, [symbol])
+                df = await self._run_external(self._tiger_quote_client.get_stock_briefs, [symbol])
                 if df is not None and len(df) > 0:
                     # tiger briefs: latest_price 或 close
                     row = df.iloc[0]
@@ -218,7 +224,7 @@ class MarketDataProvider:
         """获取实时报价"""
         if self._tiger_quote_client:
             try:
-                df = await self._run_in_executor(self._tiger_quote_client.get_stock_briefs, [symbol])
+                df = await self._run_external(self._tiger_quote_client.get_stock_briefs, [symbol])
                 if df is not None and len(df) > 0:
                     row = df.iloc[0]
                     return {
@@ -366,7 +372,7 @@ class MarketDataProvider:
             end_ms = int(datetime.now().timestamp() * 1000)
             limit = self._period_to_limit(period)
             
-            bars_df = await self._run_in_executor(
+            bars_df = await self._run_external(
                 self._tiger_quote_client.get_bars,
                 [symbol],
                 period=BarPeriod.DAY,
@@ -441,7 +447,7 @@ class MarketDataProvider:
                 error_msg = "yfinance not available"
                 print(f"[MarketData] yfinance not available")
             else:
-                df = await self._run_in_executor(ticker.history, period=period, interval=interval)
+                df = await self._run_external(ticker.history, period=period, interval=interval)
                 if df is not None and len(df) > 0:
                     print(f"[MarketData] Yahoo Finance success for {symbol} ({yahoo_symbol}), rows={len(df)}")
                     result = df

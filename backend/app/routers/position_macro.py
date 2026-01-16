@@ -21,6 +21,10 @@ from app.services.geopolitical_events_service import GeopoliticalEventsService
 from app.services.ai_analysis_service import AIAnalysisService
 from app.broker.factory import make_option_broker_client
 from app.providers.market_data_provider import MarketDataProvider
+from app.core.cache import cache
+from app.core.config import settings
+from app.models.db import SessionLocal
+from app.jobs.scheduler import add_job
 
 router = APIRouter()
 
@@ -35,6 +39,7 @@ async def get_session():
 @router.get("/positions/assessment", response_model=PositionsAssessmentResponse)
 async def get_positions_assessment(
     window_days: int = Query(7, description="窗口期（天）"),
+    force_refresh: bool = Query(False, description="是否强制刷新缓存与快照"),
     session: AsyncSession = Depends(get_session)
 ):
     """获取持仓评估
@@ -46,24 +51,55 @@ async def get_positions_assessment(
     - 组合总结
     """
     try:
-        # 获取当前持仓
+        # 获取当前持仓（同时获取股票和期权）
         trade_client = make_option_broker_client()
         account_id = await trade_client.get_account_id()
-        positions = await trade_client.list_underlying_positions(account_id)
+
+        # 短TTL缓存（避免高频重复计算）
+        cache_key = f"positions_assessment:{account_id}:{window_days}"
+        if not force_refresh:
+            cached_assessment = await cache.get(cache_key)
+            if cached_assessment:
+                return cached_assessment
         
-        if not positions:
+        # 获取股票持仓
+        stock_positions = await trade_client.list_underlying_positions(account_id)
+        
+        # 获取期权持仓（无期权行情权限时降级为无期权）
+        try:
+            option_positions = await trade_client.list_option_positions(account_id)
+        except Exception as e:
+            print(f"[PositionAssessment] Option positions unavailable, fallback to empty. reason={e}")
+            option_positions = []
+        
+        # 按标的分组期权持仓
+        option_by_underlying = {}
+        if option_positions:
+            for opt_pos in option_positions:
+                underlying = opt_pos.contract.underlying
+                if underlying not in option_by_underlying:
+                    option_by_underlying[underlying] = []
+                option_by_underlying[underlying].append(opt_pos)
+        
+        # 合并股票和期权持仓的标的列表（去重）
+        all_symbols = set([p.symbol for p in stock_positions])
+        all_symbols.update(option_by_underlying.keys())
+        
+        if not all_symbols:
             return PositionsAssessmentResponse(
                 positions=[],
                 summary={
                     "total_positions": 0,
+                    "total_value": 0.0,
+                    "total_pnl": 0.0,
                     "avg_score": 0.0,
                     "high_risk_count": 0,
                     "buy_recommendation_count": 0
                 }
             )
         
-        # 提取股票代码
-        symbols = [p.symbol for p in positions]
+        # 提取股票代码列表
+        symbols = list(all_symbols)
         
         # 批量计算评分
         scoring_service = PositionScoringService()
@@ -78,33 +114,87 @@ async def get_positions_assessment(
         high_risk_count = 0
         buy_count = 0
         
-        for position in positions:
-            symbol = position.symbol
+        # 遍历所有标的
+        for symbol in symbols:
             score_data = scores.get(symbol)
             
-            # 安全获取价格（处理 None 情况）
-            last_price = position.last_price if position.last_price is not None else position.avg_price
-            avg_price = position.avg_price if position.avg_price is not None else 0.0
+            # 查找该标的的股票持仓
+            stock_position = next((p for p in stock_positions if p.symbol == symbol), None)
             
-            # 如果两个价格都为 None/0，跳过该持仓（数据不完整）
-            if last_price is None or last_price == 0:
-                print(f"[PositionAssessment] Skipping {symbol}: last_price unavailable")
+            # 查找该标的的期权持仓
+            symbol_options = option_by_underlying.get(symbol, [])
+            
+            # 计算股票部分
+            stock_quantity = 0
+            stock_avg_cost = 0.0
+            stock_last_price = 0.0
+            stock_market_value = 0.0
+            stock_pnl = 0.0
+            
+            if stock_position:
+                stock_quantity = stock_position.quantity
+                stock_avg_cost = stock_position.avg_price if stock_position.avg_price else 0.0
+                stock_last_price = stock_position.last_price if stock_position.last_price else stock_avg_cost
+                stock_market_value = stock_quantity * stock_last_price
+                stock_pnl = (stock_last_price - stock_avg_cost) * stock_quantity if stock_avg_cost > 0 else 0.0
+            
+            # 计算期权部分
+            option_market_value = 0.0
+            option_pnl = 0.0
+            option_details = []
+            
+            if symbol_options:
+                for opt_pos in symbol_options:
+                    contract = opt_pos.contract
+                    quantity = opt_pos.quantity
+                    avg_price = opt_pos.avg_price
+                    underlying_price = opt_pos.underlying_price
+                    
+                    # 计算期权市值和盈亏（这里简化计算，实际应该用期权当前价格）
+                    # 期权的市值 = 合约价值 = 期权价格 * 数量 * 乘数
+                    # 这里用 underlying_price 作为参考，实际情况需要期权的当前价格
+                    contract_value = abs(quantity) * avg_price * contract.multiplier
+                    option_market_value += contract_value
+                    
+                    # 记录期权详情
+                    option_details.append({
+                        "contract_symbol": contract.broker_symbol,
+                        "right": contract.right,
+                        "strike": contract.strike,
+                        "expiry": contract.expiry.isoformat(),
+                        "quantity": quantity,
+                        "avg_price": avg_price,
+                        "multiplier": contract.multiplier
+                    })
+            
+            # 获取当前价格（优先使用股票价格，否则使用期权的标的价格）
+            if stock_last_price > 0:
+                current_price = stock_last_price
+            elif symbol_options and len(symbol_options) > 0:
+                current_price = symbol_options[0].underlying_price
+            else:
+                print(f"[PositionAssessment] Skipping {symbol}: no price available")
                 continue
             
-            # 计算市值和盈亏
-            market_value = position.quantity * last_price
-            unrealized_pnl = (last_price - avg_price) * position.quantity
-            unrealized_pnl_percent = ((last_price - avg_price) / avg_price * 100) if avg_price > 0 else 0.0
+            # 计算综合市值和盈亏
+            total_symbol_market_value = stock_market_value + option_market_value
+            total_symbol_pnl = stock_pnl + option_pnl
             
-            # 获取趋势快照，如果没有则生成
+            # 如果有股票持仓，计算盈亏百分比
+            if stock_avg_cost > 0 and stock_quantity > 0:
+                unrealized_pnl_percent = ((current_price - stock_avg_cost) / stock_avg_cost * 100)
+            else:
+                unrealized_pnl_percent = 0.0
+            
+            # 获取趋势快照，如果没有则根据需要生成
             snapshot = await technical_service.get_latest_trend_snapshot(
                 symbol,
                 account_id=account_id,
                 timeframe="1D"
             )
             
-            # 如果没有今日快照，尝试生成
-            if not snapshot:
+            # 如果没有今日快照，按需生成（避免请求路径阻塞）
+            if not snapshot and force_refresh:
                 try:
                     await technical_service.get_technical_analysis(
                         symbol,
@@ -121,7 +211,6 @@ async def get_positions_assessment(
                 except Exception as e:
                     print(f"[PositionAssessment] Error generating snapshot for {symbol}: {e}")
                     # 新股或数据源不可用时，生成默认snapshot
-                    from datetime import datetime
                     error_str = str(e)
                     
                     # 根据错误类型生成不同的提示
@@ -154,17 +243,42 @@ async def get_positions_assessment(
                             "timestamp": datetime.now().isoformat()
                         }
                     })()
+            elif not snapshot and not force_refresh:
+                snapshot = type('obj', (object,), {
+                    'to_dict': lambda self: {
+                        "symbol": symbol,
+                        "timeframe": "1D",
+                        "trend_direction": "INSUFFICIENT_DATA",
+                        "trend_strength": 0,
+                        "trend_description": "等待刷新",
+                        "rsi_value": None,
+                        "rsi_status": "INSUFFICIENT_DATA",
+                        "macd_status": "INSUFFICIENT_DATA",
+                        "macd_signal": None,
+                        "bollinger_position": "INSUFFICIENT_DATA",
+                        "volume_ratio": None,
+                        "support_levels": [],
+                        "resistance_levels": [],
+                        "ai_summary": f"{symbol} 快照尚未生成，可稍后重试或调用 /api/v1/positions/refresh。",
+                        "timestamp": datetime.now().isoformat()
+                    }
+                })()
             
             trend_snapshot = snapshot.to_dict() if snapshot else None
 
+            # 对于港股，优先使用股票名称
+            display_symbol = symbol
+            if stock_position and stock_position.market == "HK" and stock_position.name:
+                display_symbol = stock_position.name
+            
             # 构建持仓评估数据（即使没有评分也显示基本信息）
             assessment = {
-                "symbol": symbol,
-                "quantity": position.quantity,
-                "avg_cost": avg_price,
-                "current_price": last_price,
-                "market_value": round(market_value, 2),
-                "unrealized_pnl": round(unrealized_pnl, 2),
+                "symbol": display_symbol,
+                "quantity": stock_quantity,
+                "avg_cost": stock_avg_cost,
+                "current_price": current_price,
+                "market_value": round(total_symbol_market_value, 2),
+                "unrealized_pnl": round(total_symbol_pnl, 2),
                 "unrealized_pnl_percent": round(unrealized_pnl_percent, 2),
                 # 评分数据（使用默认值如果不可用）
                 "overall_score": score_data.overall_score if score_data else 50,
@@ -174,15 +288,20 @@ async def get_positions_assessment(
                 "risk_level": score_data.risk_level if score_data else "MEDIUM",
                 "recommendation": score_data.recommendation if score_data else "HOLD",
                 "target_position": score_data.target_position if score_data else 0.5,
-                "stop_loss": score_data.stop_loss if score_data else last_price * 0.9,
-                "take_profit": score_data.take_profit if score_data else last_price * 1.1,
+                "stop_loss": score_data.stop_loss if score_data else current_price * 0.9,
+                "take_profit": score_data.take_profit if score_data else current_price * 1.1,
                 "trend_snapshot": trend_snapshot
             }
+            
+            # 如果有期权持仓，添加期权详情
+            if option_details:
+                assessment["option_positions"] = option_details
+            
             position_assessments.append(assessment)
             
             # 累加总计数据
-            total_market_value += market_value
-            total_pnl += unrealized_pnl
+            total_market_value += total_symbol_market_value
+            total_pnl += total_symbol_pnl
             
             # 统计数据
             score_value = score_data.overall_score if score_data else 50
@@ -198,7 +317,7 @@ async def get_positions_assessment(
         
         avg_score = total_score / len(position_assessments) if position_assessments else 0.0
         
-        return PositionsAssessmentResponse(
+        response = PositionsAssessmentResponse(
             positions=position_assessments,
             summary={
                 "total_positions": len(position_assessments),
@@ -209,6 +328,15 @@ async def get_positions_assessment(
                 "buy_recommendation_count": buy_count
             }
         )
+
+        # 写入缓存（30秒）
+        try:
+            payload = response.model_dump() if hasattr(response, "model_dump") else response.dict()
+            await cache.set(cache_key, payload, expire=30)
+        except Exception:
+            pass
+
+        return response
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching positions assessment: {str(e)}")
@@ -398,6 +526,7 @@ async def get_fundamental_analysis(
 async def refresh_positions_assessment(
     symbols: Optional[List[str]] = None,
     force: bool = False,
+    async_run: bool = Query(False, description="是否异步执行"),
     session: AsyncSession = Depends(get_session)
 ):
     """刷新持仓评估
@@ -419,48 +548,85 @@ async def refresh_positions_assessment(
         if not symbols:
             return {"message": "No positions to refresh", "refreshed": []}
         
-        # 刷新技术面数据（会写入日线趋势快照缓存表）
-        technical_service = TechnicalAnalysisService(session)
-        technical_results = {}
-        for symbol in symbols:
-            try:
-                data = await technical_service.get_technical_analysis(
-                    symbol,
-                    timeframe="1D",
-                    use_cache=False,
-                    account_id=account_id
-                )
-                technical_results[symbol] = data is not None
-            except Exception as e:
-                print(f"Error refreshing technical for {symbol}: {e}")
-                technical_results[symbol] = False
-        
-        # 刷新基本面数据
-        fundamental_service = FundamentalAnalysisService()
-        fundamental_results = await fundamental_service.batch_refresh_fundamentals(symbols)
-        
-        # 刷新综合评分
+        async def _do_refresh(run_symbols: List[str], run_account_id: str, run_force: bool):
+            sem = asyncio.Semaphore(settings.REFRESH_CONCURRENCY)
+
+            async def _refresh_technical(sym: str) -> tuple[str, bool]:
+                async with sem:
+                    try:
+                        async with SessionLocal() as local_session:
+                            technical_service = TechnicalAnalysisService(local_session)
+                            data = await technical_service.get_technical_analysis(
+                                sym,
+                                timeframe="1D",
+                                use_cache=False,
+                                account_id=run_account_id
+                            )
+                        return sym, data is not None
+                    except Exception as e:
+                        print(f"Error refreshing technical for {sym}: {e}")
+                        return sym, False
+
+            async def _refresh_score(sym: str) -> tuple[str, bool]:
+                async with sem:
+                    try:
+                        current_price = await market_provider.get_current_price(sym)
+                        score = await scoring_service.calculate_position_score(
+                            sym, current_price, force_refresh=run_force
+                        )
+                        return sym, score is not None
+                    except Exception as e:
+                        print(f"Error refreshing score for {sym}: {e}")
+                        return sym, False
+
+            # 刷新技术面数据（会写入日线趋势快照缓存表）
+            technical_tasks = [_refresh_technical(sym) for sym in run_symbols]
+            technical_results = dict(await asyncio.gather(*technical_tasks)) if technical_tasks else {}
+
+            # 刷新基本面数据
+            fundamental_service = FundamentalAnalysisService()
+            fundamental_results = await fundamental_service.batch_refresh_fundamentals(run_symbols)
+
+            # 刷新综合评分
+            score_tasks = [_refresh_score(sym) for sym in run_symbols]
+            score_results = dict(await asyncio.gather(*score_tasks)) if score_tasks else {}
+
+            return {
+                "technical": technical_results,
+                "fundamental": fundamental_results,
+                "scores": score_results,
+            }
+
         scoring_service = PositionScoringService()
-        score_results = {}
         market_provider = MarketDataProvider()
-        for symbol in symbols:
-            try:
-                current_price = await market_provider.get_current_price(symbol)
-                score = await scoring_service.calculate_position_score(
-                    symbol, current_price, force_refresh=True
-                )
-                score_results[symbol] = score is not None
-            except Exception as e:
-                print(f"Error refreshing score for {symbol}: {e}")
-                score_results[symbol] = False
+
+        if async_run:
+            if not settings.ENABLE_SCHEDULER:
+                raise HTTPException(status_code=400, detail="Scheduler disabled, cannot run async job")
+            job_id = f"positions_refresh:{account_id}:{int(time.time())}"
+            add_job(
+                _do_refresh,
+                trigger="date",
+                id=job_id,
+                name="positions_refresh",
+                run_date=datetime.now(),
+                args=[symbols, account_id, force],
+            )
+            return {
+                "status": "scheduled",
+                "job_id": job_id,
+                "refreshed": symbols,
+            }
+
+        results = await _do_refresh(symbols, account_id, force)
         
         return {
             "message": "Refresh completed",
             "refreshed": symbols,
             "results": {
-                "technical": technical_results,
-                "fundamental": fundamental_results,
-                "scores": score_results
+                "technical": results["technical"],
+                "fundamental": results["fundamental"],
+                "scores": results["scores"]
             }
         }
         
@@ -484,6 +650,12 @@ async def get_macro_risk_overview(
     - 响应时间监控
     """
     try:
+        cache_key = "macro_risk_overview"
+        if not force_refresh:
+            cached_overview = await cache.get(cache_key)
+            if cached_overview:
+                return cached_overview
+
         start_time = time.time()
         
         # 1. 优先计算或获取缓存的风险评分
@@ -593,6 +765,12 @@ async def get_macro_risk_overview(
             "data_freshness": (datetime.now() - risk_score.timestamp).total_seconds() / 3600  # 小时
         }
         
+        # 写入缓存（120秒）
+        try:
+            await cache.set(cache_key, response_data, expire=120)
+        except Exception:
+            pass
+
         return response_data
         
     except Exception as e:

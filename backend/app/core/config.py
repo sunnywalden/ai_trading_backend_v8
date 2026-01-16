@@ -109,6 +109,10 @@ class Settings(BaseSettings):
     CACHE_TTL_MACRO_HOURS: int = 6
     CACHE_TTL_GEOPOLITICAL_HOURS: int = 4
 
+    # 并发控制配置（中期优化）
+    EXTERNAL_API_CONCURRENCY: int = 5  # 外部API并发上限
+    REFRESH_CONCURRENCY: int = 5       # 刷新任务并发上限
+
     # 定时任务配置
     ENABLE_SCHEDULER: bool = True
     SCHEDULER_TECHNICAL_HOURS: int = 1

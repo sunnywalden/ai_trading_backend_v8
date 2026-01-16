@@ -442,7 +442,13 @@ class PotentialOpportunitiesService:
 
         # 若存在旧 run（失败/跳过），先删除再写新（避免 unique run_key 冲突）
         try:
+            # 如果Session有待处理的rollback，先清理
+            if self.session.in_transaction() and not self.session.is_active:
+                await self.session.rollback()
+            
             if existing is not None:
+                # 使用merge来处理可能已过期的对象
+                existing = await self.session.merge(existing)
                 await self.session.delete(existing)
                 await self.session.flush()
 
@@ -460,15 +466,47 @@ class PotentialOpportunitiesService:
 
             # 尝试持久化失败的 run（若仍失败则抛出原始异常）
             try:
-                self.session.add(run)
-                await self.session.commit()
-                await self.session.refresh(run)
-            except Exception:
-                # 无法记录失败 run，重新抛出原始异常供上层日志记录
+                # 创建新的run对象用于保存失败状态（避免detached对象问题）
+                failed_run = OpportunityScanRun(
+                    run_key=run.run_key,
+                    as_of=run.as_of,
+                    universe_name=run.universe_name,
+                    min_score=run.min_score,
+                    max_results=run.max_results,
+                    force_refresh=run.force_refresh,
+                    status="FAILED",
+                    error_message=str(e)[:500],  # 截断错误信息
+                    total_symbols=run.total_symbols,
+                    qualified_symbols=0,
+                    elapsed_ms=run.elapsed_ms,
+                    macro_overall_score=run.macro_overall_score,
+                    macro_risk_level=run.macro_risk_level,
+                    macro_risk_summary=run.macro_risk_summary,
+                )
+                
+                # 如果存在旧记录，使用merge+update方式
+                stmt = select(OpportunityScanRun).where(OpportunityScanRun.run_key == run.run_key)
+                result = await self.session.execute(stmt)
+                existing_failed = result.scalar_one_or_none()
+                
+                if existing_failed:
+                    # 更新现有记录
+                    existing_failed.status = "FAILED"
+                    existing_failed.error_message = str(e)[:500]
+                    existing_failed.elapsed_ms = run.elapsed_ms
+                    await self.session.commit()
+                    await self.session.refresh(existing_failed)
+                    return existing_failed, notes
+                else:
+                    # 插入新记录
+                    self.session.add(failed_run)
+                    await self.session.commit()
+                    await self.session.refresh(failed_run)
+                    return failed_run, notes
+            except Exception as save_error:
+                # 无法记录失败 run，记录日志并重新抛出原始异常
+                print(f"[OpportunityService] Failed to save error state: {save_error}")
                 raise e
-
-            # 抛出原始异常，让调用方知道发生了错误（同时我们已保存 FAILED 状态）
-            raise e
 
     async def _scan_symbols(self, symbols: List[str], min_score: int, force_refresh: bool) -> List[ScoredSymbol]:
         tasks = [self._score_one_symbol(sym, min_score=min_score, force_refresh=force_refresh) for sym in symbols]

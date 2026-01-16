@@ -2,7 +2,7 @@
 
 本文档用于将本项目后端（FastAPI）容器化并部署到 Kubernetes。
 
-> 运行入口：`uvicorn app.main:app --host 0.0.0.0 --port 8088`
+> 运行入口：`uvicorn app.main:app --host 0.0.0.0 --port 8088 --reload`
 
 ---
 
