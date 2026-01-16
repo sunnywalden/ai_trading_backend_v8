@@ -6,6 +6,7 @@ AI Trading Backend V8 由四个相对独立的能力簇组成：
 2) **行为画像与行为评分**（从历史成交/盈亏抽取“卖飞、过度交易、报复性交易”等）
 3) **持仓评估**（技术面 + 基本面 + 情绪/风险合成，输出建议与关键价位）
 4) **宏观风险与机会扫描**（宏观风险概览 + Opportunities 每日扫描）
+5) **交易计划**（计划创建/更新/执行状态）
 
 ## 关键产品约束（必须写进文档的“口径”）
 
@@ -20,7 +21,7 @@ AI Trading Backend V8 由四个相对独立的能力簇组成：
   - 技术分析（含趋势/RSI/MACD/布林/支撑阻力/量比）
   - 基本面分析
   - 合成评分与建议
-- 输出：`GET /api/v1/positions/assessment` 返回每个标的的评分、建议与 `trend_snapshot`。
+- 输出：`GET /api/v1/positions/assessment` 返回每个标的的评分、建议与 `trend_snapshot`，并包含 `budget_utilization` / `plan_deviation`。
 
 ## 宏观风险（Macro Risk）
 
@@ -29,5 +30,5 @@ AI Trading Backend V8 由四个相对独立的能力簇组成：
 
 ## Opportunities（潜在机会）
 
-- 输出：`GET /api/v1/opportunities/latest` 获取最新一次扫描结果
+- 输出：`GET /api/v1/opportunities/latest` 获取最新一次扫描结果（含计划匹配标签）
 - 触发：`POST /api/v1/opportunities/scan` 支持即时扫描与可选更新 cron

@@ -210,6 +210,10 @@ class MarketDataProvider:
         # Fallback to Yahoo Finance
         print(f"[MarketData] Falling back to Yahoo Finance for price of {symbol}")
         try:
+            gate = await api_monitor.can_call_provider(APIProvider.YAHOO_FINANCE)
+            if not gate.get("can_call", True):
+                print(f"[MarketData] Skip Yahoo price due to cooldown/limit: {gate.get('reason')}")
+                return 0.0
             ticker = self.get_ticker(symbol)
             info = ticker.info
             price = info.get('currentPrice') or info.get('regularMarketPrice', 0.0)
@@ -435,6 +439,11 @@ class MarketDataProvider:
         """从Yahoo Finance获取数据（带监控，单次请求不重试）"""
         # 转换为Yahoo格式
         yahoo_symbol = self._convert_to_yahoo_symbol(symbol)
+
+        gate = await api_monitor.can_call_provider(APIProvider.YAHOO_FINANCE)
+        if not gate.get("can_call", True):
+            print(f"[MarketData] Skip Yahoo Finance due to cooldown/limit: {gate.get('reason')}")
+            return None
         
         start_time = time.time()
         success = False

@@ -109,9 +109,15 @@ class Settings(BaseSettings):
     CACHE_TTL_MACRO_HOURS: int = 6
     CACHE_TTL_GEOPOLITICAL_HOURS: int = 4
 
+    # 风险预算（用于持仓评估预算占用率）
+    DEFAULT_RISK_BUDGET_USD: float = 20000.0
+
     # 并发控制配置（中期优化）
     EXTERNAL_API_CONCURRENCY: int = 5  # 外部API并发上限
     REFRESH_CONCURRENCY: int = 5       # 刷新任务并发上限
+
+    # 外部 API 限流规避配置
+    API_RATE_LIMIT_COOLDOWN_SECONDS: int = 900  # 触发限流后冷却时间（秒）
 
     # 定时任务配置
     ENABLE_SCHEDULER: bool = True

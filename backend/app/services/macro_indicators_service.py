@@ -287,10 +287,10 @@ class MacroIndicatorsService:
             print(f"[FRED] Using Redis cache for {indicator_name}")
             return cached_data
         
-        # 2. 检查API调用限制
-        rate_status = await api_monitor.check_rate_limit_status(APIProvider.FRED)
-        if not rate_status["can_call"]:
-            print(f"[FRED] Rate limit reached: {rate_status['reason']}")
+        # 2. 检查API调用限制/冷却
+        gate = await api_monitor.can_call_provider(APIProvider.FRED)
+        if not gate.get("can_call", True):
+            print(f"[FRED] Skip fetch due to cooldown/limit: {gate.get('reason')}")
             return None
         
         # 3. 调用API
@@ -360,8 +360,14 @@ class MacroIndicatorsService:
         if cached_vix:
             print("[VIX] Using Redis cache")
             return float(cached_vix)
+
+        # 2. 检查API调用限制/冷却
+        gate = await api_monitor.can_call_provider(APIProvider.YAHOO_FINANCE)
+        if not gate.get("can_call", True):
+            print(f"[VIX] Skip fetch due to cooldown/limit: {gate.get('reason')}")
+            return None
         
-        # 2. 调用API
+        # 3. 调用API
         start_time = time.time()
         success = False
         error_msg = None

@@ -149,7 +149,7 @@
 
 功能点：
 
-- 显示服务状态、最近更新时间
+- 显示服务状态、最近更新时间（last_updated）
 - 失败提示与重试按钮
 
 验收标准：
@@ -175,11 +175,12 @@
 ### 2.2 API 字段扩展（后端）
 
 - `positions/assessment`：增加 `budget_utilization`, `plan_deviation` 字段
-- 行为评分接口：增加 `plan_deviation_score` 或 `discipline_score`
+- 行为评分接口：增加 `discipline_score`
 - 计划接口（新增）：
-  - `GET /v1/plan/list`
-  - `POST /v1/plan/create`
-  - `PATCH /v1/plan/{id}`
+  - `GET /api/v1/plan/list`
+  - `POST /api/v1/plan/create`
+  - `PATCH /api/v1/plan/{id}`
+  - `DELETE /api/v1/plan/{id}`
 
 ### 2.3 兼容策略
 

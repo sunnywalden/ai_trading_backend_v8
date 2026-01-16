@@ -252,8 +252,10 @@ plan_deviation = min(abs(price - entry_price) / entry_price * 100, 100)
 - `app/schemas/position_assessment.py`
 - `app/schemas/ai_state.py`
 - `app/schemas/opportunities.py`
-- `app/services/position_scoring_service.py`
-- `app/services/behavior_scoring_service.py`
+- `app/routers/position_macro.py`
+- `app/routers/opportunities.py`
+- `app/routers/api_monitoring.py`
+- `app/services/ai_advice_service.py`
 
 ---
 

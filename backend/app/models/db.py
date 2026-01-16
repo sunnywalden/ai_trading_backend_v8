@@ -90,6 +90,56 @@ async def ensure_mysql_indexes() -> None:
             if not exists:
                 await conn.execute(text(create_sql))
 
+
+async def ensure_mysql_tables() -> None:
+    """启动时检查/创建关键MySQL表（仅MySQL生效）。"""
+    if settings.DB_TYPE != "mysql":
+        return
+
+    table_specs = [
+        (
+            "trading_plan",
+            """
+            CREATE TABLE trading_plan (
+              id BIGINT PRIMARY KEY AUTO_INCREMENT,
+              account_id VARCHAR(64) NOT NULL,
+              symbol VARCHAR(32) NOT NULL,
+              entry_price DECIMAL(20, 6) NOT NULL,
+              stop_loss DECIMAL(20, 6) NOT NULL,
+              take_profit DECIMAL(20, 6) NOT NULL,
+              target_position DECIMAL(10, 4) NOT NULL,
+              plan_status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE',
+              plan_tags JSON NULL,
+              valid_from DATETIME NULL,
+              valid_until DATETIME NULL,
+              notes VARCHAR(255) NULL,
+              created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+              INDEX idx_plan_account_status (account_id, plan_status),
+              INDEX idx_plan_symbol (symbol),
+              INDEX idx_plan_valid_until (valid_until)
+            )
+            """,
+        ),
+    ]
+
+    async with engine.begin() as conn:
+        for table_name, create_sql in table_specs:
+            result = await conn.execute(
+                text(
+                    """
+                    SELECT COUNT(*)
+                    FROM information_schema.tables
+                    WHERE table_schema = DATABASE()
+                      AND table_name = :table_name
+                    """
+                ),
+                {"table_name": table_name},
+            )
+            exists = (result.scalar() or 0) > 0
+            if not exists:
+                await conn.execute(text(create_sql))
+
 async def get_redis():
     """获取 Redis 客户端的依赖项"""
     return redis_client

@@ -11,7 +11,6 @@ from tigeropen.common.consts import SecurityType, Market
 from .option_client_base import OptionBrokerClient
 from .models import OptionPosition, UnderlyingPosition, OptionContract, Greeks
 from app.core.cache import cache
-from app.core.cache import cache
 
 
 class TigerOptionClient(OptionBrokerClient):
@@ -103,68 +102,6 @@ class TigerOptionClient(OptionBrokerClient):
         
         return stock_names
     
-    async def _get_hk_stock_names_from_cache(self, symbols: List[str]) -> Dict[str, str]:
-        """从缓存获取港股名称
-        
-        Args:
-            symbols: 股票代码列表
-            
-        Returns:
-            {symbol: name} 字典，只返回缓存中有的
-        """
-        result = {}
-        for symbol in symbols:
-            cache_key = f"hk_stock_name:{symbol}"
-            name = await cache.get(cache_key)
-            if name:
-                result[symbol] = name
-                print(f"[TigerOptionClient] Got HK stock name from cache: {symbol} -> {name}")
-        return result
-    
-    async def _set_hk_stock_names_to_cache(self, stock_names: Dict[str, str]):
-        """将港股名称存入缓存
-        
-        Args:
-            stock_names: {symbol: name} 字典
-        """
-        for symbol, name in stock_names.items():
-            if name:
-                cache_key = f"hk_stock_name:{symbol}"
-                # 缓存 30 天（股票名称几乎不变）
-                await cache.set(cache_key, name, expire=30*24*3600)
-                print(f"[TigerOptionClient] Cached HK stock name: {symbol} -> {name}")
-    
-    async def _fetch_hk_stock_names(self, symbols: List[str]) -> Dict[str, str]:
-        """从 Tiger API 批量获取港股名称
-        
-        Args:
-            symbols: 股票代码列表
-            
-        Returns:
-            {symbol: name} 字典
-        """
-        stock_names = {}
-        if not symbols:
-            return stock_names
-            
-        try:
-            briefs = await self._run_in_executor(
-                self.quote_client.get_stock_briefs,
-                symbols
-            )
-            if briefs is not None and len(briefs) > 0:
-                for i, row in briefs.iterrows():
-                    sym = row.get('symbol')
-                    # 尝试多个字段获取名称
-                    name = row.get('name') or row.get('nameCN') or row.get('name_cn') or row.get('localSymbol')
-                    if sym and name:
-                        stock_names[sym] = name
-                        print(f"[TigerOptionClient] Fetched HK stock name from API: {sym} -> {name}")
-        except Exception as e:
-            print(f"[TigerOptionClient] Error fetching HK stock names from API: {e}")
-        
-        return stock_names
-
     async def _run_in_executor(self, func, *args, **kwargs):
         """在线程池中运行同步的 SDK 调用"""
         loop = asyncio.get_event_loop()

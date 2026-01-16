@@ -19,6 +19,7 @@ Base URL 以你的启动参数为准（示例：`http://localhost:8088`）。
 - 宏观风险（/api/v1）
 - 潜在机会（/api/v1）
 - 管理接口（/api/v1）
+- 交易计划（/api/v1）
 - **API 监控与 Rate Limit 管理**（/api/v1）
 
 ---
@@ -40,7 +41,7 @@ Base URL 以你的启动参数为准（示例：`http://localhost:8088`）。
   - `trade_mode`
   - `limits{...}`
   - `exposure{...}`
-  - `symbols{ [symbol]: { behavior_score, sell_fly_score, ... } }`
+  - `symbols{ [symbol]: { behavior_score, sell_fly_score, discipline_score, ... } }`
 
 ### POST /api/v1/ai/advice
 
@@ -71,6 +72,27 @@ Base URL 以你的启动参数为准（示例：`http://localhost:8088`）。
 
 详见：[Operations/Scheduler](./Operations/Scheduler.md)
 
+## 交易计划（/api/v1）
+
+### GET /api/v1/plan/list
+
+- 用途：查询交易计划列表
+- Query：`status?` / `symbol?`
+
+### POST /api/v1/plan/create
+
+- 用途：创建交易计划
+- 请求：`PlanCreateRequest`
+
+### PATCH /api/v1/plan/{id}
+
+- 用途：更新交易计划
+- 请求：`PlanUpdateRequest`
+
+### DELETE /api/v1/plan/{id}
+
+- 用途：删除交易计划
+
 ## 持仓评估（/api/v1）
 
 ### GET /api/v1/positions/assessment
@@ -82,6 +104,8 @@ Base URL 以你的启动参数为准（示例：`http://localhost:8088`）。
 - 响应关键字段：
   - `positions[]`：每项包含 `symbol/quantity/avg_cost/current_price/...`
   - **新增：`trend_snapshot`**（日线走势快照：趋势/量比/关键价位/AI 摘要等）
+  - **新增：`budget_utilization`**（风险预算占用率 0~1）
+  - **新增：`plan_deviation`**（计划偏离度 0~100）
   - `summary{ total_positions, total_value, total_pnl, avg_score, ... }`
 
 ### GET /api/v1/positions/{symbol}/technical
@@ -143,6 +167,7 @@ Base URL 以你的启动参数为准（示例：`http://localhost:8088`）。
 
 - Query：`universe_name`（默认 `US_LARGE_MID_TECH`）
 - 响应关键字段：`{ status, latest }`
+- 响应关键字段：`{ status, latest }`，其中 `latest.items[*]` 可能包含 `plan_match_score` / `plan_match_reason`
 
 ### GET /api/v1/opportunities/runs
 
@@ -221,6 +246,7 @@ Base URL 以你的启动参数为准（示例：`http://localhost:8088`）。
 - GET `/api/v1/policies` - 获取所有Rate Limit策略
 - GET `/api/v1/policies/{provider}` - 获取特定API策略
 - GET `/api/v1/monitoring/health` - 监控服务健康检查
+  - 响应关键字段：`{ status, last_updated, ... }`
 
 #### 示例（部分）
 

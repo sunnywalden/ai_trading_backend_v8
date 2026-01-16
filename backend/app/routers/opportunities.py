@@ -17,6 +17,8 @@ from app.schemas.opportunities import (
     MacroRiskSnapshot,
 )
 from app.services.potential_opportunities_service import PotentialOpportunitiesService
+from app.services.trading_plan_service import TradingPlanService
+from app.core.config import settings
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import time
@@ -46,9 +48,19 @@ def _to_macro_snapshot(run) -> MacroRiskSnapshot:
     )
 
 
-def _to_run_view(run) -> OpportunityRunView:
+def _to_run_view(run, plan_map: dict | None = None) -> OpportunityRunView:
     items = []
     for idx, it in enumerate(run.items or [], start=1):
+        plan_match_score = None
+        plan_match_reason = None
+        if plan_map is not None:
+            if it.symbol in plan_map:
+                plan_match_score = 1.0
+                plan_match_reason = "计划匹配"
+            else:
+                plan_match_score = 0.0
+                plan_match_reason = "未匹配"
+
         items.append(
             OpportunityItemView(
                 rank=idx,
@@ -60,6 +72,8 @@ def _to_run_view(run) -> OpportunityRunView:
                 overall_score=it.overall_score or 0,
                 recommendation=it.recommendation,
                 reason=it.reason,
+                plan_match_score=plan_match_score,
+                plan_match_reason=plan_match_reason,
             )
         )
 
@@ -105,7 +119,10 @@ async def get_latest_opportunities(
     latest = await svc.get_latest_success_run(universe_name=universe_name)
     if not latest:
         return OpportunityLatestResponse(status="ok", latest=None)
-    return OpportunityLatestResponse(status="ok", latest=_to_run_view(latest))
+    plan_service = TradingPlanService(session)
+    symbols = [it.symbol for it in latest.items or []]
+    plan_map = await plan_service.get_active_plans_by_symbols(settings.TIGER_ACCOUNT, symbols)
+    return OpportunityLatestResponse(status="ok", latest=_to_run_view(latest, plan_map))
 
 
 @router.get("/opportunities/runs", response_model=OpportunityRunsResponse)
@@ -128,7 +145,10 @@ async def get_opportunity_run(
     run = await svc.get_run_by_id(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
-    return _to_run_view(run)
+    plan_service = TradingPlanService(session)
+    symbols = [it.symbol for it in run.items or []]
+    plan_map = await plan_service.get_active_plans_by_symbols(settings.TIGER_ACCOUNT, symbols)
+    return _to_run_view(run, plan_map)
 
 
 @router.post("/opportunities/scan", response_model=OpportunityScanResponse)

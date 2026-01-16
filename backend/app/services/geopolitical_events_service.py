@@ -291,10 +291,10 @@ class GeopoliticalEventsService:
             # 将缓存的字典转换回对象
             return [self._dict_to_event(event_dict) for event_dict in cached_events]
         
-        # 2. 检查API调用限制
-        rate_status = await api_monitor.check_rate_limit_status(APIProvider.NEWS_API)
-        if not rate_status["can_call"]:
-            print(f"[NewsAPI] Rate limit reached: {rate_status['reason']}")
+        # 2. 检查API调用限制/冷却
+        gate = await api_monitor.can_call_provider(APIProvider.NEWS_API)
+        if not gate.get("can_call", True):
+            print(f"[NewsAPI] Skip fetch due to cooldown/limit: {gate.get('reason')}")
             return []
         
         # 3. 调用API

@@ -13,12 +13,14 @@ from typing import Optional, List, Dict, Any
 from enum import Enum
 import asyncio
 import logging
+import random
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 import yfinance as yf
 
 from app.models.macro_risk import MacroRiskScore, GeopoliticalEvent
+from app.services.api_monitoring_service import api_monitor, APIProvider, APIRateLimit
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,8 @@ class MacroRiskScoringService:
         self.max_retries = 2  # 最大重试次数
         self.retry_delay = 5.0  # 重试延迟（秒）
         self.request_delay = 1.0  # 请求间延迟（秒）
+        self.retry_backoff_cap = 20.0  # 重试最大等待（秒）
+        self.jitter_ratio = 0.3  # 抖动比例
     
     async def calculate_macro_risk_score(self, use_cache: bool = True) -> MacroRiskScore:
         """
@@ -184,7 +188,8 @@ class MacroRiskScoringService:
         self,
         calc_func,
         dimension_name: str,
-        fallback_value: float
+        fallback_value: float,
+        provider: Optional[APIProvider] = None
     ) -> float:
         """
         带重试机制的计算函数
@@ -197,30 +202,41 @@ class MacroRiskScoringService:
         Returns:
             计算结果或回退值
         """
+        if provider:
+            gate = await api_monitor.can_call_provider(provider)
+            if not gate.get("can_call", True):
+                logger.warning(
+                    f"Skipping {dimension_name} due to cooldown/limit: {gate.get('reason') or 'blocked'}"
+                )
+                return fallback_value
+
         for attempt in range(self.max_retries):
             try:
                 result = await calc_func()
                 if result is not None:
                     return result
+                if attempt < self.max_retries - 1:
+                    await self._sleep_backoff(attempt)
+                    continue
             except Exception as e:
                 error_msg = str(e)
-                if "Rate limited" in error_msg or "Too Many Requests" in error_msg:
-                    if attempt < self.max_retries - 1:
-                        wait_time = self.retry_delay * (attempt + 1)  # 指数退避
-                        logger.warning(
-                            f"Rate limited for {dimension_name}, retrying in {wait_time}s... "
-                            f"(attempt {attempt + 1}/{self.max_retries})"
+                if self._is_rate_limit_error(error_msg):
+                    if provider:
+                        await api_monitor.set_cooldown(
+                            provider, APIRateLimit.DEFAULT_COOLDOWN_SECONDS, error_msg
                         )
-                        await asyncio.sleep(wait_time)
-                        continue
-                    else:
-                        logger.warning(
-                            f"Rate limited for {dimension_name} after {self.max_retries} attempts, "
-                            f"using fallback value: {fallback_value}"
-                        )
-                else:
-                    logger.error(f"Error calculating {dimension_name}: {error_msg}")
+                    logger.warning(
+                        f"Rate limited for {dimension_name}, using fallback value: {fallback_value}"
+                    )
                     break
+                if attempt < self.max_retries - 1:
+                    logger.warning(
+                        f"Error calculating {dimension_name}: {error_msg}. Retrying..."
+                    )
+                    await self._sleep_backoff(attempt)
+                    continue
+                logger.error(f"Error calculating {dimension_name}: {error_msg}")
+                break
         
         # 所有重试失败，使用回退值
         logger.info(f"Using fallback value for {dimension_name}: {fallback_value}")
@@ -238,34 +254,38 @@ class MacroRiskScoringService:
         
         # 地缘政治维度不依赖外部API，优先计算
         geopolitical = await self._calculate_geopolitical_risk(session)
-        await asyncio.sleep(self.request_delay)
+        await self._sleep_request_delay()
         
         # 其他维度依赖yfinance，需要错误处理
         monetary = await self._calculate_with_retry(
             self._calculate_monetary_policy_risk,
             "monetary_policy",
-            cached.monetary_policy_score if cached else 65.0
+            cached.monetary_policy_score if cached else 65.0,
+            provider=APIProvider.YAHOO_FINANCE
         )
-        await asyncio.sleep(self.request_delay)
+        await self._sleep_request_delay()
         
         sector_bubble = await self._calculate_with_retry(
             self._calculate_sector_bubble_risk,
             "sector_bubble",
-            cached.sector_bubble_score if cached else 60.0
+            cached.sector_bubble_score if cached else 60.0,
+            provider=APIProvider.YAHOO_FINANCE
         )
-        await asyncio.sleep(self.request_delay)
+        await self._sleep_request_delay()
         
         economic_cycle = await self._calculate_with_retry(
             self._calculate_economic_cycle_risk,
             "economic_cycle",
-            cached.economic_cycle_score if cached else 65.0
+            cached.economic_cycle_score if cached else 65.0,
+            provider=APIProvider.YAHOO_FINANCE
         )
-        await asyncio.sleep(self.request_delay)
+        await self._sleep_request_delay()
         
         market_sentiment = await self._calculate_with_retry(
             self._calculate_market_sentiment_risk,
             "market_sentiment",
-            cached.sentiment_score if cached else 65.0
+            cached.sentiment_score if cached else 65.0,
+            provider=APIProvider.YAHOO_FINANCE
         )
         
         return {
@@ -288,6 +308,9 @@ class MacroRiskScoringService:
         Returns:
             货币政策风险评分
         """
+        start_time = datetime.now()
+        success = False
+        error_msg = None
         try:
             # 获取市场数据
             treasury_10y = yf.Ticker("^TNX")  # 10年期国债收益率
@@ -340,12 +363,17 @@ class MacroRiskScoringService:
             else:
                 scores.append(10 * 0.3)
             
-            return round(sum(scores), 2)
+            result = round(sum(scores), 2)
+            success = True
+            return result
             
         except Exception as e:
-            logger.warning(f"Error calculating monetary policy risk: {e}")
-            # 返回None触发重试机制
+            error_msg = str(e)
+            if not self._is_rate_limit_error(error_msg):
+                logger.warning(f"Error calculating monetary policy risk: {e}")
             return None
+        finally:
+            await self._record_yahoo_call("macro:monetary_policy", success, error_msg, start_time)
     
     async def _calculate_geopolitical_risk(self, session: AsyncSession) -> float:
         """
@@ -424,6 +452,9 @@ class MacroRiskScoringService:
         Returns:
             行业泡沫风险评分
         """
+        start_time = datetime.now()
+        success = False
+        error_msg = None
         try:
             ndx = yf.Ticker("^NDX")
             info = ndx.info
@@ -452,12 +483,17 @@ class MacroRiskScoringService:
                 ipo_score * 0.2
             )
             
-            return round(final_score, 2)
+            result = round(final_score, 2)
+            success = True
+            return result
             
         except Exception as e:
-            logger.warning(f"Error calculating sector bubble risk: {e}")
-            # 返回None触发重试机制
+            error_msg = str(e)
+            if not self._is_rate_limit_error(error_msg):
+                logger.warning(f"Error calculating sector bubble risk: {e}")
             return None
+        finally:
+            await self._record_yahoo_call("macro:sector_bubble", success, error_msg, start_time)
     
     async def _calculate_economic_cycle_risk(self) -> float:
         """
@@ -471,6 +507,9 @@ class MacroRiskScoringService:
         Returns:
             经济周期风险评分
         """
+        start_time = datetime.now()
+        success = False
+        error_msg = None
         try:
             spy = yf.Ticker("SPY")
             data = spy.history(period="6mo")
@@ -491,12 +530,17 @@ class MacroRiskScoringService:
             else:
                 base_score = 35  # 衰退期
             
-            return round(base_score, 2)
+            result = round(base_score, 2)
+            success = True
+            return result
             
         except Exception as e:
-            logger.warning(f"Error calculating economic cycle risk: {e}")
-            # 返回None触发重试机制
+            error_msg = str(e)
+            if not self._is_rate_limit_error(error_msg):
+                logger.warning(f"Error calculating economic cycle risk: {e}")
             return None
+        finally:
+            await self._record_yahoo_call("macro:economic_cycle", success, error_msg, start_time)
     
     async def _calculate_market_sentiment_risk(self) -> float:
         """
@@ -509,6 +553,9 @@ class MacroRiskScoringService:
         Returns:
             市场情绪风险评分
         """
+        start_time = datetime.now()
+        success = False
+        error_msg = None
         try:
             vix = yf.Ticker("^VIX")
             vix_data = vix.history(period="5d")
@@ -531,12 +578,17 @@ class MacroRiskScoringService:
             
             final_score = vix_score * 0.7 + put_call_score * 0.3
             
-            return round(final_score, 2)
+            result = round(final_score, 2)
+            success = True
+            return result
             
         except Exception as e:
-            logger.warning(f"Error calculating market sentiment risk: {e}")
-            # 返回None触发重试机制
+            error_msg = str(e)
+            if not self._is_rate_limit_error(error_msg):
+                logger.warning(f"Error calculating market sentiment risk: {e}")
             return None
+        finally:
+            await self._record_yahoo_call("macro:market_sentiment", success, error_msg, start_time)
     
     def _calculate_overall_risk_score(
         self,
@@ -655,3 +707,32 @@ class MacroRiskScoringService:
         confidence = max(0.5, min(1.0, 1.0 - (std_dev / 100)))
         
         return round(confidence, 2)
+
+    @staticmethod
+    def _is_rate_limit_error(error_message: str) -> bool:
+        msg = (error_message or "").lower()
+        return "rate limited" in msg or "too many requests" in msg or "429" in msg
+
+    async def _record_yahoo_call(self, endpoint: str, success: bool, error_msg: Optional[str], start_time: datetime) -> None:
+        try:
+            response_time = (datetime.now() - start_time).total_seconds() * 1000
+            await api_monitor.record_api_call(
+                provider=APIProvider.YAHOO_FINANCE,
+                endpoint=endpoint,
+                success=success,
+                response_time_ms=response_time,
+                error_message=error_msg,
+            )
+        except Exception:
+            pass
+
+    async def _sleep_backoff(self, attempt: int) -> None:
+        base = min(self.retry_backoff_cap, self.retry_delay * (2 ** attempt))
+        jitter = base * self.jitter_ratio
+        wait_time = max(0.0, random.uniform(base - jitter, base + jitter))
+        await asyncio.sleep(wait_time)
+
+    async def _sleep_request_delay(self) -> None:
+        jitter = self.request_delay * self.jitter_ratio
+        wait_time = max(0.0, random.uniform(self.request_delay - jitter, self.request_delay + jitter))
+        await asyncio.sleep(wait_time)
