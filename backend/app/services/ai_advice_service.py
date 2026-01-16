@@ -12,6 +12,9 @@ from app.services.option_exposure_service import OptionExposureService
 from app.services.risk_config_service import RiskConfigService
 from app.services.symbol_risk_profile_service import SymbolRiskProfileService
 from app.broker.factory import make_option_broker_client
+from app.services.trading_plan_service import TradingPlanService
+from app.providers.market_data_provider import MarketDataProvider
+import asyncio
 
 
 class AiAdviceService:
@@ -65,6 +68,26 @@ class AiAdviceService:
         prof_svc = SymbolRiskProfileService(self.session)
         behavior_stats = await prof_svc.get_behavior_stats(account_id, symbols)
 
+        # 计划偏离度（仅针对有计划的标的）
+        plan_service = TradingPlanService(self.session)
+        plan_map = await plan_service.get_active_plans_by_symbols(account_id, symbols)
+        plan_deviation_map = {}
+        if plan_map:
+            market_provider = MarketDataProvider()
+
+            async def _price(sym: str):
+                try:
+                    return await market_provider.get_current_price(sym)
+                except Exception:
+                    return None
+
+            price_tasks = {sym: asyncio.create_task(_price(sym)) for sym in plan_map.keys()}
+            for sym, task in price_tasks.items():
+                price = await task
+                plan = plan_map.get(sym)
+                if plan and price and float(plan.entry_price) > 0:
+                    plan_deviation_map[sym] = min(abs(price - float(plan.entry_price)) / float(plan.entry_price) * 100, 100)
+
         limits_view = LimitsView(
             max_order_notional_usd=eff.limits.max_order_notional_usd,
             max_total_gamma_pct=eff.limits.max_total_gamma_pct,
@@ -75,7 +98,9 @@ class AiAdviceService:
         symbol_views = {}
         for sym in symbols:
             stats = behavior_stats.get(sym)
+            plan_deviation = plan_deviation_map.get(sym)
             if stats is None:
+                discipline_score = 60
                 bv = SymbolBehaviorView(
                     symbol=sym,
                     tier=eff.symbol_behavior_tiers.get(sym, "T2"),
@@ -83,8 +108,20 @@ class AiAdviceService:
                     sell_fly_score=50,
                     overtrade_score=50,
                     revenge_score=40,
+                    discipline_score=discipline_score,
+                    trade_count=0,
+                    sell_fly_events=0,
+                    sell_fly_extra_cost_ratio=0.0,
+                    overtrade_index=0.0,
+                    revenge_events=0,
                 )
             else:
+                discipline_score = stats.behavior_score
+                if stats.overtrade_score > 70 and plan_deviation is not None and plan_deviation > 30:
+                    discipline_score = max(0, discipline_score - 20)
+                elif stats.overtrade_score > 70:
+                    discipline_score = max(0, discipline_score - 10)
+
                 bv = SymbolBehaviorView(
                     symbol=sym,
                     tier=eff.symbol_behavior_tiers.get(sym, "T2"),
@@ -92,6 +129,12 @@ class AiAdviceService:
                     sell_fly_score=stats.sell_fly_score,
                     overtrade_score=stats.overtrade_score,
                     revenge_score=stats.revenge_trade_score,
+                    discipline_score=discipline_score,
+                    trade_count=stats.trade_count,
+                    sell_fly_events=stats.sell_fly_events,
+                    sell_fly_extra_cost_ratio=stats.sell_fly_extra_cost_ratio,
+                    overtrade_index=stats.overtrade_index,
+                    revenge_events=stats.revenge_events,
                 )
             symbol_views[sym] = bv
 

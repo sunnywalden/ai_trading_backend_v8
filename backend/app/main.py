@@ -5,12 +5,15 @@ from fastapi.responses import ORJSONResponse
 from typing import Optional, AsyncGenerator
 from sqlalchemy.ext.asyncio import AsyncSession
 from contextlib import asynccontextmanager
+import asyncio
 
 from app.core.config import settings
-from app.models.db import engine, SessionLocal, get_session, redis_client, ensure_mysql_indexes
+from app.models.db import engine, SessionLocal, get_session, redis_client, ensure_mysql_indexes, ensure_mysql_tables
 from app.engine.auto_hedge_engine import AutoHedgeEngine
 from app.services.risk_config_service import RiskConfigService
 from app.services.symbol_risk_profile_service import SymbolRiskProfileService
+from app.services.trading_plan_service import TradingPlanService
+from app.providers.market_data_provider import MarketDataProvider
 from app.services.option_exposure_service import OptionExposureService
 from app.schemas.ai_state import AiStateView, LimitsView, SymbolBehaviorView, ExposureView
 from app.broker.factory import make_option_broker_client
@@ -21,6 +24,7 @@ from app.services.behavior_scoring_service import BehaviorScoringService
 from app.routers import position_macro
 from app.routers import opportunities
 from app.routers import api_monitoring
+from app.routers import trading_plan
 from app.jobs.scheduler import init_scheduler, start_scheduler, shutdown_scheduler, add_job
 from app.jobs.data_refresh_jobs import register_all_jobs
 from app.core.proxy import apply_proxy_env, ProxyConfig
@@ -50,13 +54,14 @@ async def lifespan(app: FastAPI):
     else:
         print("• Scheduler disabled (ENABLE_SCHEDULER=false)")
 
-    # 启动时检查/创建MySQL索引
+    # 启动时检查/创建MySQL表与索引
     try:
+        await ensure_mysql_tables()
         await ensure_mysql_indexes()
         if settings.DB_TYPE == "mysql":
-            print("✓ MySQL indexes checked/ensured")
+            print("✓ MySQL tables/indexes checked/ensured")
     except Exception as e:
-        print(f"⚠ Failed to ensure MySQL indexes: {e}")
+        print(f"⚠ Failed to ensure MySQL tables/indexes: {e}")
     
     yield
     
@@ -95,6 +100,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 app.include_router(position_macro.router, prefix="/api/v1", tags=["持仓评估与宏观风险"])
 app.include_router(opportunities.router, prefix="/api/v1", tags=["潜在机会"])
 app.include_router(api_monitoring.router, prefix="/api/v1", tags=["API监控"])
+app.include_router(trading_plan.router, prefix="/api/v1", tags=["交易计划"])
 
 
 @app.get("/health")
@@ -175,6 +181,26 @@ async def get_ai_state(
     behavior_stats = await prof_svc.get_behavior_stats(account_id, symbols, effective_window)
     print(f"[GET /ai/state] Behavior stats retrieved for {len(behavior_stats)} symbols: {list(behavior_stats.keys())}")
 
+    # 计划偏离度（仅针对有计划的标的）
+    plan_service = TradingPlanService(session)
+    plan_map = await plan_service.get_active_plans_by_symbols(account_id, symbols)
+    plan_deviation_map = {}
+    if plan_map:
+        market_provider = MarketDataProvider()
+
+        async def _price(sym: str):
+            try:
+                return await market_provider.get_current_price(sym)
+            except Exception:
+                return None
+
+        price_tasks = {sym: asyncio.create_task(_price(sym)) for sym in plan_map.keys()}
+        for sym, task in price_tasks.items():
+            price = await task
+            plan = plan_map.get(sym)
+            if plan and price and float(plan.entry_price) > 0:
+                plan_deviation_map[sym] = min(abs(price - float(plan.entry_price)) / float(plan.entry_price) * 100, 100)
+
     limits_view = LimitsView(
         max_order_notional_usd=eff.limits.max_order_notional_usd,
         max_total_gamma_pct=eff.limits.max_total_gamma_pct,
@@ -185,8 +211,10 @@ async def get_ai_state(
     symbol_views = {}
     for sym in symbols:
         stats = behavior_stats.get(sym)
+        plan_deviation = plan_deviation_map.get(sym)
         if stats is None:
             # 没有历史行为数据时，给出中性评分和 0 指标
+            discipline_score = 60
             bv = SymbolBehaviorView(
                 symbol=sym,
                 tier=eff.symbol_behavior_tiers.get(sym, "T2"),
@@ -194,6 +222,7 @@ async def get_ai_state(
                 sell_fly_score=50,
                 overtrade_score=50,
                 revenge_score=40,
+                discipline_score=discipline_score,
                 trade_count=0,
                 sell_fly_events=0,
                 sell_fly_extra_cost_ratio=0.0,
@@ -201,6 +230,12 @@ async def get_ai_state(
                 revenge_events=0,
             )
         else:
+            discipline_score = stats.behavior_score
+            if stats.overtrade_score > 70 and plan_deviation is not None and plan_deviation > 30:
+                discipline_score = max(0, discipline_score - 20)
+            elif stats.overtrade_score > 70:
+                discipline_score = max(0, discipline_score - 10)
+
             bv = SymbolBehaviorView(
                 symbol=sym,
                 tier=eff.symbol_behavior_tiers.get(sym, "T2"),
@@ -208,6 +243,7 @@ async def get_ai_state(
                 sell_fly_score=stats.sell_fly_score,
                 overtrade_score=stats.overtrade_score,
                 revenge_score=stats.revenge_trade_score,
+                discipline_score=discipline_score,
                 trade_count=stats.trade_count,
                 sell_fly_events=stats.sell_fly_events,
                 sell_fly_extra_cost_ratio=stats.sell_fly_extra_cost_ratio,

@@ -15,6 +15,8 @@ from app.schemas.macro_risk import MacroRiskOverviewResponse
 from app.services.technical_analysis_service import TechnicalAnalysisService
 from app.services.fundamental_analysis_service import FundamentalAnalysisService
 from app.services.position_scoring_service import PositionScoringService
+from app.services.trading_plan_service import TradingPlanService
+from app.core.config import settings
 from app.services.macro_indicators_service import MacroIndicatorsService
 from app.services.macro_risk_scoring_service import MacroRiskScoringService
 from app.services.geopolitical_events_service import GeopoliticalEventsService
@@ -105,6 +107,15 @@ async def get_positions_assessment(
         scoring_service = PositionScoringService()
         scores = await scoring_service.get_all_position_scores(symbols, force_refresh=False)
         technical_service = TechnicalAnalysisService(session)
+
+        # 读取激活计划（用于偏离度计算）
+        plan_service = TradingPlanService(session)
+        plan_map = await plan_service.get_active_plans_by_symbols(account_id, symbols)
+
+        # 获取风险预算（使用全局限额作为近似）
+        budget_base = settings.DEFAULT_RISK_BUDGET_USD if hasattr(settings, "DEFAULT_RISK_BUDGET_USD") else 0
+        if budget_base <= 0:
+            budget_base = 20000.0
         
         # 构建响应
         position_assessments = []
@@ -272,6 +283,18 @@ async def get_positions_assessment(
                 display_symbol = stock_position.name
             
             # 构建持仓评估数据（即使没有评分也显示基本信息）
+            # 计划偏离度
+            plan_deviation = None
+            plan = plan_map.get(symbol)
+            if plan and plan.entry_price:
+                try:
+                    plan_deviation = min(abs(current_price - float(plan.entry_price)) / float(plan.entry_price) * 100, 100)
+                except Exception:
+                    plan_deviation = None
+
+            # 风险预算占用率（近似：使用市值/预算）
+            budget_utilization = round(min(total_symbol_market_value / max(budget_base, 1e-6), 1.0), 4)
+
             assessment = {
                 "symbol": display_symbol,
                 "quantity": stock_quantity,
@@ -280,6 +303,8 @@ async def get_positions_assessment(
                 "market_value": round(total_symbol_market_value, 2),
                 "unrealized_pnl": round(total_symbol_pnl, 2),
                 "unrealized_pnl_percent": round(unrealized_pnl_percent, 2),
+                "budget_utilization": budget_utilization,
+                "plan_deviation": plan_deviation,
                 # 评分数据（使用默认值如果不可用）
                 "overall_score": score_data.overall_score if score_data else 50,
                 "technical_score": score_data.technical_score if score_data else 50,

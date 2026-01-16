@@ -32,6 +32,8 @@ class OpportunityItemView(BaseModel):
 
     recommendation: Optional[str] = None
     reason: Optional[str] = None
+    plan_match_score: Optional[float] = None
+    plan_match_reason: Optional[str] = None
 
 
 class OpportunityRunView(BaseModel):

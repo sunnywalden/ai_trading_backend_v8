@@ -11,11 +11,13 @@
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 import yfinance as yf
+import time
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.fundamental_data import FundamentalData
 from app.core.config import settings
+from app.services.api_monitoring_service import api_monitor, APIProvider
 
 
 # 延迟导入避免循环依赖
@@ -185,12 +187,21 @@ class FundamentalAnalysisService:
         Returns:
             包含所有基本面指标的字典，失败返回None
         """
+        gate = await api_monitor.can_call_provider(APIProvider.YAHOO_FINANCE)
+        if not gate.get("can_call", True):
+            print(f"[Fundamental] Skip Yahoo Finance due to cooldown/limit: {gate.get('reason')}")
+            return None
+
+        start_time = time.time()
+        success = False
+        error_msg = None
         try:
             ticker = yf.Ticker(symbol)
             info = ticker.info
             
             # 检查是否成功获取数据
             if not info or "symbol" not in info:
+                error_msg = "Empty info returned"
                 return None
             
             # 提取所需指标
@@ -226,11 +237,22 @@ class FundamentalAnalysisService:
             if fundamental["earnings_growth"]:
                 fundamental["earnings_growth"] = fundamental["earnings_growth"] * 100
             
+            success = True
             return fundamental
             
         except Exception as e:
+            error_msg = str(e)
             print(f"Error fetching fundamental data for {symbol}: {e}")
             return None
+        finally:
+            response_time = (time.time() - start_time) * 1000
+            await api_monitor.record_api_call(
+                provider=APIProvider.YAHOO_FINANCE,
+                endpoint=f"fundamental:{symbol}",
+                success=success,
+                response_time_ms=response_time,
+                error_message=error_msg,
+            )
 
     def _calculate_valuation_score(self, data: Dict[str, Any]) -> float:
         """

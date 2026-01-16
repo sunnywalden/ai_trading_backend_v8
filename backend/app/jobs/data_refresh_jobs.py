@@ -22,6 +22,7 @@ from app.services.macro_indicators_service import MacroIndicatorsService
 from app.services.macro_risk_scoring_service import MacroRiskScoringService
 from app.services.geopolitical_events_service import GeopoliticalEventsService
 from app.services.potential_opportunities_service import PotentialOpportunitiesService
+from app.models.trading_plan import TradingPlan
 from app.broker.factory import make_option_broker_client
 from app.core.config import settings
 
@@ -306,6 +307,43 @@ async def scan_daily_opportunities_job():
         logger.error(f"Daily opportunities scan job failed: {str(e)}", exc_info=True)
 
 
+async def plan_expiration_job():
+    """任务8: 交易计划过期标记
+
+    频率: 每天凌晨 0:30
+    功能: 将已过期的 ACTIVE 计划标记为 EXPIRED
+    """
+    try:
+        logger.info("Starting plan expiration job")
+        start_time = datetime.now()
+
+        async with _get_session() as session:
+            try:
+                result = await session.execute(
+                    select(TradingPlan).where(
+                        TradingPlan.plan_status == "ACTIVE",
+                        TradingPlan.valid_until.is_not(None),
+                        TradingPlan.valid_until < datetime.now(),
+                    )
+                )
+                plans = list(result.scalars().all())
+                if plans:
+                    for plan in plans:
+                        plan.plan_status = "EXPIRED"
+                    await session.commit()
+                expired_count = len(plans)
+            except Exception:
+                await session.rollback()
+                raise
+
+        elapsed = (datetime.now() - start_time).total_seconds()
+        logger.info(
+            f"Plan expiration completed: expired={expired_count}, took {elapsed:.2f}s"
+        )
+    except Exception as e:
+        logger.error(f"Plan expiration job failed: {str(e)}", exc_info=True)
+
+
 async def manual_opportunity_scan_job(universe_name: str, min_score: int, max_results: int, force_refresh: bool):
     """一次性手动触发的机会扫描任务（用于 API 触发的后台任务）。
 
@@ -409,6 +447,16 @@ def register_all_jobs(scheduler):
         id='scan_daily_opportunities_tech',
         name='每日机会扫描-科技股(20:30)',
         hour=20,
+        minute=30
+    )
+
+    # 任务8: 交易计划过期标记 - 每天北京时间00:30
+    add_job(
+        func=plan_expiration_job,
+        trigger='cron',
+        id='plan_expiration_job',
+        name='交易计划过期标记(00:30)',
+        hour=0,
         minute=30
     )
     

@@ -34,6 +34,7 @@ class SymbolBehaviorView(BaseModel):
     sell_fly_score: int
     overtrade_score: int
     revenge_score: int
+    discipline_score: int
 
     # 原始行为指标，便于前端直观展示
     trade_count: int

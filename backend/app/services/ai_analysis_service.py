@@ -15,9 +15,11 @@ import logging
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
 import json
+import time
 
 from app.core.config import settings
 from app.core.proxy import apply_proxy_env, ProxyConfig
+from app.services.api_monitoring_service import api_monitor, APIProvider
 
 logger = logging.getLogger(__name__)
 
@@ -357,6 +359,11 @@ class AIAnalysisService:
         """
         if not self.client:
             return None
+
+        gate = await api_monitor.can_call_provider(APIProvider.OPENAI)
+        if not gate.get("can_call", True):
+            logger.warning(f"OpenAI in cooldown/limit: {gate.get('reason')}")
+            return None
         
         # 使用配置的max_tokens
         if max_tokens is None:
@@ -367,6 +374,9 @@ class AIAnalysisService:
         
         # 尝试不同的模型
         for model in models:
+            start_time = time.time()
+            success = False
+            error_msg = None
             try:
                 # GPT-5 系列在 chat.completions 上不支持 max_tokens，需要改用 max_completion_tokens。
                 # 为了兼容 GPT-4 等老模型，这里按模型前缀做参数分流。
@@ -396,6 +406,7 @@ class AIAnalysisService:
                 
                 content = response.choices[0].message.content.strip()
                 logger.info(f"GPT response generated using {model} (max_tokens={max_tokens}, timeout={self.timeout}s)")
+                success = True
                 return content
                 
             except Exception as e:
@@ -408,6 +419,15 @@ class AIAnalysisService:
                 else:
                     logger.warning(f"Failed to call {model}: {error_msg}")
                 continue
+            finally:
+                response_time = (time.time() - start_time) * 1000
+                await api_monitor.record_api_call(
+                    provider=APIProvider.OPENAI,
+                    endpoint=f"chat.completions:{model}",
+                    success=success,
+                    response_time_ms=response_time,
+                    error_message=error_msg,
+                )
         
         logger.info("All GPT models unavailable, using rule-based generation as fallback")
         return None

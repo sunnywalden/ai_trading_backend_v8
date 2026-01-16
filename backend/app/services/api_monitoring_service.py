@@ -89,6 +89,7 @@ class APIRateLimit:
     # 告警阈值（使用量达到限制的百分比）
     WARNING_THRESHOLD = 0.7   # 70%
     CRITICAL_THRESHOLD = 0.9  # 90%
+    DEFAULT_COOLDOWN_SECONDS = settings.API_RATE_LIMIT_COOLDOWN_SECONDS
 
 
 class APIMonitoringService:
@@ -141,9 +142,39 @@ class APIMonitoringService:
         # 记录错误详情
         if not success and error_message:
             await self._record_error(provider, endpoint, error_message, now)
+            if self._is_rate_limit_error(error_message):
+                await self.set_cooldown(provider, APIRateLimit.DEFAULT_COOLDOWN_SECONDS, error_message)
         
         # 检查是否接近限制
         await self._check_rate_limit_threshold(provider)
+
+    async def can_call_provider(self, provider: APIProvider) -> Dict[str, Any]:
+        """检查是否允许调用（考虑冷却与配额）。"""
+        cooldown = await self._get_cooldown(provider)
+        if cooldown:
+            return {
+                "can_call": False,
+                "reason": cooldown.get("reason") or "in cooldown",
+                "cooldown_until": cooldown.get("until"),
+            }
+
+        status = await self.check_rate_limit_status(provider)
+        return {
+            "can_call": status.get("can_call", True),
+            "reason": status.get("reason") or "",
+            "cooldown_until": None,
+        }
+
+    async def set_cooldown(self, provider: APIProvider, seconds: int, reason: str = "") -> None:
+        """设置某个API的冷却期，避免连续触发限流。"""
+        until = datetime.now() + timedelta(seconds=seconds)
+        payload = {"until": until.isoformat(), "reason": reason}
+        redis_key = f"api_monitor:{provider.value}:cooldown"
+        await cache.set(redis_key, payload, expire=seconds)
+
+    async def _get_cooldown(self, provider: APIProvider) -> Optional[Dict[str, Any]]:
+        redis_key = f"api_monitor:{provider.value}:cooldown"
+        return await cache.get(redis_key)
     
     async def get_api_stats(
         self, 
@@ -403,6 +434,11 @@ class APIMonitoringService:
                 f"⚠️  {provider.value} API接近限额！"
                 f"已使用 {stats['usage_percent']}%，剩余 {stats['remaining']} 次"
             )
+
+    @staticmethod
+    def _is_rate_limit_error(error_message: str) -> bool:
+        msg = error_message.lower()
+        return "rate limited" in msg or "too many requests" in msg or "429" in msg
     
     def _get_rate_limit_summary(self) -> Dict[str, Any]:
         """获取所有API的Rate Limit策略摘要"""

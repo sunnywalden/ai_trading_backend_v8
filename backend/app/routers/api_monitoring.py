@@ -5,9 +5,11 @@ API监控路由
 """
 
 from fastapi import APIRouter, Query
+from datetime import datetime
 from typing import Dict, Any, List
 
 from app.services.api_monitoring_service import api_monitor, APIProvider, APIRateLimit
+from app.models.db import redis_client
 
 router = APIRouter(tags=["API Monitoring"])
 
@@ -141,6 +143,9 @@ async def monitoring_health_check() -> Dict[str, Any]:
         "warning": warning_count,
         "critical": critical_count,
         "monitoring_active": True,
+        "monitoring_enabled": True,
+        "redis_enabled": redis_client is not None,
+        "last_updated": datetime.now().isoformat(),
         "rate_limit_thresholds": {
             "warning": f"{int(APIRateLimit.WARNING_THRESHOLD * 100)}%",
             "critical": f"{int(APIRateLimit.CRITICAL_THRESHOLD * 100)}%"
