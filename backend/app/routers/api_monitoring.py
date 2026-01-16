@@ -9,7 +9,7 @@ from typing import Dict, Any, List
 
 from app.services.api_monitoring_service import api_monitor, APIProvider, APIRateLimit
 
-router = APIRouter(prefix="/monitoring", tags=["API Monitoring"])
+router = APIRouter(tags=["API Monitoring"])
 
 
 @router.get("/stats/{provider}", summary="获取特定API的统计数据")
@@ -111,7 +111,7 @@ async def get_provider_rate_limit_policy(provider: APIProvider) -> Dict[str, Any
     return api_monitor.get_rate_limit_info(provider)
 
 
-@router.get("/health", summary="API监控服务健康检查")
+@router.get("/monitoring/health", summary="API监控服务健康检查")
 async def monitoring_health_check() -> Dict[str, Any]:
     """
     检查API监控服务的健康状态

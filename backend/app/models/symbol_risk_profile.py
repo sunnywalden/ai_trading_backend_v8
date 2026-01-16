@@ -1,9 +1,13 @@
-from sqlalchemy import Column, Integer, String, Boolean, JSON, DateTime, text
+from sqlalchemy import Column, Integer, String, Boolean, JSON, DateTime, text, Index
 from .db import Base
 
 
 class SymbolRiskProfile(Base):
     __tablename__ = "symbol_risk_profile"
+
+    __table_args__ = (
+        Index("ix_risk_profile_symbol_market", "symbol", "market"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     symbol = Column(String(32), nullable=False)

@@ -1,9 +1,13 @@
-from sqlalchemy import Column, Integer, String, DateTime, DECIMAL, text
+from sqlalchemy import Column, Integer, String, DateTime, DECIMAL, text, Index
 from .db import Base
 
 
 class SymbolBehaviorStats(Base):
     __tablename__ = "symbol_behavior_stats"
+
+    __table_args__ = (
+        Index("ix_behavior_account_symbol_window", "account_id", "symbol", "window_days"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     account_id = Column(String(64), nullable=False)

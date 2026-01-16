@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Dict
 from datetime import datetime, date
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -10,6 +10,8 @@ from tigeropen.common.consts import SecurityType, Market
 
 from .option_client_base import OptionBrokerClient
 from .models import OptionPosition, UnderlyingPosition, OptionContract, Greeks
+from app.core.cache import cache
+from app.core.cache import cache
 
 
 class TigerOptionClient(OptionBrokerClient):
@@ -38,6 +40,130 @@ class TigerOptionClient(OptionBrokerClient):
         self.trade_client = TradeClient(self.client_config)
         self.quote_client = QuoteClient(self.client_config)
         self._executor = ThreadPoolExecutor(max_workers=4)
+    
+    async def _get_hk_stock_names_from_cache(self, symbols: List[str]) -> Dict[str, str]:
+        """从缓存获取港股名称
+        
+        Args:
+            symbols: 股票代码列表
+            
+        Returns:
+            {symbol: name} 字典，只返回缓存中有的
+        """
+        result = {}
+        for symbol in symbols:
+            cache_key = f"hk_stock_name:{symbol}"
+            name = await cache.get(cache_key)
+            if name:
+                result[symbol] = name
+                print(f"[TigerOptionClient] Got HK stock name from cache: {symbol} -> {name}")
+        return result
+    
+    async def _set_hk_stock_names_to_cache(self, stock_names: Dict[str, str]):
+        """将港股名称存入缓存
+        
+        Args:
+            stock_names: {symbol: name} 字典
+        """
+        for symbol, name in stock_names.items():
+            if name:
+                cache_key = f"hk_stock_name:{symbol}"
+                # 缓存 30 天（股票名称几乎不变）
+                await cache.set(cache_key, name, expire=30*24*3600)
+                print(f"[TigerOptionClient] Cached HK stock name: {symbol} -> {name}")
+    
+    async def _fetch_hk_stock_names(self, symbols: List[str]) -> Dict[str, str]:
+        """从 Tiger API 批量获取港股名称
+        
+        Args:
+            symbols: 股票代码列表
+            
+        Returns:
+            {symbol: name} 字典
+        """
+        stock_names = {}
+        if not symbols:
+            return stock_names
+            
+        try:
+            briefs = await self._run_in_executor(
+                self.quote_client.get_stock_briefs,
+                symbols
+            )
+            if briefs is not None and len(briefs) > 0:
+                for i, row in briefs.iterrows():
+                    sym = row.get('symbol')
+                    # 尝试多个字段获取名称
+                    name = row.get('name') or row.get('nameCN') or row.get('name_cn') or row.get('localSymbol')
+                    if sym and name:
+                        stock_names[sym] = name
+                        print(f"[TigerOptionClient] Fetched HK stock name from API: {sym} -> {name}")
+        except Exception as e:
+            print(f"[TigerOptionClient] Error fetching HK stock names from API: {e}")
+        
+        return stock_names
+    
+    async def _get_hk_stock_names_from_cache(self, symbols: List[str]) -> Dict[str, str]:
+        """从缓存获取港股名称
+        
+        Args:
+            symbols: 股票代码列表
+            
+        Returns:
+            {symbol: name} 字典，只返回缓存中有的
+        """
+        result = {}
+        for symbol in symbols:
+            cache_key = f"hk_stock_name:{symbol}"
+            name = await cache.get(cache_key)
+            if name:
+                result[symbol] = name
+                print(f"[TigerOptionClient] Got HK stock name from cache: {symbol} -> {name}")
+        return result
+    
+    async def _set_hk_stock_names_to_cache(self, stock_names: Dict[str, str]):
+        """将港股名称存入缓存
+        
+        Args:
+            stock_names: {symbol: name} 字典
+        """
+        for symbol, name in stock_names.items():
+            if name:
+                cache_key = f"hk_stock_name:{symbol}"
+                # 缓存 30 天（股票名称几乎不变）
+                await cache.set(cache_key, name, expire=30*24*3600)
+                print(f"[TigerOptionClient] Cached HK stock name: {symbol} -> {name}")
+    
+    async def _fetch_hk_stock_names(self, symbols: List[str]) -> Dict[str, str]:
+        """从 Tiger API 批量获取港股名称
+        
+        Args:
+            symbols: 股票代码列表
+            
+        Returns:
+            {symbol: name} 字典
+        """
+        stock_names = {}
+        if not symbols:
+            return stock_names
+            
+        try:
+            briefs = await self._run_in_executor(
+                self.quote_client.get_stock_briefs,
+                symbols
+            )
+            if briefs is not None and len(briefs) > 0:
+                for i, row in briefs.iterrows():
+                    sym = row.get('symbol')
+                    # 尝试多个字段获取名称
+                    name = row.get('name') or row.get('nameCN') or row.get('name_cn') or row.get('localSymbol')
+                    if sym and name:
+                        stock_names[sym] = name
+                        print(f"[TigerOptionClient] Fetched HK stock name from API: {sym} -> {name}")
+        except Exception as e:
+            print(f"[TigerOptionClient] Error fetching HK stock names from API: {e}")
+        
+        return stock_names
 
     async def _run_in_executor(self, func, *args, **kwargs):
         """在线程池中运行同步的 SDK 调用"""
@@ -102,20 +228,53 @@ class TigerOptionClient(OptionBrokerClient):
                 print(f"[TigerOptionClient] Got {len(hk_positions) if hk_positions else 0} HK underlying positions")
                 
                 if hk_positions:
+                    # 收集所有港股symbol，批量获取股票信息
+                    hk_symbols = []
+                    hk_position_map = {}
                     for pos in hk_positions:
                         if not pos.contract or not pos.contract.symbol:
-                            print(f"[TigerOptionClient] Skipping HK position without contract/symbol")
                             continue
-                        
                         symbol = pos.contract.symbol
                         quantity = int(pos.quantity or 0)
-                        
-                        # 跳过数量为0的持仓
                         if quantity == 0:
-                            print(f"[TigerOptionClient] Skipping HK {symbol} with zero quantity")
                             continue
+                        hk_symbols.append(symbol)
+                        hk_position_map[symbol] = pos
+                    
+                    # 首先从缓存获取股票名称
+                    stock_names = await self._get_hk_stock_names_from_cache(hk_symbols)
+                    
+                    # 找出缓存中没有的symbol
+                    missing_symbols = [sym for sym in hk_symbols if sym not in stock_names]
+                    
+                    # 如果有缺失的，从 API 获取
+                    if missing_symbols:
+                        print(f"[TigerOptionClient] Fetching {len(missing_symbols)} HK stock names from API")
+                        new_names = await self._fetch_hk_stock_names(missing_symbols)
                         
-                        print(f"[TigerOptionClient] HK Position: {symbol}, qty={quantity}")
+                        # 合并结果
+                        stock_names.update(new_names)
+                        
+                        # 将新获取的名称存入缓存
+                        if new_names:
+                            await self._set_hk_stock_names_to_cache(new_names)
+                    else:
+                        print(f"[TigerOptionClient] All {len(hk_symbols)} HK stock names found in cache")
+                    
+                    # 构建持仓对象
+                    for symbol, pos in hk_position_map.items():
+                        quantity = int(pos.quantity or 0)
+                        
+                        # 尝试获取股票名称（优先从contract，其次从缓存/API）
+                        stock_name = None
+                        if hasattr(pos.contract, 'name') and pos.contract.name:
+                            stock_name = pos.contract.name
+                        elif hasattr(pos.contract, 'local_symbol') and pos.contract.local_symbol:
+                            stock_name = pos.contract.local_symbol
+                        elif symbol in stock_names:
+                            stock_name = stock_names[symbol]
+                        
+                        print(f"[TigerOptionClient] HK Position: {symbol} ({stock_name}), qty={quantity}")
                         
                         underlying = UnderlyingPosition(
                             symbol=symbol,
@@ -124,6 +283,7 @@ class TigerOptionClient(OptionBrokerClient):
                             avg_price=float(pos.average_cost or 0),
                             last_price=float(pos.market_price or 0),
                             currency=pos.contract.currency or "HKD",
+                            name=stock_name,
                         )
                         results.append(underlying)
             except Exception as hk_error:
@@ -176,7 +336,11 @@ class TigerOptionClient(OptionBrokerClient):
                             elif hasattr(brief, 'symbol'):
                                 option_briefs[brief.symbol] = brief
                 except Exception as e:
-                    print(f"[TigerOptionClient] Error fetching option Greeks: {e}")
+                    err_str = str(e)
+                    if "permission denied" in err_str.lower() or "rate limit" in err_str.lower():
+                        print(f"[TigerOptionClient] Option quote permission not available, using default greeks. {e}")
+                    else:
+                        print(f"[TigerOptionClient] Error fetching option Greeks: {e}")
 
             ts = datetime.utcnow().timestamp()
 
