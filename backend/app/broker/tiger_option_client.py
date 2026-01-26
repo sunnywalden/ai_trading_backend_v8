@@ -92,8 +92,8 @@ class TigerOptionClient(OptionBrokerClient):
             if briefs is not None and len(briefs) > 0:
                 for i, row in briefs.iterrows():
                     sym = row.get('symbol')
-                    # 尝试多个字段获取名称
-                    name = row.get('name') or row.get('nameCN') or row.get('name_cn') or row.get('localSymbol')
+                    # 尝试多个字段获取名称（优先使用中文名称）
+                    name = row.get('nameCN') or row.get('name_cn') or row.get('localSymbol') or row.get('name')
                     if sym and name:
                         stock_names[sym] = name
                         print(f"[TigerOptionClient] Fetched HK stock name from API: {sym} -> {name}")
