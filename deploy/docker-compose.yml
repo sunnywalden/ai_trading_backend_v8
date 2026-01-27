@@ -23,6 +23,9 @@ services:
     container_name: ai-trading-redis
     ports:
       - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: ["redis-server", "--appendonly", "yes"]
     networks:
       - ai-trading-network
     healthcheck:
@@ -40,7 +43,7 @@ services:
     # 推荐在仓库根目录创建 .env（cp .env.example .env），然后从 deploy/ 引用：
     #   docker compose -f deploy/docker-compose.yml up -d
     env_file:
-      - ../.env
+      - ./.env
     environment:
       # 容器内建议用绝对路径 SQLite，并挂载 /data 做持久化
       - DB_TYPE=${DB_TYPE:-mysql}
@@ -52,9 +55,9 @@ services:
       - TIGER_PRIVATE_KEY_PATH=${TIGER_PRIVATE_KEY_PATH:-/keys/tiger_private_key.pem}
     volumes:
       # 数据库/数据持久化目录
-      - ../data:/data
+      - ./backend_data:/data
       # Tiger 私钥目录（可选：如果不使用 Tiger，可注释掉）
-      - ../backend/keys:/keys:ro
+      - ./backend/keys:/keys:ro
     restart: unless-stopped
     networks:
       - ai-trading-network
@@ -91,3 +94,4 @@ networks:
 
 volumes:
   mysql_data:
+  redis_data:

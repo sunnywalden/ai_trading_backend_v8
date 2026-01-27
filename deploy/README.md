@@ -26,6 +26,19 @@
 - 镜像名：`ai-trading-backend:local`
 - 端口：容器 `8088`
 
+示例构建命令（在仓库根目录执行，build context 为 .）：
+
+```bash
+# 使用本地标签构建镜像
+docker build -f deploy/Dockerfile -t ai-trading-backend:local .
+
+# 直接使用远程仓库地址打 tag（替换 yourrepo 为你的镜像仓库）
+docker build -f deploy/Dockerfile -t yourrepo/ai-trading-backend:latest .
+
+# 可选：使用 buildx 构建并推送多架构镜像（需要事先启用 buildx 和登录远程仓库）
+docker buildx build --platform linux/amd64,linux/arm64 -f deploy/Dockerfile -t yourrepo/ai-trading-backend:latest --push .
+```
+
 > 说明：本仓库默认 SQLite。容器内建议把 DB 放到可挂载目录（例如 `/data/demo.db`），通过 `DATABASE_URL` 指定。
 
 ### 1.2 本地运行
@@ -198,6 +211,23 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8088
 - `image: REPLACE_ME/ai-trading-backend:latest`
 
 2) 推送镜像到你的镜像仓库（Docker Hub / ECR / GCR / ACR 等）。
+
+示例推送命令：
+
+```bash
+# 使用 Docker Hub 或通用 Registry（替换 yourrepo）
+docker tag ai-trading-backend:local yourrepo/ai-trading-backend:latest
+docker push yourrepo/ai-trading-backend:latest
+
+# 直接构建并推送
+docker build -f deploy/Dockerfile -t yourrepo/ai-trading-backend:latest .
+docker push yourrepo/ai-trading-backend:latest
+
+# AWS ECR 示例（替换 region/account）
+aws ecr get-login-password --region <region> | docker login --username AWS --password-stdin <account>.dkr.ecr.<region>.amazonaws.com
+docker tag ai-trading-backend:local <account>.dkr.ecr.<region>.amazonaws.com/ai-trading-backend:latest
+docker push <account>.dkr.ecr.<region>.amazonaws.com/ai-trading-backend:latest
+```
 
 ### 2.2 创建 Namespace、配置与存储
 
