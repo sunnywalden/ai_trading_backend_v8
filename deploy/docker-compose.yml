@@ -57,7 +57,7 @@ services:
       # 数据库/数据持久化目录
       - ./backend_data:/data
       # Tiger 私钥目录（可选：如果不使用 Tiger，可注释掉）
-      - ./backend/keys:/keys:ro
+      - ./keys:/app/backend/keys:ro
     restart: unless-stopped
     networks:
       - ai-trading-network
@@ -78,7 +78,9 @@ services:
     image: sunnywalden/ai-trading-frontend:latest
     container_name: ai-trading-frontend
     ports:
-      - "8080:80"
+      - "80:80"
+    env_file:
+      - ./.frontend_env
     environment:
       - BACKEND_URL=http://backend:8088
       - NODE_ENV=production
