@@ -6,7 +6,7 @@ services:
     container_name: ai-trading-mysql
     environment:
       - MYSQL_DATABASE=ai_trading
-      - MYSQL_ROOT_PASSWORD=password
+      - MYSQL_ROOT_PASSWORD=StrongPassw0rd
     ports:
       - "3306:3306"
     volumes:
@@ -75,18 +75,25 @@ services:
 
   frontend:
     # 复用你现有前端 compose 的结构；可用 FRONTEND_IMAGE 覆盖
-    image: ai-trading-frontend:latest
+    image: sunnywalden/ai-trading-frontend:latest
     container_name: ai-trading-frontend
     ports:
       - "8080:80"
     environment:
       - BACKEND_URL=http://backend:8088
+      - NODE_ENV=production
     restart: unless-stopped
     networks:
       - ai-trading-network
     depends_on:
       backend:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
 
 networks:
   ai-trading-network:
