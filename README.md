@@ -77,11 +77,13 @@ AI Trading Backend V8 是一个基于 FastAPI 的**交易风控 + 持仓评估 +
 
 3) 启动：`uvicorn app.main:app --reload --host 0.0.0.0 --port 8088`
 
-4) 验证：
-- `GET /health`
-- `GET /ai/state`
-- `POST /api/v1/positions/refresh`
-- `GET /api/v1/positions/assessment`
+4) 验证（注意：默认启用了后端认证，需先登录拿 token）：
+- `GET /health`  （公开）
+- `POST /api/v1/login`  （表单提交 username/password，获取 Bearer token）
+- 使用 `Authorization: Bearer <token>` 访问受保护接口，如：
+  - `GET /api/v1/ai/state`
+  - `POST /api/v1/positions/refresh`
+  - `GET /api/v1/positions/assessment`
 
 ## ⚙️ 配置
 

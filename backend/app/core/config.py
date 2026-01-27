@@ -97,6 +97,16 @@ class Settings(BaseSettings):
     HTTPS_PROXY: str | None = None
     NO_PROXY: str | None = None
 
+    # ==================== 认证配置（默认启用） ====================
+    # 是否开启认证（默认 True）。在生产环境请通过环境变量覆盖默认用户名/密码。
+    AUTH_ENABLED: bool = True
+    ADMIN_USERNAME: str = "admin"
+    # 在 .env 中设置 ADMIN_PASSWORD，避免将明文密码提交到代码仓库
+    ADMIN_PASSWORD: str = "admin"
+    # 用于签发 JWT token 的密钥，请在部署时设置为强随机值
+    JWT_SECRET_KEY: str = "change-me-please"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+
     # FRED API 配置（宏观经济数据）
     FRED_API_KEY: str | None = None
 
