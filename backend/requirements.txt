@@ -8,6 +8,8 @@ aiosqlite
 aiomysql
 redis
 cryptography
+python-jose[cryptography]
+python-multipart
 greenlet
 tigeropen
 

@@ -28,6 +28,8 @@ from app.routers import trading_plan
 from app.jobs.scheduler import init_scheduler, start_scheduler, shutdown_scheduler, add_job
 from app.jobs.data_refresh_jobs import register_all_jobs
 from app.core.proxy import apply_proxy_env, ProxyConfig
+from app.core.auth import get_current_user, login_for_access_token
+from fastapi.security import OAuth2PasswordRequestForm
 from datetime import datetime
 from app.core.cache import cache
 
@@ -96,11 +98,11 @@ app.add_middleware(
 # 启用GZip压缩（大响应显著减小体积）
 app.add_middleware(GZipMiddleware, minimum_size=1024)
 
-# 注册路由
-app.include_router(position_macro.router, prefix="/api/v1", tags=["持仓评估与宏观风险"])
-app.include_router(opportunities.router, prefix="/api/v1", tags=["潜在机会"])
-app.include_router(api_monitoring.router, prefix="/api/v1", tags=["API监控"])
-app.include_router(trading_plan.router, prefix="/api/v1", tags=["交易计划"])
+# 注册路由（默认受保护，需认证）
+app.include_router(position_macro.router, prefix="/api/v1", tags=["持仓评估与宏观风险"], dependencies=[Depends(get_current_user)])
+app.include_router(opportunities.router, prefix="/api/v1", tags=["潜在机会"], dependencies=[Depends(get_current_user)])
+app.include_router(api_monitoring.router, prefix="/api/v1", tags=["API监控"], dependencies=[Depends(get_current_user)])
+app.include_router(trading_plan.router, prefix="/api/v1", tags=["交易计划"], dependencies=[Depends(get_current_user)])
 
 
 @app.get("/health")
@@ -108,8 +110,14 @@ async def health():
     return {"status": "ok", "mode": settings.TRADE_MODE}
 
 
+@app.post("/api/v1/login")
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    """管理员通过用户名/密码换取 Bearer token（JWT）。"""
+    return await login_for_access_token(form_data)
+
+
 @app.post("/api/v1/run-auto-hedge-once")
-async def run_auto_hedge_once(session: AsyncSession = Depends(get_session)):
+async def run_auto_hedge_once(session: AsyncSession = Depends(get_session), current_user: str = Depends(get_current_user)):
     engine = AutoHedgeEngine(session)
     await engine.run_once()
     return {"status": "ok", "detail": "auto-hedge executed (or simulated)"}
@@ -119,7 +127,8 @@ async def run_auto_hedge_once(session: AsyncSession = Depends(get_session)):
 async def get_ai_state(
     session: AsyncSession = Depends(get_session),
     window_days: Optional[int] = Query(None, description="窗口期（天），可选，前端可传入以覆盖自动选择"),
-    force_refresh: bool = Query(False, description="是否强制刷新缓存")
+    force_refresh: bool = Query(False, description="是否强制刷新缓存"),
+    current_user: str = Depends(get_current_user)
 ):
     """返回当前风控状态 + Greeks 敞口 + 每个标的的行为画像。"""
     print("[GET /ai/state] Starting request...")
@@ -270,7 +279,7 @@ async def get_ai_state(
 
 
 @app.post("/api/v1/ai/advice", response_model=AiAdviceResponse)
-async def ai_advice(req: AiAdviceRequest, session: AsyncSession = Depends(get_session)):
+async def ai_advice(req: AiAdviceRequest, session: AsyncSession = Depends(get_session), current_user: str = Depends(get_current_user)):
     """AI 决策助手接口。
 
     输入：目标描述 + 风险偏好 + 时间维度；
@@ -285,7 +294,8 @@ async def ai_advice(req: AiAdviceRequest, session: AsyncSession = Depends(get_se
 async def rebuild_behavior_stats(
     payload: dict = Body(...),
     session: AsyncSession = Depends(get_session),
-    async_run: bool = Query(False, description="是否异步执行")
+    async_run: bool = Query(False, description="是否异步执行"),
+    current_user: str = Depends(get_current_user)
 ):
     """重计算最近 N 天的行为评分（基于老虎历史成交 + 盈亏数据）。
 
@@ -335,7 +345,7 @@ async def rebuild_behavior_stats(
 
 
 @app.get("/api/v1/admin/scheduler/jobs")
-async def get_scheduled_jobs():
+async def get_scheduled_jobs(current_user: str = Depends(get_current_user)):
     """获取所有定时任务状态"""
     from app.jobs.scheduler import get_jobs
     try:
@@ -350,7 +360,7 @@ async def get_scheduled_jobs():
 
 
 @app.post("/api/v1/admin/scheduler/jobs/{job_id}/pause")
-async def pause_scheduled_job(job_id: str):
+async def pause_scheduled_job(job_id: str, current_user: str = Depends(get_current_user)):
     """暂停指定的定时任务"""
     from app.jobs.scheduler import pause_job
     try:
@@ -361,7 +371,7 @@ async def pause_scheduled_job(job_id: str):
 
 
 @app.post("/api/v1/admin/scheduler/jobs/{job_id}/resume")
-async def resume_scheduled_job(job_id: str):
+async def resume_scheduled_job(job_id: str, current_user: str = Depends(get_current_user)):
     """恢复指定的定时任务"""
     from app.jobs.scheduler import resume_job
     try:
@@ -372,7 +382,7 @@ async def resume_scheduled_job(job_id: str):
 
 
 @app.put("/api/v1/admin/scheduler/jobs/{job_id}/schedule")
-async def update_job_schedule(job_id: str, payload: JobScheduleRequest):
+async def update_job_schedule(job_id: str, payload: JobScheduleRequest, current_user: str = Depends(get_current_user)):
     """按小时/分钟/时区更新定时任务的触发 cron"""
     from app.jobs.scheduler import reschedule_job, get_job, format_job
 
