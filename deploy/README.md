@@ -23,20 +23,20 @@
 - Build context：仓库根目录（用于 COPY backend/）
 
 示例：
-- 镜像名：`ai-trading-backend:local`
+- 镜像名：`sunnywalden/ai-trading-backend:latest`
 - 端口：容器 `8088`
 
 示例构建命令（在仓库根目录执行，build context 为 .）：
 
 ```bash
 # 使用本地标签构建镜像
-docker build -f deploy/Dockerfile -t ai-trading-backend:local .
+docker build -f deploy/Dockerfile -t sunnywalden/ai-trading-backend:latest .
 
 # 直接使用远程仓库地址打 tag（替换 yourrepo 为你的镜像仓库）
-docker build -f deploy/Dockerfile -t yourrepo/ai-trading-backend:latest .
+docker build -f deploy/Dockerfile -t sunnywalden/ai-trading-backend:latest .
 
 # 可选：使用 buildx 构建并推送多架构镜像（需要事先启用 buildx 和登录远程仓库）
-docker buildx build --platform linux/amd64,linux/arm64 -f deploy/Dockerfile -t yourrepo/ai-trading-backend:latest --push .
+docker buildx build --platform linux/amd64,linux/arm64 -f deploy/Dockerfile -t sunnywalden/ai-trading-backend:latest --push .
 ```
 
 > 说明：本仓库默认 SQLite。容器内建议把 DB 放到可挂载目录（例如 `/data/demo.db`），通过 `DATABASE_URL` 指定。
