@@ -365,13 +365,17 @@ class MarketDataProvider:
     
     # ==================== 辅助方法 ====================
     
-    async def _get_tiger_bars(self, symbol: str, period: str) -> Optional[pd.DataFrame]:
+    async def _get_tiger_bars(self, symbol: str, period: str, bar_period=None) -> Optional[pd.DataFrame]:
         """从Tiger API获取K线数据（带监控）"""
         start_time = time.time()
         success = False
         error_msg = None
         result = None
         
+        # 映射 bar_period
+        if bar_period is None:
+            bar_period = BarPeriod.DAY
+            
         try:
             end_ms = int(datetime.now().timestamp() * 1000)
             limit = self._period_to_limit(period)
@@ -379,7 +383,7 @@ class MarketDataProvider:
             bars_df = await self._run_external(
                 self._tiger_quote_client.get_bars,
                 [symbol],
-                period=BarPeriod.DAY,
+                period=bar_period,
                 end_time=end_ms,
                 limit=limit,
             )

@@ -41,3 +41,26 @@ class AiAdviceResponse(BaseModel):
     summary: str
     reasoning: str
     suggested_orders: List[AdviceOrderSuggestion]
+
+
+class StockSymbol(BaseModel):
+    symbol: str
+    name: Optional[str] = None
+    market: Literal["US", "HK"]
+
+
+class SymbolSearchResponse(BaseModel):
+    items: List[StockSymbol]
+
+
+class KlineAnalysisRequest(BaseModel):
+    symbol: str
+
+
+class KlineAnalysisResponse(BaseModel):
+    symbol: str
+    prediction: str  # 走势预测
+    suggestion: str  # 操作建议
+    direction: Literal["LONG", "SHORT", "NEUTRAL"]
+    action: Literal["BUY", "SELL", "HOLD", "EMPTY", "INCREASE"]
+    details: str     # 详细分析

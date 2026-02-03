@@ -17,7 +17,13 @@ from app.providers.market_data_provider import MarketDataProvider
 from app.services.option_exposure_service import OptionExposureService
 from app.schemas.ai_state import AiStateView, LimitsView, SymbolBehaviorView, ExposureView
 from app.broker.factory import make_option_broker_client
-from app.schemas.ai_advice import AiAdviceRequest, AiAdviceResponse
+from app.schemas.ai_advice import (
+    AiAdviceRequest, 
+    AiAdviceResponse, 
+    KlineAnalysisRequest, 
+    KlineAnalysisResponse, 
+    SymbolSearchResponse
+)
 from app.schemas.scheduler import JobScheduleRequest
 from app.services.ai_advice_service import AiAdviceService
 from app.services.behavior_scoring_service import BehaviorScoringService
@@ -286,14 +292,31 @@ async def get_ai_state(
 
 @app.post("/api/v1/ai/advice", response_model=AiAdviceResponse)
 async def ai_advice(req: AiAdviceRequest, session: AsyncSession = Depends(get_session), current_user: str = Depends(get_current_user)):
-    """AI 决策助手接口。
-
-    输入：目标描述 + 风险偏好 + 时间维度；
-    内部自动聚合当前账户状态（风险限额、Greeks 暴露、行为画像），
-    调用 GPT-5.1（或占位逻辑）生成结构化的交易建议和订单草案。
-    """
+    """AI 决策助手接口。"""
     svc = AiAdviceService(session)
     return await svc.get_advice(req)
+
+
+@app.get("/api/v1/ai/symbols", response_model=SymbolSearchResponse)
+async def search_symbols(
+    q: Optional[str] = Query(None, description="搜索关键词"),
+    session: AsyncSession = Depends(get_session), 
+    current_user: str = Depends(get_current_user)
+):
+    """模糊搜索美港股标的"""
+    svc = AiAdviceService(session)
+    return await svc.search_symbols(q)
+
+
+@app.post("/api/v1/ai/analyze-stock", response_model=KlineAnalysisResponse)
+async def analyze_stock_kline(
+    req: KlineAnalysisRequest,
+    session: AsyncSession = Depends(get_session), 
+    current_user: str = Depends(get_current_user)
+):
+    """多周期K线走势 AI 深度分析"""
+    svc = AiAdviceService(session)
+    return await svc.analyze_stock_kline(req.symbol)
 
 
 @app.post("/api/v1/admin/behavior/rebuild")
