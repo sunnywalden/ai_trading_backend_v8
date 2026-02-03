@@ -71,7 +71,7 @@ class StrategyRun(Base):
     celery_task_id = Column(String(64), index=True)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)
 
-    strategy = relationship("Strategy", back_populates="runs")
+    strategy = relationship("Strategy", back_populates="runs", lazy="selectin")
     assets = relationship("StrategyRunAsset", back_populates="run", lazy="selectin")
     logs = relationship("StrategyRunLog", back_populates="run", lazy="selectin")
     notifications = relationship("StrategyNotification", back_populates="run", lazy="selectin")
@@ -107,6 +107,8 @@ class StrategyRunAsset(Base):
     signal_strength = Column(Float)
     signal_dimensions = Column(JSON)
     weight = Column(Float)
+    action = Column(String(16))  # BUY, SELL, HOLD, INCREASE
+    direction = Column(String(16))  # LONG, SHORT
     risk_flags = Column(JSON)
     notes = Column(Text)
     created_at = Column(DateTime, server_default=func.now(), nullable=False)

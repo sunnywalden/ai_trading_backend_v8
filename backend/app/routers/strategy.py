@@ -121,6 +121,8 @@ def _to_results_view(run) -> StrategyRunResultsResponse:
             symbol=asset.symbol,
             signal_strength=asset.signal_strength,
             weight=asset.weight,
+            action=asset.action,
+            direction=asset.direction,
             risk_flags=asset.risk_flags or [],
             notes=asset.notes,
             signal_dimensions=asset.signal_dimensions or {},
