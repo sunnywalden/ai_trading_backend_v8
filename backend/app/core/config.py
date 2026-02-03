@@ -106,6 +106,9 @@ class Settings(BaseSettings):
     # 用于签发 JWT token 的密钥，请在部署时设置为强随机值
     JWT_SECRET_KEY: str = "change-me-please"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    STRATEGY_EXECUTE_USERS: list[str] = ["admin"]
+    STRATEGY_MANAGE_USERS: list[str] = ["admin"]
+    EXPORT_ROOT: str = "./exports"
 
     # FRED API 配置（宏观经济数据）
     FRED_API_KEY: str | None = None

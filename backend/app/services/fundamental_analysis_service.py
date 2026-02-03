@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 import yfinance as yf
 import time
+import asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -470,7 +471,7 @@ class FundamentalAnalysisService:
 
     async def batch_refresh_fundamentals(self, symbols: list[str]) -> Dict[str, bool]:
         """
-        批量刷新基本面数据
+        并发批量刷新基本面数据（受 EXTERNAL_API_CONCURRENCY 限制）
         
         Args:
             symbols: 股票代码列表
@@ -479,12 +480,17 @@ class FundamentalAnalysisService:
             {symbol: success} 字典
         """
         results = {}
-        for symbol in symbols:
-            try:
-                data = await self.get_fundamental_data(symbol, force_refresh=True)
-                results[symbol] = data is not None
-            except Exception as e:
-                print(f"Error refreshing fundamental for {symbol}: {e}")
-                results[symbol] = False
-        
+        sem = asyncio.Semaphore(settings.EXTERNAL_API_CONCURRENCY)
+
+        async def _refresh(sym: str):
+            async with sem:
+                try:
+                    data = await self.get_fundamental_data(sym, force_refresh=True)
+                    return sym, data is not None
+                except Exception as e:
+                    print(f"Error refreshing fundamental for {sym}: {e}")
+                    return sym, False
+
+        pairs = await asyncio.gather(*[_refresh(s) for s in symbols]) if symbols else []
+        results = {k: v for k, v in pairs}
         return results

@@ -25,6 +25,7 @@ from app.routers import position_macro
 from app.routers import opportunities
 from app.routers import api_monitoring
 from app.routers import trading_plan
+from app.routers import strategy
 from app.jobs.scheduler import init_scheduler, start_scheduler, shutdown_scheduler, add_job
 from app.jobs.data_refresh_jobs import register_all_jobs
 from app.core.proxy import apply_proxy_env, ProxyConfig
@@ -103,6 +104,7 @@ app.include_router(position_macro.router, prefix="/api/v1", tags=["持仓评估�
 app.include_router(opportunities.router, prefix="/api/v1", tags=["潜在机会"], dependencies=[Depends(get_current_user)])
 app.include_router(api_monitoring.router, prefix="/api/v1", tags=["API监控"], dependencies=[Depends(get_current_user)])
 app.include_router(trading_plan.router, prefix="/api/v1", tags=["交易计划"], dependencies=[Depends(get_current_user)])
+app.include_router(strategy.router, prefix="/api/v1", tags=["策略管理"], dependencies=[Depends(get_current_user)])
 
 
 @app.get("/health")

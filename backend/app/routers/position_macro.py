@@ -576,48 +576,82 @@ async def refresh_positions_assessment(
         async def _do_refresh(run_symbols: List[str], run_account_id: str, run_force: bool):
             sem = asyncio.Semaphore(settings.REFRESH_CONCURRENCY)
 
-            async def _refresh_technical(sym: str) -> tuple[str, bool]:
+            # 先判断哪些标的确实需要刷新（节省不必要的API/DB开销）
+            to_refresh_tech: List[str] = []
+            for s in run_symbols:
+                async with SessionLocal() as tmp_sess:
+                    tech_check = TechnicalAnalysisService(tmp_sess)
+                    try:
+                        need = await tech_check.needs_refresh(s, timeframe="1D", force=run_force)
+                    except Exception:
+                        need = True
+                    if need:
+                        to_refresh_tech.append(s)
+
+            async def _refresh_technical(sym: str) -> tuple[str, Optional[object]]:
                 async with sem:
+                    start = time.time()
                     try:
                         async with SessionLocal() as local_session:
                             technical_service = TechnicalAnalysisService(local_session)
+                            # 禁用AI以避免长尾延迟；预计算并写入快照（内部会commit）
                             data = await technical_service.get_technical_analysis(
                                 sym,
                                 timeframe="1D",
                                 use_cache=False,
-                                account_id=run_account_id
+                                account_id=run_account_id,
+                                use_ai=False
                             )
-                        return sym, data is not None
+                        elapsed = int((time.time() - start) * 1000)
+                        await cache.set(f"positions_refresh:timing:{run_account_id}:{sym}", {"technical_ms": elapsed, "timestamp": datetime.now().isoformat()}, expire=3600)
+                        return sym, data
                     except Exception as e:
                         print(f"Error refreshing technical for {sym}: {e}")
-                        return sym, False
+                        await cache.set(f"positions_refresh:timing:{run_account_id}:{sym}", {"technical_ms": -1, "error": str(e), "timestamp": datetime.now().isoformat()}, expire=3600)
+                        return sym, None
 
             async def _refresh_score(sym: str) -> tuple[str, bool]:
                 async with sem:
+                    start = time.time()
                     try:
                         current_price = await market_provider.get_current_price(sym)
-                        score = await scoring_service.calculate_position_score(
-                            sym, current_price, force_refresh=run_force
+                        tech_data = technical_results.get(sym) if 'technical_results' in locals() else None
+                        score_obj = await scoring_service.calculate_position_score(
+                            sym,
+                            current_price=current_price,
+                            force_refresh=run_force,
+                            technical_data=tech_data
                         )
-                        return sym, score is not None
+                        elapsed = int((time.time() - start) * 1000)
+                        existing = await cache.get(f"positions_refresh:timing:{run_account_id}:{sym}") or {}
+                        existing.update({"score_ms": elapsed})
+                        await cache.set(f"positions_refresh:timing:{run_account_id}:{sym}", existing, expire=3600)
+                        return sym, score_obj is not None
                     except Exception as e:
                         print(f"Error refreshing score for {sym}: {e}")
+                        existing = await cache.get(f"positions_refresh:timing:{run_account_id}:{sym}") or {}
+                        existing.update({"score_ms": -1, "error_score": str(e)})
+                        await cache.set(f"positions_refresh:timing:{run_account_id}:{sym}", existing, expire=3600)
                         return sym, False
 
-            # 刷新技术面数据（会写入日线趋势快照缓存表）
-            technical_tasks = [_refresh_technical(sym) for sym in run_symbols]
-            technical_results = dict(await asyncio.gather(*technical_tasks)) if technical_tasks else {}
+            # 并发刷新技术面（仅刷新需要的标的）
+            technical_tasks = [_refresh_technical(sym) for sym in to_refresh_tech]
+            technical_pairs = await asyncio.gather(*technical_tasks) if technical_tasks else []
+            technical_results = {k: v for k, v in technical_pairs}
 
-            # 刷新基本面数据
+            # 并发刷新基本面（已并发实现）
             fundamental_service = FundamentalAnalysisService()
             fundamental_results = await fundamental_service.batch_refresh_fundamentals(run_symbols)
 
-            # 刷新综合评分
+            # 并发刷新评分（传入预计算的技术数据以避免重复计算）
             score_tasks = [_refresh_score(sym) for sym in run_symbols]
             score_results = dict(await asyncio.gather(*score_tasks)) if score_tasks else {}
 
+            # 标准化返回（technical -> bool success mapping）
+            technical_bool_map = {k: (v is not None) for k, v in technical_results.items()}
+
             return {
-                "technical": technical_results,
+                "technical": technical_bool_map,
                 "fundamental": fundamental_results,
                 "scores": score_results,
             }

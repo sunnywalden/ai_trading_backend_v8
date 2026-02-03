@@ -53,87 +53,97 @@ class PositionScoringService:
     async def calculate_position_score(
         self, 
         symbol: str,
-        current_price: float,
-        force_refresh: bool = False
+        current_price: Optional[float] = None,
+        force_refresh: bool = False,
+        technical_data=None,
+        fundamental_data=None
     ) -> Optional[PositionScore]:
         """
-        计算持仓综合评分
+        计算持仓综合评分（改进：接受预计算的技术/基本面数据与可选 current_price）
         
         Args:
             symbol: 股票代码
-            current_price: 当前价格
+            current_price: 当前价格（若未提供，将主动拉取）
             force_refresh: 是否强制刷新
-            
+            technical_data: 可选的预计算技术面数据（避免重复请求）
+            fundamental_data: 可选的预计算基本面数据（避免重复请求）
+        
         Returns:
             持仓评分对象，失败返回None
         """
         try:
-            # 创建session和服务实例
-            async with self._get_session() as session:
-                technical_service = TechnicalAnalysisService(session)
-                fundamental_service = FundamentalAnalysisService()
-                
-                # 获取技术面评分（使用try-except处理限流）
-                technical_score = 50.0  # 默认中性评分
-                technical_data = None
+            # 准备服务
+            fundamental_service = FundamentalAnalysisService()
+
+            # 获取或确认当前价格
+            if current_price is None:
+                from app.providers.market_data_provider import MarketDataProvider
+                market_provider = MarketDataProvider()
                 try:
-                    technical_data = await technical_service.get_technical_analysis(
-                        symbol,
-                        timeframe="1D",
-                        use_cache=not force_refresh,
-                        account_id="DEMO"
-                    )
-                    if technical_data:
-                        # TechnicalAnalysisDTO没有overall_score，需要根据其他指标计算
-                        technical_score = self._calculate_technical_score_from_dto(technical_data)
-                except Exception as e:
-                    print(f"Technical analysis failed for {symbol}: {e}, using default score")
-                
-                # 获取基本面评分（使用try-except处理限流）
-                fundamental_score = 50.0  # 默认中性评分
-                try:
-                    fundamental_data = await fundamental_service.get_fundamental_data(
-                        symbol, force_refresh
-                    )
-                    if fundamental_data and hasattr(fundamental_data, 'overall_score'):
-                        fundamental_score = fundamental_data.overall_score
-                except Exception as e:
-                    print(f"Fundamental analysis failed for {symbol}: {e}, using default score")
-                
-                # 计算情绪面评分（简化版：基于技术指标的市场情绪）
-                sentiment_score = self._calculate_sentiment_score(technical_data) if technical_data else 50.0
-                
-                # 计算综合评分
-                overall_score = (
-                    technical_score * self.weight_technical +
-                    fundamental_score * self.weight_fundamental +
-                    sentiment_score * self.weight_sentiment
-                )
-                
-                # 确定风险等级
-                risk_level = self._determine_risk_level(overall_score)
-                
-                # 生成投资建议
-                recommendation = self._generate_recommendation(
-                    overall_score, 
-                    technical_score, 
-                    fundamental_score
-                )
-            
-                # 计算目标仓位
-                target_position = self._calculate_target_position(overall_score, risk_level)
-                
-                # 计算止损止盈位
-                stop_loss, take_profit = self._calculate_stop_loss_take_profit(
-                    current_price, 
-                    technical_data,
-                    risk_level
-                )
-            
+                    current_price = await market_provider.get_current_price(symbol)
+                except Exception:
+                    current_price = 0.0
+
+            # 获取技术面数据（如果未提供）
+            technical_score = 50.0
+            technical_obj = technical_data
+            try:
+                if technical_obj is None:
+                    async with self._get_session() as session:
+                        technical_service = TechnicalAnalysisService(session)
+                        technical_obj = await technical_service.get_technical_analysis(
+                            symbol,
+                            timeframe="1D",
+                            use_cache=not force_refresh,
+                            account_id="DEMO",
+                            use_ai=False
+                        )
+                if technical_obj:
+                    technical_score = self._calculate_technical_score_from_dto(technical_obj)
+            except Exception as e:
+                print(f"Technical analysis failed for {symbol}: {e}, using default score")
+
+            # 获取基本面数据（如果未提供）
+            fundamental_score = 50.0
+            fundamental_obj = fundamental_data
+            try:
+                if fundamental_obj is None:
+                    fundamental_obj = await fundamental_service.get_fundamental_data(symbol, force_refresh)
+                if fundamental_obj and hasattr(fundamental_obj, 'overall_score'):
+                    fundamental_score = fundamental_obj.overall_score
+            except Exception as e:
+                print(f"Fundamental analysis failed for {symbol}: {e}, using default score")
+
+            # 计算情绪面评分
+            sentiment_score = self._calculate_sentiment_score(technical_obj) if technical_obj else 50.0
+
+            # 综合评分
+            overall_score = (
+                technical_score * self.weight_technical +
+                fundamental_score * self.weight_fundamental +
+                sentiment_score * self.weight_sentiment
+            )
+
+            # 风险等级与建议
+            risk_level = self._determine_risk_level(overall_score)
+            recommendation = self._generate_recommendation(
+                overall_score,
+                technical_score,
+                fundamental_score
+            )
+
+            # 计算目标仓位与止损止盈
+            target_position = self._calculate_target_position(overall_score, risk_level)
+            stop_loss, take_profit = self._calculate_stop_loss_take_profit(
+                current_price,
+                technical_obj,
+                risk_level
+            )
+
             # 保存到数据库（使用新的session）
             async with self._get_session() as session:
                 position_score = PositionScore(
-                    account_id="DEMO",  # 默认账户
+                    account_id="DEMO",
                     symbol=symbol,
                     overall_score=int(overall_score),
                     technical_score=int(technical_score),
@@ -142,19 +152,17 @@ class PositionScoringService:
                     recommendation=recommendation.value,
                     timestamp=datetime.now()
                 )
-                
+
                 session.add(position_score)
                 await session.commit()
                 await session.refresh(position_score)
-                
-                # 添加动态计算的属性（不存储在数据库中）
+
                 position_score.risk_level = risk_level.value
                 position_score.target_position = target_position
                 position_score.stop_loss = stop_loss
                 position_score.take_profit = take_profit
-                
+
                 return position_score
-            
         except Exception as e:
             print(f"Error calculating position score for {symbol}: {e}")
             return None
@@ -406,8 +414,7 @@ class PositionScoringService:
                 
                 # 计算评分
                 score = await self.calculate_position_score(
-                    symbol, 
-                    current_price=100.0,  # 临时值，会在方法内获取实际价格
+                    symbol,
                     force_refresh=force_refresh
                 )
                 if score:

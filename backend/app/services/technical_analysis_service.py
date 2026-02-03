@@ -25,35 +25,58 @@ class TechnicalAnalysisService:
         symbol: str,
         timeframe: str = "1D",
         use_cache: bool = True,
-        account_id: str = "DEMO"
+        account_id: str = "DEMO",
+        pre_fetched_df=None,
+        use_ai: bool = True
     ) -> TechnicalAnalysisDTO:
-        """获取技术分析
+        """获取技术分析（改进：支持重用已拉取的K线并可禁用AI以降低延迟）
         
         Args:
             symbol: 股票代码
             timeframe: 时间框架
             use_cache: 是否使用缓存
+            pre_fetched_df: 如果传入已拉取并计算过的 DataFrame，可避免重复网络请求
+            use_ai: 是否调用AI生成总结（刷新场景可禁用）
         """
         # 1. 尝试从缓存获取
         if use_cache:
             cached = await self._get_cached_indicators(symbol, timeframe)
             if cached:
-                return await self._build_technical_analysis(symbol, cached, timeframe, account_id)
+                return await self._build_technical_analysis(
+                    symbol, cached, timeframe, account_id, df=pre_fetched_df, use_ai=use_ai
+                )
         
-        # 2. 从市场获取最新数据
-        df = await self.market_provider.get_historical_data(symbol, period="1y", interval="1d")
+        # 2. 从市场获取最新数据（允许重用 pre_fetched_df）
+        df = pre_fetched_df if pre_fetched_df is not None else await self.market_provider.get_historical_data(symbol, period="1y", interval="1d")
         
-        if df.empty:
+        if df is None or getattr(df, 'empty', True):
             raise ValueError(f"No data available for {symbol}")
         
-        # 3. 计算所有技术指标
-        df = self.calculator.calculate_all_indicators(df)
+        # 3. 计算所有技术指标（如果尚未计算）
+        if 'MA_5' not in df.columns:
+            df = self.calculator.calculate_all_indicators(df)
         
-        # 4. 保存到缓存
+        # 4. 保存到缓存（不在每处都commit，统一由调用方控制commit频率）
         await self._save_indicators_to_cache(symbol, df, timeframe)
         
-        # 5. 构建分析结果
-        return await self._build_technical_analysis(symbol, df.iloc[-1].to_dict(), timeframe, account_id)
+        # 5. 构建分析结果（传入完整的 df 以避免再次拉取）
+        result = await self._build_technical_analysis(
+            symbol,
+            df.iloc[-1].to_dict(),
+            timeframe,
+            account_id,
+            df=df,
+            use_ai=use_ai
+        )
+
+        # 6. 确保把缓存更新写入数据库（兼容旧行为：单次调用时提交）
+        try:
+            await self.session.commit()
+        except Exception:
+            # 部分调用场景可能传入的session不允许commit，这里忽略错误以保持兼容性
+            pass
+
+        return result
     
     async def _get_cached_indicators(
         self,
@@ -187,23 +210,39 @@ class TechnicalAnalysisService:
             )
             self.session.add(indicator)
         
-        await self.session.commit()
+        # 注意：不在此处 commit，调用方负责在合适时机统一 commit 以减少数据库压力
+        
+
     
+
+    async def needs_refresh(self, symbol: str, timeframe: str = "1D", force: bool = False) -> bool:
+        """判断是否需要刷新技术数据（当无今日缓存或强制刷新时返回 True）"""
+        if force:
+            return True
+        cached = await self._get_cached_indicators(symbol, timeframe)
+        return cached is None
+        
     async def _build_technical_analysis(
         self,
         symbol: str,
         indicators: Dict,
         timeframe: str,
-        account_id: str
+        account_id: str,
+        df=None,
+        use_ai: bool = True
     ) -> TechnicalAnalysisDTO:
-        """构建技术分析结果"""
-        # 获取历史数据用于趋势和支撑阻力分析
-        df = await self.market_provider.get_historical_data(symbol, period="6mo")
-        df = self.calculator.calculate_all_indicators(df)
-        
+        """构建技术分析结果（支持传入预计算的 df 并可禁用 AI）"""
+        # 确保 df 已包含必要的历史数据与指标
+        if df is None:
+            df = await self.market_provider.get_historical_data(symbol, period="6mo")
+            df = self.calculator.calculate_all_indicators(df)
+        else:
+            if 'MA_5' not in df.columns:
+                df = self.calculator.calculate_all_indicators(df)
+
         # 识别趋势
         trend_direction, trend_strength = self.calculator.identify_trend(df)
-        
+
         # RSI分析
         rsi_value = indicators.get('RSI_14', 50)
         rsi_status, rsi_signal = self.calculator.identify_rsi_status(rsi_value)
@@ -239,65 +278,68 @@ class TechnicalAnalysisService:
         if volume_sma_20 and volume_sma_20 > 0 and current_volume:
             volume_ratio = float(current_volume) / float(volume_sma_20)
 
-        # 生成AI总结：优先调用OpenAI（基于日线走势/指标给出结论），失败则回退到规则摘要
+        # 生成AI总结（可禁用）：优先调用OpenAI（基于日线走势/指标给出结论），失败则回退到规则摘要
         ai_summary = None
-        try:
-            from app.services.ai_analysis_service import AIAnalysisService
+        if use_ai:
+            try:
+                from app.services.ai_analysis_service import AIAnalysisService
 
-            # 压缩后的日线序列（避免token过大）：最近30根K线 + 关键统计
-            recent = df.tail(30).copy()
-            ohlcv = []
-            for idx, row in recent.iterrows():
-                ohlcv.append(
-                    {
-                        "date": str(getattr(idx, "date", lambda: idx)()),
-                        "open": float(row.get("Open", 0) or 0),
-                        "high": float(row.get("High", 0) or 0),
-                        "low": float(row.get("Low", 0) or 0),
-                        "close": float(row.get("Close", 0) or 0),
-                        "volume": float(row.get("Volume", 0) or 0),
-                    }
-                )
+                # 压缩后的日线序列（避免token过大）：最近30根K线 + 关键统计
+                recent = df.tail(30).copy()
+                ohlcv = []
+                for idx, row in recent.iterrows():
+                    ohlcv.append(
+                        {
+                            "date": str(getattr(idx, "date", lambda: idx)()),
+                            "open": float(row.get("Open", 0) or 0),
+                            "high": float(row.get("High", 0) or 0),
+                            "low": float(row.get("Low", 0) or 0),
+                            "close": float(row.get("Close", 0) or 0),
+                            "volume": float(row.get("Volume", 0) or 0),
+                        }
+                    )
 
-            ret_5d = float(recent["Close"].pct_change(5).iloc[-1]) if "Close" in recent.columns and len(recent) > 6 else None
-            ret_20d = float(recent["Close"].pct_change(20).iloc[-1]) if "Close" in recent.columns and len(recent) > 21 else None
-            vol_20d = float(recent["Close"].pct_change().tail(20).std()) if "Close" in recent.columns and len(recent) > 21 else None
+                ret_5d = float(recent["Close"].pct_change(5).iloc[-1]) if "Close" in recent.columns and len(recent) > 6 else None
+                ret_20d = float(recent["Close"].pct_change(20).iloc[-1]) if "Close" in recent.columns and len(recent) > 21 else None
+                vol_20d = float(recent["Close"].pct_change().tail(20).std()) if "Close" in recent.columns and len(recent) > 21 else None
 
-            payload = {
-                "timeframe": timeframe,
-                "source": "tiger_or_cache",
-                "trend": {
-                    "trend_direction": trend_direction,
-                    "trend_strength": trend_strength,
-                    "bollinger_position": bb_position,
-                    "volume_ratio": volume_ratio,
-                },
-                "momentum": {
-                    "rsi_value": rsi_value,
-                    "rsi_status": rsi_status,
-                    "macd_status": macd_signal,
-                    "macd": float(indicators.get("MACD", 0) or 0),
-                    "macd_signal": float(indicators.get("MACD_signal", 0) or 0),
-                },
-                "levels": {
-                    "support": support_levels,
-                    "resistance": resistance_levels,
-                },
-                "stats": {
-                    "return_5d": ret_5d,
-                    "return_20d": ret_20d,
-                    "vol_20d": vol_20d,
-                },
-                "recent_ohlcv": ohlcv,
-                "instructions": {
-                    "style": "顶级华尔街交易员视角",
-                    "constraints": ["不要输出任何趋势置信度/可信度数值"],
-                },
-            }
+                payload = {
+                    "timeframe": timeframe,
+                    "source": "tiger_or_cache",
+                    "trend": {
+                        "trend_direction": trend_direction,
+                        "trend_strength": trend_strength,
+                        "bollinger_position": bb_position,
+                        "volume_ratio": volume_ratio,
+                    },
+                    "momentum": {
+                        "rsi_value": rsi_value,
+                        "rsi_status": rsi_status,
+                        "macd_status": macd_signal,
+                        "macd": float(indicators.get("MACD", 0) or 0),
+                        "macd_signal": float(indicators.get("MACD_signal", 0) or 0),
+                    },
+                    "levels": {
+                        "support": support_levels,
+                        "resistance": resistance_levels,
+                    },
+                    "stats": {
+                        "return_5d": ret_5d,
+                        "return_20d": ret_20d,
+                        "vol_20d": vol_20d,
+                    },
+                    "recent_ohlcv": ohlcv,
+                    "instructions": {
+                        "style": "顶级华尔街交易员视角",
+                        "constraints": ["不要输出任何趋势置信度/可信度数值"],
+                    },
+                }
 
-            ai_service = AIAnalysisService()
-            ai_summary = await ai_service.generate_daily_trend_conclusion(symbol, payload)
-        except Exception:
+                ai_service = AIAnalysisService()
+                ai_summary = await ai_service.generate_daily_trend_conclusion(symbol, payload)
+            except Exception:
+                ai_summary = None
+        else:
             ai_summary = None
 
         if not ai_summary:
@@ -430,7 +472,7 @@ class TechnicalAnalysisService:
         )
 
         self.session.add(snapshot)
-        await self.session.commit()
+        # 不在此处提交事务，由调用方统一 commit 以减少数据库压力
 
     async def get_latest_trend_snapshot(
         self,
