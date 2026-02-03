@@ -106,7 +106,10 @@ class StrategyRunService:
         return run
 
     async def get_run_by_id(self, run_id: str) -> Optional[StrategyRun]:
-        stmt = select(StrategyRun).where(StrategyRun.id == run_id)
+        stmt = select(StrategyRun).where(StrategyRun.id == run_id).options(
+            selectinload(StrategyRun.strategy),
+            selectinload(StrategyRun.history)
+        )
         res = await self.session.execute(stmt)
         return res.scalars().first()
 

@@ -110,6 +110,8 @@ class StrategyRunAssetView(BaseModel):
     symbol: str
     signal_strength: Optional[float] = None
     weight: Optional[float] = None
+    action: Optional[str] = None
+    direction: Optional[str] = None
     risk_flags: List[str] = Field(default_factory=list)
     notes: Optional[str] = None
     signal_dimensions: Dict[str, Any] = Field(default_factory=dict)

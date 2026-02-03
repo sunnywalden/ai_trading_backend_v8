@@ -32,6 +32,8 @@ from app.core.auth import get_current_user, login_for_access_token
 from fastapi.security import OAuth2PasswordRequestForm
 from datetime import datetime
 from app.core.cache import cache
+from fastapi.staticfiles import StaticFiles
+import os
 
 
 @asynccontextmanager
@@ -97,6 +99,10 @@ app.add_middleware(
 
 # 启用GZip压缩（大响应显著减小体积）
 app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+# 挂载导出文件静态目录
+os.makedirs(settings.EXPORT_ROOT, exist_ok=True)
+app.mount("/exports", StaticFiles(directory=settings.EXPORT_ROOT), name="exports")
 
 # 注册路由（默认受保护，需认证）
 app.include_router(position_macro.router, prefix="/api/v1", tags=["持仓评估与宏观风险"], dependencies=[Depends(get_current_user)])
