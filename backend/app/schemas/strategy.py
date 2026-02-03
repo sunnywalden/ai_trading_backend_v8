@@ -52,12 +52,12 @@ class StrategyUpdateParamsRequest(BaseModel):
 
 
 class StrategyRunRequest(BaseModel):
-    account_id: str
-    budget: Optional[float] = None
+    account_id: Optional[str] = None
     direction: Optional[str] = None
-    param_overrides: Dict[str, Any] = Field(default_factory=dict)
     notify_channels: List[str] = Field(default_factory=list)
     target_universe: Optional[str] = None
+    min_score: Optional[int] = Field(None, ge=0, le=100)
+    max_results: Optional[int] = Field(None, ge=1, le=50)
     priority: Optional[int] = None
 
 
@@ -77,6 +77,12 @@ class StrategyRunStatusView(BaseModel):
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
     timeline: Optional[Dict[str, Any]] = None
+    # 执行参数记录
+    direction: Optional[str] = None
+    target_universe: Optional[str] = None
+    min_score: Optional[int] = None
+    max_results: Optional[int] = None
+    priority: Optional[int] = None
 
 
 class StrategyRunLatestResponse(BaseModel):

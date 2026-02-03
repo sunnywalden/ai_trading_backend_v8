@@ -13,7 +13,6 @@ from app.models.macro_risk import MacroRiskScore, MacroIndicator, GeopoliticalEv
 from app.models.position_trend_snapshot import PositionTrendSnapshot
 from app.models.symbol_behavior_stats import SymbolBehaviorStats
 from app.models.symbol_risk_profile import SymbolRiskProfile
-from app.models.opportunity_scan import OpportunityScanRun, OpportunityScanItem
 from app.models.symbol_profile_cache import SymbolProfileCache
 
 

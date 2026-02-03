@@ -299,6 +299,99 @@ class AIAnalysisService:
             )
         
         return advice
+
+    async def generate_portfolio_assessment(
+        self,
+        avg_score: float,
+        total_beta: float,
+        sector_distribution: Dict[str, float],
+        position_count: int
+    ) -> Dict[str, Any]:
+        """生成组合层面的 AI 评估与建议"""
+        prompt = f"""
+        你是一位资深的投资组合经理。请分析以下个人持仓组合数据并给出专业建议：
+        1. 组合加权评分: {avg_score:.2f} (满分100)
+        2. 组合整体 Beta: {total_beta:.2f} (相对于 SPY)
+        3. 持仓标的数量: {position_count}
+        4. 行业分布 (Sector): {json.dumps(sector_distribution, ensure_ascii=False)}
+
+        请提供：
+        1. 组合现状总结 (200字以内)
+        2. 具体优化建议 (3-4条)，包括：
+           - 是否需要调仓（基于评分）
+           - 是否需要增加防御（基于 Beta）
+           - 行业集中度风险提示
+        
+        回复格式必须为 JSON:
+        {{
+          "summary": "...",
+          "recommendations": [
+            {{ "type": "REBALANCE/HEDGE/DIVERSIFY/RISK", "action": "...", "reason": "..." }}
+          ]
+        }}
+        """
+        
+        response_text = await self._call_gpt(prompt, max_tokens=600)
+        
+        if response_text:
+            try:
+                # 尝试解析 JSON
+                # 有时 GPT 会返回带 ```json 的格式，需要清理
+                clean_text = response_text.strip()
+                if clean_text.startswith("```json"):
+                    clean_text = clean_text[7:-3].strip()
+                elif clean_text.startswith("```"):
+                    clean_text = clean_text[3:-3].strip()
+                
+                return json.loads(clean_text)
+            except Exception as e:
+                print(f"Failed to parse AI portfolio assessment JSON: {e}")
+        
+        # 规则回退
+        return self._rule_based_portfolio_assessment(avg_score, total_beta, sector_distribution)
+
+    def _rule_based_portfolio_assessment(self, avg_score, total_beta, sector_distribution) -> Dict[str, Any]:
+        """规则导向的组合评估回退"""
+        recommendations = []
+        
+        # 评分判断
+        if avg_score < 60:
+            summary = "当前组合整体评分较低，存在较多弱势头寸。"
+            recommendations.append({
+                "type": "REBALANCE",
+                "action": "清理低评分头寸",
+                "reason": "组合平均分低于及格线，说明持仓标的基本面或技术面显著走弱。"
+            })
+        else:
+            summary = "组合整体质量良好，核心持仓表现稳健。"
+
+        # Beta 判断
+        if total_beta > 1.3:
+            recommendations.append({
+                "type": "HEDGE",
+                "action": "考虑买入 SPY 保护性看跌期权",
+                "reason": f"组合 Beta 达到 {total_beta:.2f}，对市场波动高度敏感，建议增加防御。"
+            })
+        elif total_beta < 0.7:
+             recommendations.append({
+                "type": "RISK",
+                "action": "检查进攻性不足",
+                "reason": f"组合 Beta 仅为 {total_beta:.2f}，表现可能大幅滞大盘，适宜在大盘走强时补仓高 Beta 龙头。"
+            })
+
+        # 集中度判断
+        for sector, ratio in sector_distribution.items():
+            if ratio > 0.4:
+                recommendations.append({
+                    "type": "DIVERSIFY",
+                    "action": f"减持 {sector} 行业",
+                    "reason": f"{sector} 占比达到 {ratio*100:.1f}%，行业集中度过高，易受单一板块风险冲击。"
+                })
+
+        return {
+            "summary": summary,
+            "recommendations": recommendations
+        }
     
     async def generate_macro_analysis(
         self,

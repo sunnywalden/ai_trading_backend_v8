@@ -10,6 +10,8 @@ class FundamentalData(Base):
     symbol = Column(String(16), nullable=False, index=True)
     fiscal_date = Column(Date, nullable=False)
     data_type = Column(String(16), default='QUARTERLY')
+    sector = Column(String(64))
+    industry = Column(String(128))
 
     # 估值
     market_cap = Column(BigInteger)
@@ -17,6 +19,7 @@ class FundamentalData(Base):
     pb_ratio = Column(Float)
     ps_ratio = Column(Float)
     peg_ratio = Column(Float)
+    beta = Column(Float)
 
     # 盈利能力
     revenue = Column(BigInteger)

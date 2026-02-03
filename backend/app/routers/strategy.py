@@ -92,6 +92,11 @@ def _to_status_view(run) -> StrategyRunStatusView:
         started_at=run.started_at,
         finished_at=run.finished_at,
         timeline=timeline,
+        direction=run.direction,
+        target_universe=run.target_universe,
+        min_score=run.min_score,
+        max_results=run.max_results,
+        priority=run.priority,
     )
 
 
@@ -206,12 +211,12 @@ async def run_strategy(
     run = await run_svc.create_run(
         strategy=strategy,
         user_id=current_user,
-        account_id=req.account_id,
-        budget=req.budget,
+        account_id=req.account_id or settings.TIGER_ACCOUNT,
         direction=req.direction,
-        param_overrides=req.param_overrides,
         notify_channels=req.notify_channels,
         target_universe=req.target_universe,
+        min_score=req.min_score,
+        max_results=req.max_results,
         priority=req.priority,
     )
     task_id = f"strategy_run:{run.id}"

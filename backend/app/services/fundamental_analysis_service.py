@@ -59,8 +59,14 @@ class FundamentalAnalysisService:
             # 获取新数据
             fundamental_dict = await self._fetch_fundamental_from_yfinance(symbol)
             if not fundamental_dict:
+                # 发生错误或频率限制时，尝试从本地缓存回退
+                cached = await self._get_cached_data(session, symbol)
+                if cached:
+                    print(f"[Fundamental] Yielding cached data for {symbol} due to API issues.")
+                    return self._build_result_dict(cached)
                 return None
             
+            print(f"[Fundamental] Fetched {symbol} from yfinance. Sector={fundamental_dict.get('sector')}")
             # 计算各维度评分
             valuation_score = self._calculate_valuation_score(fundamental_dict)
             profitability_score = self._calculate_profitability_score(fundamental_dict)
@@ -78,10 +84,13 @@ class FundamentalAnalysisService:
                 symbol=symbol,
                 fiscal_date=datetime.now().date(),
                 data_type='LATEST',
+                sector=fundamental_dict.get("sector"),
+                industry=fundamental_dict.get("industry"),
                 # 估值
                 pe_ratio=fundamental_dict.get("pe_ratio"),
                 pb_ratio=fundamental_dict.get("pb_ratio"),
                 peg_ratio=fundamental_dict.get("peg_ratio"),
+                beta=fundamental_dict.get("beta"),
                 # 盈利能力
                 roe=fundamental_dict.get("roe"),
                 roa=fundamental_dict.get("roa"),
@@ -145,9 +154,12 @@ class FundamentalAnalysisService:
             symbol=data.symbol,
             fiscal_date=data.fiscal_date,
             timestamp=datetime.now(),  # 添加timestamp字段
+            sector=data.sector,
+            industry=data.industry,
             pe_ratio=data.pe_ratio,
             pb_ratio=data.pb_ratio,
             peg_ratio=data.peg_ratio,
+            beta=data.beta,
             roe=data.roe,
             roa=data.roa,
             profit_margin=data.net_margin,  # 映射回profit_margin
@@ -207,10 +219,13 @@ class FundamentalAnalysisService:
             
             # 提取所需指标
             fundamental = {
+                "sector": info.get("sector"),
+                "industry": info.get("industry"),
                 # 估值指标
                 "pe_ratio": info.get("trailingPE") or info.get("forwardPE"),
                 "pb_ratio": info.get("priceToBook"),
                 "peg_ratio": info.get("pegRatio"),
+                "beta": info.get("beta"),
                 
                 # 盈利能力指标
                 "roe": info.get("returnOnEquity"),

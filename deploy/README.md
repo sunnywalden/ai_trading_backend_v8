@@ -35,6 +35,8 @@ docker build -f deploy/Dockerfile -t sunnywalden/ai-trading-backend:latest .
 # 直接使用远程仓库地址打 tag（替换 yourrepo 为你的镜像仓库）
 docker build -f deploy/Dockerfile -t sunnywalden/ai-trading-backend:latest .
 
+docker tag sunnywalden/ai-trading-backend:latest sunnywalden/ai-trading-backend:v1.0.0
+
 # 可选：使用 buildx 构建并推送多架构镜像（需要事先启用 buildx 和登录远程仓库）
 docker buildx build --platform linux/amd64,linux/arm64 -f deploy/Dockerfile -t sunnywalden/ai-trading-backend:latest --push .
 ```

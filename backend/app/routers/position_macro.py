@@ -105,7 +105,7 @@ async def get_positions_assessment(
         
         # 批量计算评分
         scoring_service = PositionScoringService()
-        scores = await scoring_service.get_all_position_scores(symbols, force_refresh=False)
+        scores = await scoring_service.get_all_position_scores(symbols, force_refresh=force_refresh)
         technical_service = TechnicalAnalysisService(session)
 
         # 读取激活计划（用于偏离度计算）
@@ -302,8 +302,14 @@ async def get_positions_assessment(
             # 风险预算占用率（近似：使用市值/预算）
             budget_utilization = round(min(total_symbol_market_value / max(budget_base, 1e-6), 1.0), 4)
 
+            # 获取行业属性（从 score_data 中提取，用于前端显示）
+            sector = getattr(score_data, 'sector', "Unknown") or "Unknown"
+            industry = getattr(score_data, 'industry', "Unknown") or "Unknown"
+            beta = getattr(score_data, 'beta', 1.0) or 1.0
+
             assessment = {
                 "symbol": display_symbol,
+                "ticker": symbol,  # 始终保存原始代码
                 "quantity": stock_quantity,
                 "avg_cost": stock_avg_cost,
                 "current_price": current_price,
@@ -312,6 +318,9 @@ async def get_positions_assessment(
                 "unrealized_pnl_percent": round(unrealized_pnl_percent, 2),
                 "budget_utilization": budget_utilization,
                 "plan_deviation": plan_deviation,
+                "sector": sector,
+                "industry": industry,
+                "beta": beta,
                 # 评分数据（使用默认值如果不可用）
                 "overall_score": score_data.overall_score if score_data else 50,
                 "technical_score": score_data.technical_score if score_data else 50,
@@ -346,7 +355,60 @@ async def get_positions_assessment(
             rec = score_data.recommendation if score_data else "HOLD"
             if rec in ["BUY", "STRONG_BUY"]:
                 buy_count += 1
-        
+
+        # 新增：组合维度指标计算
+        portfolio_weighted_score = 0.0
+        portfolio_weighted_beta = 0.0
+        sector_distribution = {}
+        industry_distribution = {}
+
+        for p in position_assessments:
+            weight = p["market_value"] / max(total_market_value, 1.0)
+            portfolio_weighted_score += (p["overall_score"] * weight)
+            
+            # 尝试从 scores 获取行业和 beta 信息，若无则使用默认值
+            s_data = scores.get(p["ticker"])
+            beta = 1.0
+            sector = "Unknown"
+            industry = "Unknown"
+
+            if s_data:
+                beta = getattr(s_data, 'beta', 1.0) or 1.0
+                sector = getattr(s_data, 'sector', "Unknown") or "Unknown"
+                industry = getattr(s_data, 'industry', "Unknown") or "Unknown"
+            
+            portfolio_weighted_beta += (beta * weight)
+            sector_distribution[sector] = sector_distribution.get(sector, 0.0) + p["market_value"]
+            industry_distribution[industry] = industry_distribution.get(industry, 0.0) + p["market_value"]
+
+        # 转换为占比
+        portfolio_sector_ratios = {k: round(v / max(total_market_value, 1.0), 4) for k, v in sector_distribution.items()}
+        portfolio_industry_ratios = {k: round(v / max(total_market_value, 1.0), 4) for k, v in industry_distribution.items()}
+
+        # 准备 AI 组合建议
+        ai_recommendations = []
+        portfolio_analysis = {
+            "weighted_score": round(portfolio_weighted_score, 2),
+            "total_beta": round(portfolio_weighted_beta, 2),
+            "sector_ratios": portfolio_sector_ratios,
+            "industry_ratios": portfolio_industry_ratios
+        }
+
+        try:
+            ai_service = AIAnalysisService()
+            # 获取 AI 组合分析
+            portfolio_ai = await ai_service.generate_portfolio_assessment(
+                avg_score=portfolio_weighted_score,
+                total_beta=portfolio_weighted_beta,
+                sector_distribution=portfolio_sector_ratios,
+                position_count=len(position_assessments)
+            )
+            if portfolio_ai:
+                portfolio_analysis["ai_summary"] = portfolio_ai.get("summary")
+                ai_recommendations = portfolio_ai.get("recommendations", [])
+        except Exception as e:
+            print(f"[PositionAssessment] AI Portfolio analysis failed: {e}")
+
         avg_score = total_score / len(position_assessments) if position_assessments else 0.0
         
         response = PositionsAssessmentResponse(
@@ -358,7 +420,9 @@ async def get_positions_assessment(
                 "avg_score": round(avg_score, 2),
                 "high_risk_count": high_risk_count,
                 "buy_recommendation_count": buy_count
-            }
+            },
+            portfolio_analysis=portfolio_analysis,
+            ai_recommendations=ai_recommendations
         )
 
         # 写入缓存（30秒）
