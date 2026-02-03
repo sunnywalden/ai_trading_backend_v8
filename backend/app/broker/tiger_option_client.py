@@ -323,15 +323,20 @@ class TigerOptionClient(OptionBrokerClient):
                         theta=float(getattr(brief, 'theta', 0)),
                     )
                     underlying_price = float(getattr(brief, 'underlying_price', 0))
+                    last_price = float(getattr(brief, 'latest_price', getattr(pos, 'market_price', 0)))
                 else:
                     # 如果没有行情数据，使用默认值
                     greeks = Greeks(delta=0, gamma=0, vega=0, theta=0)
-                    underlying_price = float(getattr(pos, 'market_price', 0))
+                    # 对于期权仓位，pos.market_price 是期权的价格，而非标的价格
+                    last_price = float(getattr(pos, 'market_price', 0))
+                    # 尝试从 pos 获取标的价格（如果 SDK 提供）
+                    underlying_price = float(getattr(pos, 'underlying_price', last_price))
 
                 option_pos = OptionPosition(
                     contract=contract,
                     quantity=int(pos.quantity or 0),
                     avg_price=float(pos.average_cost or 0),
+                    last_price=last_price,
                     underlying_price=underlying_price,
                     greeks=greeks,
                     last_update_ts=ts,
