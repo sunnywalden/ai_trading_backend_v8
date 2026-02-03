@@ -20,7 +20,6 @@ from app.models.technical_indicator import TechnicalIndicator
 from app.models.fundamental_data import FundamentalData
 from app.models.position_score import PositionScore
 from app.models.position_trend_snapshot import PositionTrendSnapshot
-from app.models.opportunity_scan import OpportunityScanRun, OpportunityScanItem
 from app.models.symbol_profile_cache import SymbolProfileCache
 from app.models.strategy import Strategy
 

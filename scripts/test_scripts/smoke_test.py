@@ -18,7 +18,6 @@ from app.core.config import settings
 from app.models.db import engine, redis_client, get_session, SessionLocal
 from app.models.macro_risk import MacroRiskScore
 from app.models.symbol_profile_cache import SymbolProfileCache
-from app.models.opportunity_scan import OpportunityScanRun
 from app.core.cache import RedisCache
 
 # ANSI colors
@@ -230,14 +229,12 @@ class SmokeTest:
                 profiles = result.scalars().all()
                 print_info(f"SymbolProfileCache 表有 {len(profiles)} 条记录（显示前5条）")
                 
-                # 2. 检查 OpportunityScanRun
-                stmt = select(OpportunityScanRun).order_by(OpportunityScanRun.created_at.desc()).limit(5)
+                # 2. 检查 Strategy
+                from app.models.strategy import Strategy
+                stmt = select(Strategy).limit(5)
                 result = await session.execute(stmt)
-                scans = result.scalars().all()
-                print_info(f"OpportunityScanRun 表有 {len(scans)} 条最新记录")
-                if scans:
-                    for scan in scans[:2]:
-                        print_info(f"  - run_key={scan.run_key}, status={scan.status}")
+                strategies = result.scalars().all()
+                print_info(f"Strategy 表有 {len(strategies)} 条记录")
                 
                 # 3. 检查 MacroRiskScore
                 stmt = select(MacroRiskScore).limit(5)

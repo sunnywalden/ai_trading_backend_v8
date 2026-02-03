@@ -75,11 +75,11 @@ class StrategyRunService:
         strategy: Strategy,
         user_id: str,
         account_id: str,
-        budget: Optional[float],
         direction: Optional[str],
-        param_overrides: Optional[Dict[str, Any]] = None,
         notify_channels: Optional[Iterable[str]] = None,
         target_universe: Optional[str] = None,
+        min_score: Optional[int] = None,
+        max_results: Optional[int] = None,
         priority: Optional[int] = None,
     ) -> StrategyRun:
         run = StrategyRun(
@@ -88,15 +88,12 @@ class StrategyRunService:
             strategy_version=strategy.version,
             user_id=user_id,
             account_id=account_id,
-            budget=Decimal(str(budget)) if budget is not None else None,
             direction=direction,
-            param_snapshot={
-                "default": strategy.default_params or {},
-                "overrides": param_overrides or {},
-                "priority": priority,
-            },
             notify_channels=list(notify_channels or []),
             target_universe=target_universe,
+            min_score=min_score,
+            max_results=max_results,
+            priority=priority,
             status="QUEUED",
         )
 

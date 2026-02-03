@@ -7,9 +7,11 @@ from datetime import datetime
 # ============ 简化版响应模型 ============
 
 class PositionsAssessmentResponse(BaseModel):
-    """持仓评估响应（简化版）"""
+    """持仓评估响应（扩展版）"""
     positions: List[Dict[str, Any]]
     summary: Dict[str, Any]
+    portfolio_analysis: Optional[Dict[str, Any]] = None
+    ai_recommendations: Optional[List[Dict[str, Any]]] = None
 
 
 class TechnicalAnalysisResponse(BaseModel):

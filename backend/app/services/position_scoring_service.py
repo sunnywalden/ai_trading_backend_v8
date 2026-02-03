@@ -145,10 +145,17 @@ class PositionScoringService:
                 position_score = PositionScore(
                     account_id="DEMO",
                     symbol=symbol,
+                    sector=getattr(fundamental_obj, 'sector', None),
+                    industry=getattr(fundamental_obj, 'industry', None),
                     overall_score=int(overall_score),
                     technical_score=int(technical_score),
                     fundamental_score=int(fundamental_score),
                     sentiment_score=int(sentiment_score),
+                    pe_ratio=getattr(fundamental_obj, 'pe_ratio', None),
+                    peg_ratio=getattr(fundamental_obj, 'peg_ratio', None),
+                    beta=getattr(fundamental_obj, 'beta', None),
+                    roe=getattr(fundamental_obj, 'roe', None),
+                    revenue_growth_yoy=getattr(fundamental_obj, 'revenue_growth_yoy', None),
                     recommendation=recommendation.value,
                     timestamp=datetime.now()
                 )

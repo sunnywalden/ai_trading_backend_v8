@@ -1,13 +1,14 @@
 """
 定时数据刷新任务
 
-6个定时任务:
+7个定时任务:
 1. 技术指标刷新 - 每1小时
 2. 基本面数据刷新 - 每天凌晨2点
 3. 宏观指标刷新 - 每天早上9点
 4. 地缘政治事件抓取 - 每4小时
 5. 宏观风险计算 - 每6小时
 6. 旧数据清理 - 每天凌晨3点
+7. 交易计划过期标记 - 每天00:30
 """
 
 import logging
@@ -21,7 +22,6 @@ from app.models.symbol_risk_profile import SymbolRiskProfile
 from app.services.macro_indicators_service import MacroIndicatorsService
 from app.services.macro_risk_scoring_service import MacroRiskScoringService
 from app.services.geopolitical_events_service import GeopoliticalEventsService
-from app.services.potential_opportunities_service import PotentialOpportunitiesService
 from app.models.trading_plan import TradingPlan
 from app.broker.factory import make_option_broker_client
 from app.core.config import settings
@@ -276,37 +276,6 @@ async def cleanup_old_data_job():
         logger.error(f"Old data cleanup job failed: {str(e)}", exc_info=True)
 
 
-async def scan_daily_opportunities_job():
-    """任务7: 潜在机会扫描（中大型科技股）
-
-    频率: 每天北京时间 20:30
-    功能: 扫描股票池，计算技术/基本面/情绪评分，结合宏观风险产出 1-3 只候选并落库
-    """
-    try:
-        logger.info("Starting daily opportunities scan job")
-        start_time = datetime.now()
-
-        async with _get_session() as session:
-            svc = PotentialOpportunitiesService(session)
-            run, notes = await svc.scan_and_persist(
-                universe_name="US_LARGE_MID_TECH",
-                min_score=75,
-                max_results=3,
-                force_refresh=False,
-            )
-
-        elapsed = (datetime.now() - start_time).total_seconds()
-        logger.info(
-            f"Daily opportunities scan completed: "
-            f"qualified={run.qualified_symbols}/{run.total_symbols}, "
-            f"macro={run.macro_risk_level}/{run.macro_overall_score}, "
-            f"took {elapsed:.2f}s, notes={notes}"
-        )
-
-    except Exception as e:
-        logger.error(f"Daily opportunities scan job failed: {str(e)}", exc_info=True)
-
-
 async def plan_expiration_job():
     """任务8: 交易计划过期标记
 
@@ -342,34 +311,6 @@ async def plan_expiration_job():
         )
     except Exception as e:
         logger.error(f"Plan expiration job failed: {str(e)}", exc_info=True)
-
-
-async def manual_opportunity_scan_job(universe_name: str, min_score: int, max_results: int, force_refresh: bool):
-    """一次性手动触发的机会扫描任务（用于 API 触发的后台任务）。
-
-    参数会在 job 调度时以 positional args 传入。
-    """
-    try:
-        logger.info(f"Starting manual opportunities scan job: universe={universe_name}, min={min_score}, max_results={max_results}, force_refresh={force_refresh}")
-        start_time = datetime.now()
-
-        async with _get_session() as session:
-            svc = PotentialOpportunitiesService(session)
-            run, notes = await svc.scan_and_persist(
-                universe_name=universe_name,
-                min_score=min_score,
-                max_results=max_results,
-                force_refresh=force_refresh,
-            )
-
-        elapsed = (datetime.now() - start_time).total_seconds()
-        logger.info(
-            f"Manual opportunities scan completed: qualified={run.qualified_symbols}/{run.total_symbols}, "
-            f"macro={run.macro_risk_level}/{run.macro_overall_score}, took {elapsed:.2f}s, notes={notes}"
-        )
-
-    except Exception as e:
-        logger.error(f"Manual opportunities scan job failed: {str(e)}", exc_info=True)
 
 
 def register_all_jobs(scheduler):
@@ -440,17 +381,7 @@ def register_all_jobs(scheduler):
         minute=0
     )
 
-    # 任务7: 潜在机会扫描 - 每天北京时间20:30
-    add_job(
-        func=scan_daily_opportunities_job,
-        trigger='cron',
-        id='scan_daily_opportunities_tech',
-        name='每日机会扫描-科技股(20:30)',
-        hour=20,
-        minute=30
-    )
-
-    # 任务8: 交易计划过期标记 - 每天北京时间00:30
+    # 任务7: 交易计划过期标记 - 每天北京时间00:30
     add_job(
         func=plan_expiration_job,
         trigger='cron',

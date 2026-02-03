@@ -22,7 +22,6 @@ from app.schemas.scheduler import JobScheduleRequest
 from app.services.ai_advice_service import AiAdviceService
 from app.services.behavior_scoring_service import BehaviorScoringService
 from app.routers import position_macro
-from app.routers import opportunities
 from app.routers import api_monitoring
 from app.routers import trading_plan
 from app.routers import strategy
@@ -101,7 +100,6 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 # 注册路由（默认受保护，需认证）
 app.include_router(position_macro.router, prefix="/api/v1", tags=["持仓评估与宏观风险"], dependencies=[Depends(get_current_user)])
-app.include_router(opportunities.router, prefix="/api/v1", tags=["潜在机会"], dependencies=[Depends(get_current_user)])
 app.include_router(api_monitoring.router, prefix="/api/v1", tags=["API监控"], dependencies=[Depends(get_current_user)])
 app.include_router(trading_plan.router, prefix="/api/v1", tags=["交易计划"], dependencies=[Depends(get_current_user)])
 app.include_router(strategy.router, prefix="/api/v1", tags=["策略管理"], dependencies=[Depends(get_current_user)])

@@ -11,6 +11,8 @@ class PositionScore(Base):
     account_id = Column(String(64), nullable=False, index=True)
     symbol = Column(String(16), nullable=False, index=True)
     timestamp = Column(DateTime, default=func.now(), nullable=False)
+    sector = Column(String(64))
+    industry = Column(String(128))
 
     # 综合评分
     overall_score = Column(Integer)
@@ -28,6 +30,7 @@ class PositionScore(Base):
     # 基本面详情
     pe_ratio = Column(Float)
     peg_ratio = Column(Float)
+    beta = Column(Float)
     roe = Column(Float)
     revenue_growth_yoy = Column(Float)
     valuation_grade = Column(String(4))  # A/B/C/D/F
