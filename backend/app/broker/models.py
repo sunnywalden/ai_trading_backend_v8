@@ -30,6 +30,7 @@ class OptionPosition:
     contract: OptionContract
     quantity: int               # 正数=多头，负数=空头（卖出开仓）
     avg_price: float            # 开仓均价（每份合约价格，非总 notional）
+    last_price: float           # 期权当前市场价格
     underlying_price: float     # 当前标的价格
     greeks: Greeks              # 当前 Greeks
     last_update_ts: float       # 时间戳（秒）方便做缓存

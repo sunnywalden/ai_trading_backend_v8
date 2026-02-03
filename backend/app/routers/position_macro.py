@@ -159,13 +159,18 @@ async def get_positions_assessment(
                     contract = opt_pos.contract
                     quantity = opt_pos.quantity
                     avg_price = opt_pos.avg_price
+                    last_price = opt_pos.last_price
                     underlying_price = opt_pos.underlying_price
                     
-                    # 计算期权市值和盈亏（这里简化计算，实际应该用期权当前价格）
-                    # 期权的市值 = 合约价值 = 期权价格 * 数量 * 乘数
-                    # 这里用 underlying_price 作为参考，实际情况需要期权的当前价格
-                    contract_value = abs(quantity) * avg_price * contract.multiplier
-                    option_market_value += contract_value
+                    # 计算期权市值和盈亏
+                    # 市值 = 当前权利金价格 * 数量 * 乘数
+                    # 盈亏 = (当前价格 - 成本价格) * 数量 * 乘数
+                    # 如果 quantity 为负（卖出开仓），公式依旧适用：(last - avg) * (-qty) * mult
+                    mkt_val = abs(quantity) * last_price * contract.multiplier
+                    pnl = (last_price - avg_price) * quantity * contract.multiplier
+                    
+                    option_market_value += mkt_val
+                    option_pnl += pnl
                     
                     # 记录期权详情
                     option_details.append({
@@ -175,7 +180,9 @@ async def get_positions_assessment(
                         "expiry": contract.expiry.isoformat(),
                         "quantity": quantity,
                         "avg_price": avg_price,
-                        "multiplier": contract.multiplier
+                        "last_price": last_price,
+                        "multiplier": contract.multiplier,
+                        "unrealized_pnl": round(pnl, 2)
                     })
             
             # 获取当前价格（优先使用股票价格，否则使用期权的标的价格）
