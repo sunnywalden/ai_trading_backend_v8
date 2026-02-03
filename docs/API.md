@@ -49,6 +49,63 @@ Base URL 以你的启动参数为准（示例：`http://localhost:8088`）。
 - 请求：`AiAdviceRequest`
 - 响应：`AiAdviceResponse`
 
+## 策略管理（/api/v1）
+
+### GET /api/v1/strategies
+
+- 用途：列出可用策略，支持筛选、搜索与分页。
+- Query：`style?`, `is_builtin?`, `limit?`（默认 20）、`offset?`（默认 0）、`search?`
+- 响应核心字段：`{ status, strategies[] }`，每个策略包括 `id/name/style/is_builtin/is_active/tags/last_run_status/last_run_at`。
+
+### GET /api/v1/strategies/{strategy_id}
+
+- 用途：获取单个策略的完整定义。
+- 响应：`{ strategy: { id/name/style/description/tags/default_params/signal_sources/risk_profile/is_active/is_builtin/version } }`。
+
+### POST /api/v1/strategies
+
+- 用途：创建策略（需要策略管理权限，见 `settings.STRATEGY_MANAGE_USERS`）。
+- 请求：`StrategyCreateRequest`（`name/style/description/default_params/signal_sources/risk_profile/tags/is_builtin/is_active`）。
+- 响应：`StrategyDetailResponse`。
+
+### PATCH /api/v1/strategies/{strategy_id}/params
+
+- 用途：更新策略的默认参数（需要管理权限）。
+- 请求：`{ default_params: {...} }`。
+- 响应：更新后的策略摘要 plus 版本与参数。
+
+### POST /api/v1/strategies/{strategy_id}/run
+
+- 用途：按需触发策略执行，支持单次调度与异步运行。
+- 请求：`StrategyRunRequest`，字段包括 `account_id`, `budget?`, `direction?`, `param_overrides?`, `notify_channels?`, `target_universe?`, `priority?`。
+- 系统会根据 `settings.ENABLE_SCHEDULER`，将任务交由调度器 `add_job(...)`（延迟 ~2s） 或直接 `asyncio.create_task` 执行。
+- 响应：`{ run_id, celery_task_id }`（`celery_task_id` 也是调度 job id）。
+
+### GET /api/v1/strategy-runs/{run_id}/status
+
+- 用途：查询某次运行的状态、进度与时间线。
+- 响应：`{ run_id, status, phase, progress, attempt, error_message?, started_at?, finished_at?, timeline? }`。
+
+### GET /api/v1/strategy-runs/latest
+
+- 用途：返回某个账号/策略最新一条运行记录（可选 `account_id`, `strategy_id`）。
+- 响应：`{ run?: { ...status view... } }`，`run` 可能为 `null`。
+
+### GET /api/v1/strategy-runs
+
+- 用途：分页获得历史运行（可筛选 `strategy_id`, `account_id`, `status`）。
+- 响应：`runs[]`，每项：`run_id/strategy_id/status/started_at/finished_at/hits/hit_rate/avg_signal_strength`。
+
+### GET /api/v1/strategy-runs/{run_id}/results
+
+- 用途：获取某次运行的资产与信号详情。
+- 响应：`{ run_id, strategy_id, assets[] }`，每个资产包含 `symbol/signal_strength/weight/risk_flags/notes/signal_dimensions`。
+
+### POST /api/v1/strategy-runs/{run_id}/export
+
+- 用途：将指定运行的资产导出为 CSV 并返回下载链接。
+- 响应：`{ run_id, download_url, file_path }`，其中 `download_url` 指向 `/exports/strategy_runs/strategy_run_{run_id}.csv`。
+
 ## 管理接口（/api/v1）
 
 ### POST /api/v1/admin/behavior/rebuild

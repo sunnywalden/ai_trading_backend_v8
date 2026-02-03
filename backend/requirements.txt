@@ -23,3 +23,6 @@ apscheduler>=3.10.4
 pandas>=2.0.0
 # numpy版本放宽以满足pandas-ta依赖
 numpy>=2.2.6
+
+# Testing
+pytest-asyncio>=0.24.0
