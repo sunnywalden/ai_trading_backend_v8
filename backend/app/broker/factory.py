@@ -21,3 +21,14 @@ def make_option_broker_client() -> OptionBrokerClient:
         )
     print("[BrokerFactory] No Tiger API config found, using DummyOptionClient")
     return DummyOptionClient()
+
+
+def get_tiger_client() -> TigerOptionClient | None:
+    """获取 Tiger 客户端实例。"""
+    if settings.TIGER_PRIVATE_KEY_PATH and settings.TIGER_ID:
+        return TigerOptionClient(
+            private_key_path=settings.TIGER_PRIVATE_KEY_PATH,
+            tiger_id=settings.TIGER_ID,
+            account=settings.TIGER_ACCOUNT,
+        )
+    return None

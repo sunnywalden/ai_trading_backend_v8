@@ -168,7 +168,7 @@
 
 - `BehaviorScorePage.vue`：缩减指标、突出交易偏离
 - `PositionsPage.vue`：新增预算占用率与计划偏离度字段
-- `OpportunitiesPage.vue`：重命名为执行列表（UI + 文案）
+- `OpportunitiesPage.vue`：确定为策略筛选（UI + 文案，仅展示扫描结果，移除立即执行与历史记录）
 - `MacroRiskPage.vue`：收敛内容为摘要
 - `ApiMonitoringPage.vue`：替换为系统健康页（可复用 `fetchMonitoringHealth`）
 

@@ -273,6 +273,38 @@ class GeopoliticalEventsService:
 
     # ============= 私有方法：数据获取 =============
 
+    async def fetch_external_events(self, query: str, days: int = 7) -> List[GeopoliticalEvent]:
+        """公开发布的获取外部事件方法，支持自定义查询词"""
+        if not self.news_api:
+            return []
+            
+        gate = await api_monitor.can_call_provider(APIProvider.NEWS_API)
+        if not gate.get("can_call", True):
+            return []
+
+        try:
+            from_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+            articles = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self.news_api.get_everything(
+                    q=query,
+                    from_param=from_date,
+                    language='en',
+                    sort_by='relevancy',
+                    page_size=30
+                )
+            )
+            
+            events = []
+            for article in articles.get('articles', []):
+                event = self._article_to_event(article)
+                if event:
+                    events.append(event)
+            return events
+        except Exception as e:
+            logger.error(f"Error in fetch_external_events: {e}")
+            return []
+
     async def _fetch_from_news_api(self, days: int) -> List[GeopoliticalEvent]:
         """
         从News API获取地缘政治新闻（带Redis缓存和监控）
@@ -380,16 +412,16 @@ class GeopoliticalEventsService:
             # 创建事件对象
             event = GeopoliticalEvent(
                 event_type="NEWS",
-                event_title=title[:200],  # 限制长度
+                title=title[:200],  # 限制长度
                 description=description[:500] if description else None,
                 event_date=datetime.strptime(article['publishedAt'][:10], '%Y-%m-%d'),
-                source=article.get('source', {}).get('name', 'Unknown'),
+                news_source=article.get('source', {}).get('name', 'Unknown'),
                 category=category.value,
                 severity=severity_level.value,
                 affected_regions=affected_regions,
                 affected_industries=affected_industries,
                 market_impact_score=market_impact,
-                source_url=article.get('url'),
+                news_url=article.get('url'),
                 created_at=datetime.now()
             )
             
