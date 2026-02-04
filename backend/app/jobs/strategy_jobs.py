@@ -127,6 +127,7 @@ async def _record_notifications(session: AsyncSession, run: StrategyRun, final_s
 
 
 async def execute_strategy_run_job(run_id: str, task_id: Optional[str] = None) -> None:
+    logger.info("Starting strategy execution job: run_id=%s, task_id=%s", run_id, task_id)
     async with SessionLocal() as session:
         from sqlalchemy import select
         from sqlalchemy.orm import selectinload

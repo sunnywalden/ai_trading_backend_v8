@@ -848,13 +848,13 @@ async def get_macro_risk_overview(
             "ai_analysis": risk_score.risk_summary,  # 默认使用风险摘要
             "recent_events": [
                 {
-                    "title": event.event_title,
+                    "title": event.title,
                     "date": event.event_date.strftime("%Y-%m-%d"),
                     "category": event.category,
                     "severity": event.severity,
                     "impact_score": event.market_impact_score
                 }
-                for event in recent_events[:5] if hasattr(event, 'event_title')
+                for event in recent_events[:5] if hasattr(event, 'title')
             ]
         }
         
@@ -976,7 +976,7 @@ async def get_geopolitical_events(
             "events": [
                 {
                     "id": event.id,
-                    "title": event.event_title,
+                    "title": event.title,
                     "description": event.description,
                     "date": event.event_date.strftime("%Y-%m-%d"),
                     "category": event.category,
@@ -984,8 +984,8 @@ async def get_geopolitical_events(
                     "affected_regions": event.affected_regions,
                     "affected_industries": event.affected_industries,
                     "market_impact_score": event.market_impact_score,
-                    "source": event.source,
-                    "source_url": event.source_url
+                    "news_source": event.news_source,
+                    "news_url": event.news_url
                 }
                 for event in events
             ]
