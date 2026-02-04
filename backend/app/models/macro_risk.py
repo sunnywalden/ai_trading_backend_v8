@@ -64,15 +64,22 @@ class GeopoliticalEvent(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     event_date = Column(DateTime, nullable=False)
     event_type = Column(String(32))  # TRADE_WAR/MILITARY/ELECTION/SANCTION
+    category = Column(String(32))
     region = Column(String(64))
-    title = Column(String(128))
+    title = Column(String(200)) # Increased length
     description = Column(Text)
 
     # 影响评估
     severity = Column(String(16))  # LOW/MEDIUM/HIGH/CRITICAL
     affected_sectors = Column(Text)  # JSON array
     market_impact_score = Column(Integer)
+    
+    # 追加字段映射服务
+    affected_regions = Column(Text) # JSON array
+    affected_industries = Column(Text) # JSON array
 
     # 来源
     news_source = Column(String(128))
-    news_url = Column(String(256))
+    news_url = Column(Text) # Changed from String(256) to Text for long URLs
+    
+    created_at = Column(DateTime, default=func.now())
