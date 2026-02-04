@@ -47,6 +47,7 @@ async def migrate():
             # and it's generally safe to leave them or we'd have to recreate the table.
             # Leaving them for now as it's just SQLite.
 
+    await engine.dispose()
     print("✅ Migration completed.")
 
 if __name__ == "__main__":

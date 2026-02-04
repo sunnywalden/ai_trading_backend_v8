@@ -6,7 +6,7 @@ import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from sqlalchemy import text
-from app.models.db import SessionLocal
+from app.models.db import SessionLocal, engine
 
 async def migrate_db():
     print("开始检查并更新数据库字段...")
@@ -30,6 +30,8 @@ async def migrate_db():
                 pass
 
         await session.commit()
+    
+    await engine.dispose()
     print("数据库迁移完成。")
 
 if __name__ == "__main__":

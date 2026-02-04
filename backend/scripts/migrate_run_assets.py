@@ -30,6 +30,7 @@ async def migrate():
             except Exception as e:
                 print(f"Skipped adding columns: {e}")
 
+    await engine.dispose()
     print("✅ Migration completed.")
 
 if __name__ == "__main__":
