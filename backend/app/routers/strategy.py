@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 import asyncio
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -226,12 +227,14 @@ async def run_strategy(
 
     try:
         if settings.ENABLE_SCHEDULER:
+            # 使用上海时区以确保与调度器配置一致，避免 misfire
+            run_date = datetime.now(ZoneInfo("Asia/Shanghai")) + timedelta(seconds=2)
             add_job(
                 func=execute_strategy_run_job,
                 trigger="date",
                 id=task_id,
                 name=f"strategy_execution_{strategy.name}",
-                run_date=datetime.now() + timedelta(seconds=2),
+                run_date=run_date,
                 args=(run.id, task_id),
             )
         else:

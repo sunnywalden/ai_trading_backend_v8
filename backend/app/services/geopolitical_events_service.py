@@ -469,8 +469,8 @@ class GeopoliticalEventsService:
             is_duplicate = False
             for existing in existing_events:
                 similarity = self._calculate_title_similarity(
-                    new_event.event_title, 
-                    existing.event_title
+                    new_event.title, 
+                    existing.title
                 )
                 if similarity > 0.8:
                     is_duplicate = True
@@ -622,31 +622,31 @@ class GeopoliticalEventsService:
         """将GeopoliticalEvent对象转换为字典（用于Redis缓存）"""
         return {
             "event_type": event.event_type,
-            "event_title": event.event_title,
+            "title": event.title,
             "description": event.description,
             "event_date": event.event_date.isoformat() if event.event_date else None,
-            "source": event.source,
+            "news_source": event.news_source,
             "category": event.category,
             "severity": event.severity,
             "affected_regions": event.affected_regions,
             "affected_industries": event.affected_industries,
             "market_impact_score": event.market_impact_score,
-            "source_url": event.source_url
+            "news_url": event.news_url
         }
     
     def _dict_to_event(self, data: Dict[str, Any]) -> GeopoliticalEvent:
         """将字典转换回GeopoliticalEvent对象（从Redis缓存恢复）"""
         return GeopoliticalEvent(
             event_type=data.get("event_type"),
-            event_title=data.get("event_title"),
+            title=data.get("title"),
             description=data.get("description"),
             event_date=datetime.fromisoformat(data["event_date"]) if data.get("event_date") else None,
-            source=data.get("source"),
+            news_source=data.get("news_source"),
             category=data.get("category"),
             severity=data.get("severity"),
             affected_regions=data.get("affected_regions"),
             affected_industries=data.get("affected_industries"),
             market_impact_score=data.get("market_impact_score"),
-            source_url=data.get("source_url"),
+            news_url=data.get("news_url"),
             created_at=datetime.now()
         )
