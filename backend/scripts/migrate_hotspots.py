@@ -48,6 +48,7 @@ async def migrate():
             # Base.metadata.create_all is sync, so we run_sync
             await conn.run_sync(Base.metadata.create_all)
 
+    await engine.dispose()
     print("✅ Market hotspots migration completed.")
 
 if __name__ == "__main__":
