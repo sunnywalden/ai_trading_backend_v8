@@ -1,4 +1,10 @@
 import asyncio
+import os
+import sys
+
+# Ensure the parent directory is in sys.path so 'app' can be found
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from sqlalchemy import text
 from app.models.db import engine
 from app.core.config import settings
