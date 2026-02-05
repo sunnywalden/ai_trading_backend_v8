@@ -7,8 +7,6 @@ services:
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
-    environment:
-      - GOOGLE_APPLICATION_CREDENTIALS=/gc_dns_key.json
     command:
       - "--api.insecure=false"
       - "--api.dashboard=true"
@@ -19,27 +17,24 @@ services:
       # HTTP -> HTTPS 重定向
       - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
       - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
-      # SSL 证书配置 (Let's Encrypt - DNS Challenge)
-      - "--certificatesresolvers.myresolver.acme.dnschallenge=true"
-      - "--certificatesresolvers.myresolver.acme.dnschallenge.provider=googleclouddns"
+      # SSL 证书配置 (Let's Encrypt - HTTP Challenge)
+      - "--certificatesresolvers.myresolver.acme.httpchallenge=true"
+      - "--certificatesresolvers.myresolver.acme.httpchallenge.entrypoint=web"
       - "--certificatesresolvers.myresolver.acme.email=${ACME_EMAIL:-sunnywalden@gmail.com}"
       - "--certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json"
     ports:
       - "80:80"
       - "443:443"
-      - "8080:8080" # Traefik Dashboard (注意：仅建议开发/监控时使用)
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./letsencrypt:/letsencrypt
-      # 映射 GC 秘钥文件 (请确保路径正确)
-      - ./traefik/gc_dns_key.json:/gc_dns_key.json:ro
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.traefik-dash.rule=Host(`traefik.sunnywalden.com`)"
+      - "traefik.http.routers.traefik-dash.rule=Host(`traefik.${FRONTEND_DOMAIN:-sunnywalden.com}`)"
       - "traefik.http.routers.traefik-dash.entrypoints=websecure"
       - "traefik.http.routers.traefik-dash.service=api@internal"
       - "traefik.http.routers.traefik-dash.tls.certresolver=myresolver"
-      # 开启 BasicAuth 保护 Dashboard: admin/StrongPassword (示例)
+      # BasicAuth 保护: admin / StrongPassword
       - "traefik.http.middlewares.auth.basicauth.users=admin:$$apr1$$5dHtP6yE$$Xe6.3q7C4p7q9Q8R7S9T0u"
       - "traefik.http.routers.traefik-dash.middlewares=auth"
     networks:
@@ -132,15 +127,18 @@ services:
     restart: unless-stopped
     networks:
       - ai-trading-network
+    depends_on:
+      backend:
+        condition: service_healthy
     env_file:
       - ./.frontend_env
     environment:
       - BACKEND_URL=http://backend:8088
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.frontend.rule=Host(`${FRONTEND_DOMAIN:-sunnywalden.com}`) || Host(`www.${FRONTEND_DOMAIN:-sunnywalden.com}`)"
-      - "traefik.http.routers.frontend.entrypoints=websecure"
-      - "traefik.http.routers.frontend.tls.certresolver=myresolver"
+      # 同时支持 HTTP 和 HTTPS
+      - "traefik.http.routers.frontend-http.rule=Host(`${FRONTEND_DOMAIN:-sunnywalden.com}`) || Host(`www.${FRONTEND_DOMAIN:-sunnywalden.com}`)"
+      - "traefik.http.routers.frontend-http.entrypoints=web"
       - "traefik.http.services.frontend.loadbalancer.server.port=80"
 
 networks:
