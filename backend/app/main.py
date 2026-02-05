@@ -2,10 +2,12 @@ from fastapi import FastAPI, Depends, Body, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import ORJSONResponse
+from fastapi.staticfiles import StaticFiles
 from typing import Optional, AsyncGenerator
 from sqlalchemy.ext.asyncio import AsyncSession
 from contextlib import asynccontextmanager
 import asyncio
+import os
 
 from app.core.config import settings
 from app.models.db import engine, SessionLocal, get_session, redis_client, ensure_mysql_indexes, ensure_mysql_tables
@@ -39,8 +41,6 @@ from app.core.auth import get_current_user, login_for_access_token
 from fastapi.security import OAuth2PasswordRequestForm
 from datetime import datetime
 from app.core.cache import cache
-from fastapi.staticfiles import StaticFiles
-import os
 
 
 @asynccontextmanager
