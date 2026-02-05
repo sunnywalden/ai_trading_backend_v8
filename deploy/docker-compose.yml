@@ -1,6 +1,50 @@
 version: "3.8"
 
 services:
+  traefik:
+    image: traefik:v3.0
+    container_name: traefik
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/gc_dns_key.json
+    command:
+      - "--api.insecure=false"
+      - "--api.dashboard=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      # HTTP -> HTTPS 重定向
+      - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
+      # SSL 证书配置 (Let's Encrypt - DNS Challenge)
+      - "--certificatesresolvers.myresolver.acme.dnschallenge=true"
+      - "--certificatesresolvers.myresolver.acme.dnschallenge.provider=googleclouddns"
+      - "--certificatesresolvers.myresolver.acme.email=${ACME_EMAIL:-sunnywalden@gmail.com}"
+      - "--certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080" # Traefik Dashboard (注意：仅建议开发/监控时使用)
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./letsencrypt:/letsencrypt
+      # 映射 GC 秘钥文件 (请确保路径正确)
+      - ./traefik/gc_dns_key.json:/gc_dns_key.json:ro
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik-dash.rule=Host(`traefik.sunnywalden.com`)"
+      - "traefik.http.routers.traefik-dash.entrypoints=websecure"
+      - "traefik.http.routers.traefik-dash.service=api@internal"
+      - "traefik.http.routers.traefik-dash.tls.certresolver=myresolver"
+      # 开启 BasicAuth 保护 Dashboard: admin/StrongPassword (示例)
+      - "traefik.http.middlewares.auth.basicauth.users=admin:$$apr1$$5dHtP6yE$$Xe6.3q7C4p7q9Q8R7S9T0u"
+      - "traefik.http.routers.traefik-dash.middlewares=auth"
+    networks:
+      - ai-trading-network
+
   mysql:
     image: mysql:8.0
     container_name: ai-trading-mysql
@@ -38,8 +82,9 @@ services:
     # 默认使用你已推送的镜像；也可通过环境变量 BACKEND_IMAGE 覆盖
     image: sunnywalden/ai-trading-backend:latest
     container_name: ai-trading-backend
-    ports:
-      - "8088:8088"
+    # 线上环境建议通过 Traefik 访问，不再直接暴露 8088 端口
+    # ports:
+    #   - "8088:8088"
     # 推荐在仓库根目录创建 .env（cp .env.example .env），然后从 deploy/ 引用：
     #   docker compose -f deploy/docker-compose.yml up -d
     env_file:
@@ -72,30 +117,31 @@ services:
       timeout: 3s
       retries: 5
       start_period: 10s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.backend.rule=Host(`${BACKEND_DOMAIN:-api.sunnywalden.com}`)"
+      - "traefik.http.routers.backend.entrypoints=websecure"
+      - "traefik.http.routers.backend.tls.certresolver=myresolver"
+      - "traefik.http.services.backend.loadbalancer.server.port=8088"
 
   frontend:
-    # 复用你现有前端 compose 的结构；可用 FRONTEND_IMAGE 覆盖
+    # 如果 frontend 目录在 ../ai_trading_frontend_v4，则使用该路径
+    # 或者直接使用你推送的镜像
     image: sunnywalden/ai-trading-frontend:latest
-    container_name: ai-trading-frontend
-    ports:
-      - "80:80"
+    container_name: frontend-app
+    restart: unless-stopped
+    networks:
+      - ai-trading-network
     env_file:
       - ./.frontend_env
     environment:
       - BACKEND_URL=http://backend:8088
-      - NODE_ENV=production
-    restart: unless-stopped
-    networks:
-      - ai-trading-network
-    depends_on:
-      backend:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost/health"]
-      interval: 30s
-      timeout: 3s
-      retries: 3
-      start_period: 10s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.frontend.rule=Host(`${FRONTEND_DOMAIN:-sunnywalden.com}`) || Host(`www.${FRONTEND_DOMAIN:-sunnywalden.com}`)"
+      - "traefik.http.routers.frontend.entrypoints=websecure"
+      - "traefik.http.routers.frontend.tls.certresolver=myresolver"
+      - "traefik.http.services.frontend.loadbalancer.server.port=80"
 
 networks:
   ai-trading-network:

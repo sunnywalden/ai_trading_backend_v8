@@ -30,4 +30,5 @@ WORKDIR /app/backend
 
 # Note: For K8s multi-replica deployments, consider setting ENABLE_SCHEDULER=false
 # (or keep replicas=1) to avoid duplicated scheduled jobs.
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8088"]
+# 在后端启用 --proxy-headers 以便正确处理 Traefik 转发的 SSL 协议和客户端 IP
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8088", "--proxy-headers", "--forwarded-allow-ips", "*"]

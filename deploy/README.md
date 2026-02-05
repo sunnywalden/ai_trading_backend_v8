@@ -22,24 +22,17 @@
 - Dockerfile 路径：`deploy/Dockerfile`
 - Build context：仓库根目录（用于 COPY backend/）
 
-示例：
-- 镜像名：`sunnywalden/ai-trading-backend:latest`
-- 端口：容器 `8088`
-
-示例构建命令（在仓库根目录执行，build context 为 .）：
+示例构建命令：
 
 ```bash
-# 使用本地标签构建镜像
+# 在 ai_trading_backend_v8 目录下执行
 docker build -f deploy/Dockerfile -t sunnywalden/ai-trading-backend:latest .
-
-# 直接使用远程仓库地址打 tag（替换 yourrepo 为你的镜像仓库）
-docker build -f deploy/Dockerfile -t sunnywalden/ai-trading-backend:latest .
-
-docker tag sunnywalden/ai-trading-backend:latest sunnywalden/ai-trading-backend:v1.0.0
-
-# 可选：使用 buildx 构建并推送多架构镜像（需要事先启用 buildx 和登录远程仓库）
-docker buildx build --platform linux/amd64,linux/arm64 -f deploy/Dockerfile -t sunnywalden/ai-trading-backend:latest --push .
 ```
+
+- 镜像名：`sunnywalden/ai-trading-backend:latest`
+- 端口：后端容器内部 `8088`
+
+> 前端镜像构建请前往 `ai_trading_frontend_v4/deploy/` 目录参考相关文档。
 
 > 说明：本仓库默认 SQLite。容器内建议把 DB 放到可挂载目录（例如 `/data/demo.db`），通过 `DATABASE_URL` 指定。
 
@@ -95,7 +88,35 @@ docker run --rm \
 
 ---
 
-### Redis 与 MySQL（前置依赖）
+## 2) 线上环境部署与 SSL 支持 (Traefik)
+
+在生产环境，我们使用 **Traefik** 作为反向代理，并集成 Let's Encrypt 自动获取 SSL 证书。
+
+### 2.1 准备域名与配置
+
+1. 确保你的服务器公网 IP 已绑定域名（例如 `ai-trading.example.com` 和 `api.ai-trading.example.com`）。
+2. 在项目根目录的 `.env` 中配置以下变量：
+   - `ACME_EMAIL`: 你的邮箱（用于接收证书到期通知）。
+   - `FRONTEND_DOMAIN`: 前端访问域名。
+   - `BACKEND_DOMAIN`: 后端 API 访问域名。
+
+### 2.2 启动服务
+
+在 `deploy/` 目录下执行：
+
+```bash
+docker compose up -d
+```
+
+### 2.3 Traefik 工作原理
+- **入口**: 监听 80 (HTTP) 和 443 (HTTPS) 端口。
+- **自动跳转**: 所有 HTTP 请求会自动重定向到 HTTPS。
+- **证书存储**: 证书信息存储在 `deploy/letsencrypt/acme.json` 中，请确保该文件权限正确（`600`）。
+- **服务发现**: Traefik 通过容器标签 (Labels) 自动识别 `backend` 和 `frontend` 服务并进行路由转发。
+
+---
+
+## 3) Redis 与 MySQL（前置依赖）
 
 本项目在生产或完整部署时通常依赖 Redis（缓存、监控计数）和 MySQL（持久化）。可选使用 SQLite 作为轻量替代。
 
