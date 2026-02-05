@@ -76,3 +76,4 @@ Desktop.ini
 # Project Specific
 demo.db
 test_output/
+docker-compose_prod.yml

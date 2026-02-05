@@ -20,7 +20,7 @@ services:
       # SSL 证书配置 (Let's Encrypt - HTTP Challenge)
       - "--certificatesresolvers.myresolver.acme.httpchallenge=true"
       - "--certificatesresolvers.myresolver.acme.httpchallenge.entrypoint=web"
-      - "--certificatesresolvers.myresolver.acme.email=${ACME_EMAIL:-sunnywalden@gmail.com}"
+      - "--certificatesresolvers.myresolver.acme.email=${ACME_EMAIL:-youremail@demo.com}"
       - "--certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json"
     ports:
       - "80:80"
@@ -30,7 +30,7 @@ services:
       - ./letsencrypt:/letsencrypt
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.traefik-dash.rule=Host(`traefik.${FRONTEND_DOMAIN:-sunnywalden.com}`)"
+      - "traefik.http.routers.traefik-dash.rule=Host(`traefik.${FRONTEND_DOMAIN:-yoursite.com}`)"
       - "traefik.http.routers.traefik-dash.entrypoints=websecure"
       - "traefik.http.routers.traefik-dash.service=api@internal"
       - "traefik.http.routers.traefik-dash.tls.certresolver=myresolver"
@@ -45,7 +45,7 @@ services:
     container_name: ai-trading-mysql
     environment:
       - MYSQL_DATABASE=ai_trading
-      - MYSQL_ROOT_PASSWORD=StrongPassw0rd
+      - MYSQL_ROOT_PASSWORD=Password
     ports:
       - "3306:3306"
     volumes:
@@ -75,7 +75,7 @@ services:
 
   backend:
     # 默认使用你已推送的镜像；也可通过环境变量 BACKEND_IMAGE 覆盖
-    image: sunnywalden/ai-trading-backend:latest
+    image: sunnywalden/ai-trading-backend:v2.2.2
     container_name: ai-trading-backend
     # 线上环境建议通过 Traefik 访问，不再直接暴露 8088 端口
     # ports:
@@ -114,7 +114,7 @@ services:
       start_period: 10s
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.backend.rule=Host(`${BACKEND_DOMAIN:-api.sunnywalden.com}`)"
+      - "traefik.http.routers.backend.rule=Host(`${BACKEND_DOMAIN:-api.yoursite.com}`)"
       - "traefik.http.routers.backend.entrypoints=websecure"
       - "traefik.http.routers.backend.tls.certresolver=myresolver"
       - "traefik.http.services.backend.loadbalancer.server.port=8088"
@@ -122,7 +122,7 @@ services:
   frontend:
     # 如果 frontend 目录在 ../ai_trading_frontend_v4，则使用该路径
     # 或者直接使用你推送的镜像
-    image: sunnywalden/ai-trading-frontend:latest
+    image: sunnywalden/ai-trading-frontend:v2.2.2
     container_name: frontend-app
     restart: unless-stopped
     networks:
@@ -136,9 +136,9 @@ services:
       - BACKEND_URL=http://backend:8088
     labels:
       - "traefik.enable=true"
-      # 同时支持 HTTP 和 HTTPS
-      - "traefik.http.routers.frontend-http.rule=Host(`${FRONTEND_DOMAIN:-sunnywalden.com}`) || Host(`www.${FRONTEND_DOMAIN:-sunnywalden.com}`)"
-      - "traefik.http.routers.frontend-http.entrypoints=web"
+      - "traefik.http.routers.frontend.rule=Host(`${FRONTEND_DOMAIN:-yoursite.com}`) || Host(`www.${FRONTEND_DOMAIN:-yoursite.com}`)"
+      - "traefik.http.routers.frontend.entrypoints=websecure"
+      - "traefik.http.routers.frontend.tls.certresolver=myresolver"
       - "traefik.http.services.frontend.loadbalancer.server.port=80"
 
 networks:
