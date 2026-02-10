@@ -34,8 +34,17 @@ from app.routers import api_monitoring
 from app.routers import trading_plan
 from app.routers import strategy
 from app.routers import hotspots
+from app.routers import quant_loop  # NEW: 量化交易闭环路由
+# V9 routers
+from app.routers import dashboard as v9_dashboard
+from app.routers import equity as v9_equity
+from app.routers import journal as v9_journal
+from app.routers import alerts as v9_alerts
+from app.routers import orders as v9_orders
+from app.routers import websocket as v9_websocket
 from app.jobs.scheduler import init_scheduler, start_scheduler, shutdown_scheduler, add_job
 from app.jobs.data_refresh_jobs import register_all_jobs
+from app.jobs.quant_loop_jobs import register_quant_loop_jobs  # NEW: 闭环定时任务
 from app.core.proxy import apply_proxy_env, ProxyConfig
 from app.core.auth import get_current_user, login_for_access_token
 from fastapi.security import OAuth2PasswordRequestForm
@@ -60,6 +69,7 @@ async def lifespan(app: FastAPI):
     if settings.ENABLE_SCHEDULER:
         scheduler = init_scheduler()
         register_all_jobs(scheduler)
+        register_quant_loop_jobs(scheduler)  # NEW: 注册量化交易闭环任务
         start_scheduler()
         print("✓ Scheduler started with periodic tasks")
     else:
@@ -117,6 +127,15 @@ app.include_router(api_monitoring.router, prefix="/api/v1", tags=["API监控"], 
 app.include_router(trading_plan.router, prefix="/api/v1", tags=["交易计划"], dependencies=[Depends(get_current_user)])
 app.include_router(hotspots.router, prefix="/api/v1", tags=["市场热点"], dependencies=[Depends(get_current_user)])
 app.include_router(strategy.router, prefix="/api/v1", tags=["策略管理"], dependencies=[Depends(get_current_user)])
+app.include_router(quant_loop.router, dependencies=[Depends(get_current_user)])  # NEW: 量化交易闭环
+
+# V9 路由注册
+app.include_router(v9_dashboard.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
+app.include_router(v9_equity.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
+app.include_router(v9_journal.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
+app.include_router(v9_alerts.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
+app.include_router(v9_orders.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
+app.include_router(v9_websocket.router, prefix="/api/v1")
 
 
 @app.get("/health")

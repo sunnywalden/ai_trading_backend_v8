@@ -140,10 +140,26 @@ class Settings(BaseSettings):
     SCHEDULER_GEOPOLITICAL_HOURS: int = 4
     SCHEDULER_RISK_HOURS: int = 6
 
+    # ==================== V9: 新增配置 ====================
+    # 订单模式：OFF / PAPER / REAL
+    ORDER_MODE: str = "PAPER"
+    # 单笔订单最大占净值比例
+    MAX_SINGLE_ORDER_PCT: float = 0.2
+    # 日亏损熔断阈值
+    MAX_DAILY_LOSS_PCT: float = 0.05
+    # Telegram 通知
+    TELEGRAM_BOT_TOKEN: str | None = None
+    TELEGRAM_CHAT_ID: str | None = None
+    # 权益快照定时（小时）
+    SCHEDULER_EQUITY_SNAPSHOT_HOURS: int = 24
+    # 告警检查间隔（分钟）
+    SCHEDULER_ALERT_CHECK_MINUTES: int = 5
+
     model_config = SettingsConfigDict(
         env_file=str(ENV_FILE) if ENV_FILE else ".env",
         env_file_encoding="utf-8",
         case_sensitive=True,
+        extra="ignore",
     )
 
     @field_validator("TIGER_PRIVATE_KEY_PATH", mode="before")

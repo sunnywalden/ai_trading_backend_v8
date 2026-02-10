@@ -22,6 +22,15 @@ from app.models.position_score import PositionScore
 from app.models.position_trend_snapshot import PositionTrendSnapshot
 from app.models.symbol_profile_cache import SymbolProfileCache
 from app.models.strategy import Strategy
+from app.models.trading_signal import TradingSignal, SignalPerformance
+from app.models.trading_plan import TradingPlan
+# V9: 个人交易相关模型
+from app.models.price_alert import PriceAlert, AlertHistory
+from app.models.equity_snapshot import EquitySnapshot
+from app.models.trade_journal import TradeJournal
+from app.models.trade_pnl_attribution import TradePnlAttribution
+from app.models.notification import NotificationLog
+from app.models.audit_log import AuditLog
 
 DEFAULT_BUILTIN_STRATEGIES = [
     {

@@ -204,14 +204,15 @@ async def get_positions_assessment(
             else:
                 unrealized_pnl_percent = 0.0
             
-            # 获取趋势快照，如果没有则根据需要生成
+            # 获取趋势快照：优先获取今日快照
             snapshot = await technical_service.get_latest_trend_snapshot(
                 symbol,
                 account_id=account_id,
-                timeframe="1D"
+                timeframe="1D",
+                only_today=True
             )
             
-            # 如果没有今日快照，按需生成（避免请求路径阻塞）
+            # 如果没有今日快照，且触发了强制刷新，则尝试生成
             if not snapshot and force_refresh:
                 try:
                     await technical_service.get_technical_analysis(
@@ -224,51 +225,37 @@ async def get_positions_assessment(
                     snapshot = await technical_service.get_latest_trend_snapshot(
                         symbol,
                         account_id=account_id,
-                        timeframe="1D"
+                        timeframe="1D",
+                        only_today=True
                     )
                 except Exception as e:
                     print(f"[PositionAssessment] Error generating snapshot for {symbol}: {e}")
-                    # 新股或数据源不可用时，生成默认snapshot
-                    error_str = str(e)
-                    
-                    # 根据错误类型生成不同的提示
-                    if "Rate" in error_str or "Too Many" in error_str:
-                        ai_summary = f"{symbol} 数据源暂时受限，请稍后重试。建议等待1-2分钟后刷新。"
-                        trend_desc = "数据源暂时不可用"
-                    elif "insufficient" in error_str.lower() or len(error_str) == 0:
-                        ai_summary = f"{symbol} 可能为新上市股票，历史数据不足。建议关注基本面信息和市场动态。"
-                        trend_desc = "历史数据不足（新上市股票）"
-                    else:
-                        ai_summary = f"{symbol} 技术分析暂时不可用，请稍后重试。如问题持续，请联系技术支持。"
-                        trend_desc = "数据获取异常"
-                    
-                    snapshot = type('obj', (object,), {
-                        'to_dict': lambda self: {
-                            "symbol": symbol,
-                            "timeframe": "1D",
-                            "trend_direction": "INSUFFICIENT_DATA",
-                            "trend_strength": 0,
-                            "trend_description": trend_desc,
-                            "rsi_value": None,
-                            "rsi_status": "INSUFFICIENT_DATA",
-                            "macd_status": "INSUFFICIENT_DATA",
-                            "macd_signal": None,
-                            "bollinger_position": "INSUFFICIENT_DATA",
-                            "volume_ratio": None,
-                            "support_levels": [],
-                            "resistance_levels": [],
-                            "ai_summary": ai_summary,
-                            "timestamp": datetime.now().isoformat()
-                        }
-                    })()
-            elif not snapshot and not force_refresh:
+                    # 记录错误，后续会自动尝试获取历史数据作为兜底
+            
+            # 关键优化：如果依然没有今日快照（生成失败或未开启强制刷新），则回退到历史最近的一次记录作为“降级展示”
+            if not snapshot:
+                snapshot = await technical_service.get_latest_trend_snapshot(
+                    symbol,
+                    account_id=account_id,
+                    timeframe="1D",
+                    only_today=False
+                )
+                if snapshot:
+                    print(f"[PositionAssessment] Found historical snapshot for {symbol}, using as fallback.")
+            
+            # 处理最终依然为空的情况
+            if not snapshot:
+                # 保底逻辑（保持原有行为）
+                error_desc = "数据尚未生成"
+                ai_summary = f"{symbol} 快照尚未生成，可稍后重试或调用 /api/v1/positions/refresh。"
+                
                 snapshot = type('obj', (object,), {
                     'to_dict': lambda self: {
                         "symbol": symbol,
                         "timeframe": "1D",
                         "trend_direction": "INSUFFICIENT_DATA",
                         "trend_strength": 0,
-                        "trend_description": "等待刷新",
+                        "trend_description": error_desc,
                         "rsi_value": None,
                         "rsi_status": "INSUFFICIENT_DATA",
                         "macd_status": "INSUFFICIENT_DATA",
@@ -277,7 +264,7 @@ async def get_positions_assessment(
                         "volume_ratio": None,
                         "support_levels": [],
                         "resistance_levels": [],
-                        "ai_summary": f"{symbol} 快照尚未生成，可稍后重试或调用 /api/v1/positions/refresh。",
+                        "ai_summary": ai_summary,
                         "timestamp": datetime.now().isoformat()
                     }
                 })()
