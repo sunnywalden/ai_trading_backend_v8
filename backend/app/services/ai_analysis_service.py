@@ -23,11 +23,15 @@ from app.services.api_monitoring_service import api_monitor, APIProvider
 
 logger = logging.getLogger(__name__)
 
-# OpenAI客户端（延迟初始化）
+# OpenAI 客户端（延迟初始化）
 _openai_client = None
 # 可用模型列表缓存（24小时）
 _available_models_cache = None
 _models_cache_time = None
+
+# 模型熔断器：记录暂时不可用的模型及其恢复时间
+# 当模型返回 429 (Rate Limit) 或 401 (Auth Error) 时，暂时熔断 5-10 分钟
+_model_skip_list: Dict[str, float] = {}
 
 
 def _get_openai_client():
@@ -165,11 +169,14 @@ def _select_best_models(configured_model: str, available_models: List[str]) -> L
         "gpt-5.2",
         "gpt-5.1",
         "gpt-5",
+        "gpt-4o",
         "gpt-4-turbo",
         "gpt-4-turbo-preview", 
         "gpt-4-0125-preview",
         "gpt-4-1106-preview",
-        "gpt-4"
+        "gpt-4",
+        "gpt-4o-mini",  # 低成本回退模型
+        "gpt-3.5-turbo"
     ]
     
     for fallback in fallback_preferences:
@@ -205,13 +212,22 @@ class AIAnalysisService:
         self.timeout = settings.OPENAI_TIMEOUT_SECONDS
         self._models = None  # 延迟初始化
     
-    async def _get_models(self) -> List[str]:
+    async def _get_models(self, prefer_cheap: bool = False) -> List[str]:
         """获取模型列表（延迟初始化）"""
         if self._models is None:
             available_models = await _get_available_models()
             configured_model = settings.OPENAI_MODEL
             self._models = _select_best_models(configured_model, available_models)
-        return self._models
+        
+        # 如果优先使用廉价模型，将 gpt-4o-mini 等提到前面
+        models = list(self._models)
+        if prefer_cheap:
+            cheap_keywords = ["mini", "3.5", "4o-mini"]
+            cheap_models = [m for m in models if any(k in m for k in cheap_keywords)]
+            # 把廉价模型放到列表最前面
+            return cheap_models + [m for m in models if m not in cheap_models]
+            
+        return models
     
     @property
     async def models(self) -> List[str]:
@@ -233,7 +249,7 @@ class AIAnalysisService:
             AI生成的技术分析摘要（中文）
         """
         prompt = self._build_technical_prompt(symbol, technical_data)
-        
+        # 默认使用最新模型
         summary = await self._call_gpt(prompt, max_tokens=300)
         
         if not summary:
@@ -257,7 +273,7 @@ class AIAnalysisService:
             AI生成的基本面分析摘要（中文）
         """
         prompt = self._build_fundamental_prompt(symbol, fundamental_data)
-        
+        # 默认使用最新模型
         summary = await self._call_gpt(prompt, max_tokens=300)
         
         if not summary:
@@ -290,6 +306,7 @@ class AIAnalysisService:
             symbol, position_data, technical_score, fundamental_score, overall_score
         )
         
+        # 默认使用最新模型
         advice = await self._call_gpt(prompt, max_tokens=400)
         
         if not advice:
@@ -331,6 +348,7 @@ class AIAnalysisService:
         }}
         """
         
+        # 默认使用最新模型
         response_text = await self._call_gpt(prompt, max_tokens=600)
         
         if response_text:
@@ -407,6 +425,7 @@ class AIAnalysisService:
         """
         prompt = self._build_macro_analysis_prompt(macro_data)
         
+        # 默认使用最新模型
         analysis = await self._call_gpt(prompt, max_tokens=500)
         
         if not analysis:
@@ -434,21 +453,70 @@ class AIAnalysisService:
         # 回退：复用技术面规则摘要
         return self._rule_based_technical_summary(symbol, daily_payload)
     
+    async def generate_signal_summary(self, signal_data: Dict[str, Any]) -> str:
+        """为交易信号生成自然语言概要/依据（中文）"""
+        prompt = self._build_signal_summary_prompt(signal_data)
+        # 信号详情摘要使用高性能模型
+        summary = await self._call_gpt(prompt, max_tokens=300)
+        
+        if not summary:
+            # 回退到基础规则概要
+            summary = self._rule_based_signal_summary(signal_data)
+            
+        return summary
+
+    def _build_signal_summary_prompt(self, signal: Dict[str, Any]) -> str:
+        symbol = signal.get('symbol', 'N/A')
+        direction = "看多 (LONG)" if signal.get('direction') == 'LONG' else "看空 (SHORT)"
+        signal_type = signal.get('signal_type', 'ENTRY')
+        strength = signal.get('signal_strength', 0)
+        confidence = signal.get('confidence', 0)
+        factor_scores = signal.get('factor_scores', {})
+        extra = signal.get('extra_metadata', {})
+        
+        return f"""
+你是一位资深的华尔街交易员。请为以下交易信号生成一个简洁、专业的中文概要，说明触发该信号的主要依据和逻辑：
+
+标的: {symbol}
+信号类型: {signal_type} ({direction})
+信号强度: {strength}/100
+置信度: {confidence*100:.1f}%
+策略来源: {extra.get('strategy_name', '未指定策略')}
+
+因子得分详情:
+- 技术面评分: {factor_scores.get('technical_score', 'N/A')}
+- 基本面评分: {factor_scores.get('fundamental_score', 'N/A')}
+- 动量评分: {factor_scores.get('momentum_score', 'N/A')}
+- 情绪评分: {factor_scores.get('sentiment_score', 'N/A')}
+
+请基于以上数据，用两三句话总结该信号的触发理由。格式要求：直接输出总结内容，不要带“信号概要：”等前缀。
+"""
+
+    def _rule_based_signal_summary(self, signal: Dict[str, Any]) -> str:
+        symbol = signal.get('symbol', 'N/A')
+        direction = "看多" if signal.get('direction') == 'LONG' else "看空"
+        strength = signal.get('signal_strength', 0)
+        strategy = signal.get('extra_metadata', {}).get('strategy_name', '量化策略')
+        
+        return f"信号基于 {strategy} 策略触发。当前对 {symbol}持{direction}观点，信号强度为 {strength:.1f}，综合技术面与动量指标评估后生成的自动化交易指令。"
+
     async def _call_gpt(
         self,
         prompt: str,
         max_tokens: Optional[int] = None,
-        temperature: float = 0.7
+        temperature: float = 0.5,
+        prefer_cheap: bool = False
     ) -> Optional[str]:
-        """调用GPT API（带回退策略）
+        """调用GPT API（带回退策略与成本优化）
         
         Args:
             prompt: 提示词
-            max_tokens: 最大token数（如果为None则使用配置）
-            temperature: 温度参数（0-1，越高越随机）
+            max_tokens: 最大token数
+            temperature: 温度系数
+            prefer_cheap: 是否优先使用低成本模型
         
         Returns:
-            GPT生成的文本，失败返回None
+            GPT生成的文本
         """
         if not self.client:
             return None
@@ -463,10 +531,19 @@ class AIAnalysisService:
             max_tokens = self.max_tokens
         
         # 获取模型列表
-        models = await self._get_models()
+        models = await self._get_models(prefer_cheap=prefer_cheap)
+        now = time.time()
         
         # 尝试不同的模型
         for model in models:
+            # 检查模型是否在熔断期
+            if model in _model_skip_list:
+                if now < _model_skip_list[model]:
+                    logger.debug(f"Skipping model {model} (cooling down)")
+                    continue
+                else:
+                    del _model_skip_list[model]
+
             start_time = time.time()
             success = False
             error_msg = None
@@ -505,7 +582,10 @@ class AIAnalysisService:
             except Exception as e:
                 error_msg = str(e)
                 # 区分连接错误和API错误
-                if "Connection" in error_msg or "timeout" in error_msg.lower():
+                if "429" in error_msg or "insufficient_quota" in error_msg.lower() or "rate_limit" in error_msg.lower():
+                    logger.warning(f"Model {model} hit rate limit/quota. Cooling down for 10 min.")
+                    _model_skip_list[model] = now + 600 # 冷却10分钟
+                elif "Connection" in error_msg or "timeout" in error_msg.lower():
                     logger.warning(f"Failed to call {model}: Connection error. Check network or API endpoint.")
                 elif "API key" in error_msg or "authentication" in error_msg.lower():
                     logger.warning(f"Failed to call {model}: Authentication error. Check OPENAI_API_KEY.")
