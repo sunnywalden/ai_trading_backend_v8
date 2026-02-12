@@ -68,10 +68,10 @@ class RiskConfigService:
         
         print(f"[RiskConfigService] Found {len(symbols)} symbols from DB: {symbols}")
         
-        # 如果没有数据，返回默认列表
+        # 如果没有数据，返回空列表或者根据配置返回
         if not symbols:
-            print(f"[RiskConfigService] No symbols found, using defaults: ['META', 'TSLA', '1810.HK']")
-            return ["META", "TSLA", "1810.HK"]
+            print(f"[RiskConfigService] No symbols found in behavior stats. Returning empty list.")
+            return []
         
         return symbols
 

@@ -97,6 +97,15 @@ async def get_pending_signals(
     if not account_id:
         account_id = settings.TIGER_ACCOUNT
     
+    # 如果配置中也没有，尝试从 broker 获取默认账户 ID
+    if not account_id:
+        try:
+            from app.broker.factory import make_option_broker_client
+            broker = make_option_broker_client()
+            account_id = await broker.get_account_id()
+        except Exception:
+            pass
+            
     signal_engine = SignalEngine(session)
     signals = await signal_engine.get_pending_signals(
         account_id=account_id,
@@ -108,6 +117,13 @@ async def get_pending_signals(
     # 🔍 根据持仓过滤信号
     if filter_by_position and signals:
         try:
+            # 这里的 account_id 必须是有效的，用于查询该账户的真实持仓
+            if not account_id:
+                 # 保底层：如果没有 account_id，尝试获取一次
+                 from app.broker.factory import make_option_broker_client
+                 broker = make_option_broker_client()
+                 account_id = await broker.get_account_id()
+
             from app.engine.signal_position_filter import SignalPositionFilter
             signal_filter = SignalPositionFilter(session)
             signals, filter_stats = await signal_filter.filter_signals_with_positions(
@@ -115,7 +131,9 @@ async def get_pending_signals(
                 account_id
             )
         except Exception as e:
+            import traceback
             print(f"信号过滤失败: {e}")
+            traceback.print_exc()
             # 过滤失败不影响返回，继续返回未过滤的信号
     
     return {
@@ -248,7 +266,7 @@ async def execute_signals_batch(
     
     from app.core.trade_mode import TradeMode
     from app.models.trading_signal import SignalStatus
-    trade_mode = TradeMode.DRY_RUN if request.dry_run else TradeMode.LIVE
+    trade_mode = TradeMode.DRY_RUN if request.dry_run else TradeMode.REAL
     
     # 获取指定的信号
     from sqlalchemy import select
@@ -313,13 +331,15 @@ async def execute_signals_batch(
                 signal.status = SignalStatus.EXECUTED
             else:
                 failed_count += 1
-                signal.status = SignalStatus.FAILED
+                # 保持 VALIDATED 状态，以便在待执行列表中保留
+                signal.status = SignalStatus.VALIDATED
                 
             await session.commit()
                 
         except Exception as e:
             failed_count += 1
-            signal.status = SignalStatus.FAILED
+            # 保持 VALIDATED 状态，以便在待执行列表中保留
+            signal.status = SignalStatus.VALIDATED
             await session.commit()
             
             execution_results.append({
@@ -595,3 +615,31 @@ async def get_dashboard_overview(
             "last_update": datetime.utcnow().isoformat()
         }
     }
+
+
+@router.post("/sync-executing-orders")
+async def sync_executing_orders(
+    account_id: Optional[str] = None,
+    session: AsyncSession = Depends(get_session),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    同步所有执行中订单的状态
+    
+    定期调用此接口以检测券商侧的订单变化（如因资金不足被撤销）
+    建议前端在"待执行信号"页面每30秒自动调用一次
+    """
+    if not account_id:
+        account_id = settings.TIGER_ACCOUNT
+    
+    from app.engine.order_executor import OrderExecutor
+    executor = OrderExecutor(session)
+    
+    try:
+        result = await executor.sync_executing_orders(account_id)
+        return {
+            "success": True,
+            "data": result
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"同步失败: {str(e)}")

@@ -100,7 +100,7 @@ class QuantLoopService:
         """执行优先级最高的信号"""
         
         from app.core.trade_mode import TradeMode
-        trade_mode = TradeMode.DRY_RUN if dry_run else TradeMode.LIVE
+        trade_mode = TradeMode.DRY_RUN if dry_run else TradeMode.REAL
         
         return await self.executor.execute_signal_batch(
             account_id=account_id,

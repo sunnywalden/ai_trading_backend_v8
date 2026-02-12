@@ -57,6 +57,10 @@ class MarketDataProvider:
         self._price_cache: Dict[str, tuple] = {}
         self._price_cache_ttl = 60  # 价格缓存1分钟
         
+        # Symbol信息缓存 (包含 lot_size)
+        self._symbol_info_cache: Dict[str, tuple] = {}
+        self._symbol_info_ttl = 3600 * 24  # 缓存1天
+        
         # 请求频率控制: 记录每个symbol的最后请求时间
         self._last_request_time: Dict[str, float] = {}
         self._request_min_interval = 1.0  # 每个symbol最少间隔1秒
@@ -390,9 +394,9 @@ class MarketDataProvider:
             
             if bars_df is None or len(bars_df) == 0:
                 error_msg = "Empty bars returned"
-            elif len(bars_df) < 30:
-                error_msg = f"Insufficient data: {len(bars_df)} rows < 30 days"
-                print(f"[MarketData] Tiger API returned insufficient data for {symbol}: {len(bars_df)} rows < 30 days")
+            elif len(bars_df) < 5:
+                error_msg = f"Insufficient data: {len(bars_df)} rows"
+                print(f"[MarketData] Tiger API returned insufficient data for {symbol}: {len(bars_df)} rows")
             else:
                 df = bars_df.copy()
                 # Tiger 返回列名通常为 time/open/high/low/close/volume/symbol
@@ -536,3 +540,57 @@ class MarketDataProvider:
         if len(self._price_cache) > 200:
             oldest_symbol = min(self._price_cache.items(), key=lambda x: x[1][1])[0]
             del self._price_cache[oldest_symbol]
+
+    async def get_lot_size(self, symbol: str) -> int:
+        """获取合约最小交易单位 (Lot Size)
+        
+        美股通常为 1；港股通常为 100, 500, 1000 等。
+        """
+        # 1. 简单启发式
+        if not symbol.endswith(".HK") and ".US" not in symbol and not symbol.isupper():
+            # 非港股美股格式且不全是大写，优先看后缀
+            pass
+        
+        if symbol.endswith(".US") or (symbol.isupper() and "." not in symbol):
+            return 1 # 美股大都支持1股或碎股，这里按最小1股计
+            
+        # 2. 缓存检查
+        if symbol in self._symbol_info_cache:
+            info, timestamp = self._symbol_info_cache[symbol]
+            if time.time() - timestamp < self._symbol_info_ttl:
+                return info.get("lot_size", 1)
+
+        # 3. 如果是港股，必须查 API 获取准确 lot_size
+        if symbol.endswith(".HK"):
+            if self._tiger_quote_client:
+                try:
+                    await self._wait_for_rate_limit(symbol)
+                    # 获取证券基本信息
+                    briefs = await self._run_external(
+                        self._tiger_quote_client.get_stock_briefs,
+                        [symbol]
+                    )
+                    if briefs is not None and not briefs.empty:
+                        # Tiger OpenAPI 返回的 briefs 中通常包含 lot_size
+                        # 如果没有，尝试使用 get_symbol_info
+                        lot_size = 1
+                        if 'lot_size' in briefs.columns:
+                            lot_size = int(briefs.iloc[0]['lot_size'])
+                        else:
+                            # 降级尝试 get_symbol_info
+                            details = await self._run_external(
+                                self._tiger_quote_client.get_symbol_info,
+                                [symbol]
+                            )
+                            if details is not None and not details.empty:
+                                lot_size = int(details.iloc[0].get('lot_size', 1))
+                        
+                        self._symbol_info_cache[symbol] = ({"lot_size": lot_size}, time.time())
+                        return lot_size
+                except Exception as e:
+                    print(f"[MarketDataProvider] Error fetching lot size for {symbol}: {e}")
+            
+            # 如果查不到，港股给个保守默认值 (大部分是100或500, 但返回1可能会导致下单失败)
+            return 100 # 风险提示: 应当由 API 返回，100是常见默认值
+            
+        return 1 # 默认 1

@@ -22,6 +22,7 @@ from app.models.trading_signal import TradingSignal, SignalStatus
 from app.broker.factory import make_option_broker_client
 from app.services.account_service import AccountService
 from app.services.risk_event_logger import log_risk_event
+from app.providers.market_data_provider import MarketDataProvider
 from app.core.trade_mode import TradeMode
 from app.core.config import settings
 
@@ -32,7 +33,8 @@ class OrderExecutor:
     def __init__(self, session: AsyncSession):
         self.session = session
         self.broker = make_option_broker_client()
-        self.account_svc = AccountService(session)
+        self.account_svc = AccountService(session, self.broker)
+        self.market_provider = MarketDataProvider()
         self.dry_run_mode = False  # 可通过配置控制
     
     async def execute_signal_batch(
@@ -113,7 +115,8 @@ class OrderExecutor:
                     
             except Exception as e:
                 failed_count += 1
-                signal.status = SignalStatus.FAILED
+                # 保持 VALIDATED 状态，以便在待执行列表中保留
+                signal.status = SignalStatus.VALIDATED
                 await self.session.commit()
                 
                 await log_risk_event(
@@ -149,12 +152,19 @@ class OrderExecutor:
         
         # 实际执行订单
         try:
-            order_id = str(uuid4())
+            # 🚀 集成实际的券商 API 下单
+            print(f"[OrderExecutor] Calling broker.place_order for {signal.symbol}")
+            resp = await self.broker.place_order(signal.account_id, order_params)
             
-            # 这里集成实际的broker API
-            # 当前使用模拟执行
-            executed_price = order_params["price"] * (1 + 0.001)  # 模拟小幅滑点
-            executed_quantity = order_params["quantity"]
+            if not resp.get("success"):
+                error_msg = resp.get("message", "Unknown broker error")
+                print(f"[OrderExecutor] Broker placement failed: {error_msg}")
+                raise Exception(error_msg)
+            
+            order_id = resp.get("order_id")
+            # 优先使用券商返回的实际委托参数（可能经过了精度对齐）
+            executed_price = resp.get("executed_price", order_params["price"])
+            executed_quantity = resp.get("executed_quantity", order_params["quantity"])
             
             # 更新信号状态
             signal.status = SignalStatus.EXECUTING
@@ -179,6 +189,25 @@ class OrderExecutor:
                 executed_quantity=executed_quantity
             )
             
+            # 🔍 下单后延迟检查：等待3秒后验证券商的最终状态
+            # 避免订单因资金不足等原因被撤销但系统未感知
+            print(f"[OrderExecutor] Waiting 3s to verify final order status for {order_id}...")
+            await asyncio.sleep(3)
+            status_check = await self.monitor_order_status(signal.account_id, order_id)
+            
+            # 如果券商已撤销或拒绝订单，返回失败
+            if status_check.get("status") in ["CANCELLED", "REJECTED"]:
+                error_reason = status_check.get("message", "券商撤销订单")
+                print(f"[OrderExecutor] Order {order_id} was cancelled/rejected: {error_reason}")
+                return {
+                    "success": False,
+                    "signal_id": signal.signal_id,
+                    "order_id": order_id,
+                    "symbol": signal.symbol,
+                    "error": error_reason,
+                    "message": f"订单被撤销: {error_reason}"
+                }
+            
             return {
                 "success": True,
                 "signal_id": signal.signal_id,
@@ -186,11 +215,12 @@ class OrderExecutor:
                 "symbol": signal.symbol,
                 "executed_price": executed_price,
                 "executed_quantity": executed_quantity,
-                "message": "Order executed successfully"
+                "message": resp.get("message", "Order executed successfully via Broker")
             }
             
         except Exception as e:
-            signal.status = SignalStatus.FAILED
+            # 保持 VALIDATED 状态，以便在待执行列表中保留
+            signal.status = SignalStatus.VALIDATED
             await self.session.commit()
             
             return {
@@ -206,17 +236,31 @@ class OrderExecutor:
         signal: TradingSignal,
         account_equity: float
     ) -> Dict[str, Any]:
-        """计算订单参数"""
+        """计算订单参数 (包含碎股/一手限制逻辑)"""
         
         # 基于信号和账户权益计算实际交易数量
         position_size_pct = signal.suggested_quantity or 0.10
         position_value = account_equity * position_size_pct
         
-        # 获取当前市价(这里需要集成市场数据)
-        current_price = signal.suggested_price or 100.0
+        # 获取当前市价
+        current_price = signal.suggested_price or await self.market_provider.get_current_price(signal.symbol)
+        if not current_price or current_price <= 0:
+            current_price = 100.0  # 安全回退值
         
         quantity = int(position_value / current_price)
         
+        # --- 港股一手限制处理 ---
+        if signal.symbol.endswith(".HK"):
+            lot_size = await self.market_provider.get_lot_size(signal.symbol)
+            if lot_size > 1:
+                # 向下取整到 lot_size 的倍数
+                original_qty = quantity
+                quantity = (quantity // lot_size) * lot_size
+                print(f"[OrderExecutor] HK Stock {signal.symbol} lot size adjustment: {original_qty} -> {quantity} (lot_size={lot_size})")
+                
+                if quantity < lot_size:
+                    raise ValueError(f"港股数量不足一手: 预计{original_qty}股, 最小单位{lot_size}股, 调整后数量为0")
+
         # 计算限价单价格(稍微好于市价)
         if signal.direction == "LONG":
             limit_price = current_price * 1.002  # 买入时略高于市价
@@ -283,6 +327,7 @@ class OrderExecutor:
     ) -> None:
         """记录执行到交易日志"""
         
+        # 1. 记录到风险事件日志 (System Event)
         await log_risk_event(
             self.session,
             account_id=signal.account_id,
@@ -298,23 +343,86 @@ class OrderExecutor:
                 "expected_return": signal.expected_return,
             }
         )
+
+        # 2. 记录到交易日志 (Trade Journal - 供前端展示和复盘)
+        try:
+            from app.services.journal_service import JournalService
+            journal_svc = JournalService(self.session)
+            await journal_svc.create_from_execution(
+                account_id=signal.account_id,
+                symbol=signal.symbol,
+                direction=signal.direction,
+                price=executed_price,
+                quantity=executed_quantity,
+                signal_id=signal.signal_id
+            )
+        except Exception as e:
+            print(f"[OrderExecutor] Failed to create journal entry: {e}")
     
     async def monitor_order_status(
         self,
+        account_id: str,
         order_id: str
     ) -> Dict[str, Any]:
-        """监控订单状态(用于异步订单)"""
+        """监控订单状态并同步到信号状态"""
         
-        # 查询订单状态
-        # 这里需要集成broker API
+        # 🛡️ 参数检查
+        if not order_id:
+            return {"status": "UNKNOWN", "message": "No order_id provided"}
+
+        # 1. 从券商获取最新状态
+        print(f"[OrderExecutor] Checking status for order {order_id}")
+        resp = await self.broker.get_order_status(account_id, order_id)
+        status = resp.get("status")  # FILLED, CANCELLED, REJECTED, PENDING, EXECUTING
         
-        return {
-            "order_id": order_id,
-            "status": "FILLED",  # PENDING/FILLED/PARTIALLY_FILLED/CANCELLED/REJECTED
-            "filled_quantity": 100,
-            "avg_fill_price": 150.25,
-            "message": "Order filled successfully"
-        }
+        # 2. 更新关联的信号状态
+        from app.models.trading_signal import TradingSignal, SignalStatus
+        # 精确匹配 order_id (string)
+        stmt = select(TradingSignal).where(TradingSignal.order_id == str(order_id))
+        result = await self.session.execute(stmt)
+        signal = result.scalars().first()
+        
+        if signal:
+            # 状态映射
+            if status == "FILLED":
+                signal.status = SignalStatus.EXECUTED
+                signal.executed_price = resp.get("avg_fill_price")
+                signal.executed_quantity = resp.get("filled_quantity")
+                signal.executed_at = datetime.utcnow()
+            elif status in ["CANCELLED", "REJECTED"]:
+                # 用户要求执行失败不从待执行列表删除，因此重置为 VALIDATED
+                signal.status = SignalStatus.VALIDATED
+                signal.order_id = None # 清除已失效订单ID，允许再次下单
+            
+            await self.session.commit()
+            print(f"[OrderExecutor] Updated signal {signal.signal_id} ({signal.symbol}) status to {signal.status.value}. Broker status: {status}")
+
+            # 3. 如果已成交或失败，更新交易日志
+            try:
+                from app.services.journal_service import JournalService
+                journal_svc = JournalService(self.session)
+                
+                updates = {}
+                if status == "FILLED":
+                    updates = {
+                        "journal_status": "COMPLETED",
+                        "entry_price": resp.get("avg_fill_price"),
+                        "quantity": resp.get("filled_quantity")
+                    }
+                elif status in ["CANCELLED", "REJECTED"]:
+                    updates = {
+                        "journal_status": "FAILED",
+                        "lesson_learned": f"交易执行失败: {resp.get('message')}"
+                    }
+                
+                if updates:
+                    await journal_svc.update_journal_by_signal(signal.signal_id, updates)
+            except Exception as e:
+                print(f"[OrderExecutor] Failed to update journal for signal {signal.signal_id}: {e}")
+        else:
+            print(f"[OrderExecutor] No signal found matching order_id: {order_id}")
+        
+        return resp
     
     async def cancel_signal(self, signal_id: str) -> bool:
         """取消信号(如果还未执行)"""
@@ -342,3 +450,52 @@ class OrderExecutor:
         )
         
         return True
+
+    async def sync_executing_orders(self, account_id: str) -> Dict[str, Any]:
+        """批量同步执行中订单的状态"""
+        from app.models.trading_signal import TradingSignal, SignalStatus
+        
+        # 1. 查找所有处理中的信号
+        stmt = select(TradingSignal).where(
+            and_(
+                TradingSignal.account_id == account_id,
+                TradingSignal.status == SignalStatus.EXECUTING
+            )
+        )
+        result = await self.session.execute(stmt)
+        active_signals = result.scalars().all()
+        
+        if not active_signals:
+            return {"synced": 0, "updates": 0}
+            
+        print(f"[OrderExecutor] Syncing {len(active_signals)} executing orders for account {account_id}")
+        
+        updates = 0
+        for signal in active_signals:
+            if not signal.order_id:
+                continue
+                
+            try:
+                # 获取券商侧状态
+                resp = await self.monitor_order_status(account_id, signal.order_id)
+                new_status = resp.get("status")
+                
+                # monitor_order_status 已经处理了 commit，我们这里记录更新数
+                if new_status in ["FILLED", "CANCELLED", "REJECTED"]:
+                    updates += 1
+                    
+                    # 如果状态变为 FAILED，且是真实的下单，我们需要补充日志
+                    if new_status in ["CANCELLED", "REJECTED"]:
+                        # 记录风险事件描述失败原因
+                        await log_risk_event(
+                            self.session,
+                            account_id=account_id,
+                            event_type="ORDER_FAILED",
+                            level="WARNING",
+                            message=f"Order {signal.order_id} ({signal.symbol}) failed at broker: {resp.get('message')}",
+                            symbol=signal.symbol
+                        )
+            except Exception as e:
+                print(f"[OrderExecutor] Error syncing signal {signal.signal_id}: {e}")
+                
+        return {"synced": len(active_signals), "updates": updates}

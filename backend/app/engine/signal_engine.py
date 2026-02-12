@@ -160,6 +160,7 @@ class SignalEngine:
         
         # 如果已存在信号，比较信号强度决定是否更新
         if existing_signal:
+            print(f"[SignalEngine] Found existing signal for {asset.symbol}, checking update...")
             if new_signal_strength > existing_signal.signal_strength:
                 # 🔄 更新为更强的信号
                 signal_dims = asset.signal_dimensions or {}

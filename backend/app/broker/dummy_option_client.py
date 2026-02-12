@@ -65,3 +65,25 @@ class DummyOptionClient(OptionBrokerClient):
         """返回模拟账户权益"""
         return 150000.0  # 15万美元模拟账户
 
+    async def place_order(self, account_id: str, order_params: dict) -> dict:
+        """模拟下单"""
+        from uuid import uuid4
+        order_id = f"DUMMY_{uuid4()}"
+        print(f"[DummyBroker] Received order: {order_params}")
+        return {
+            "success": True,
+            "order_id": order_id,
+            "ext_order_id": order_id,
+            "status": "FILLED",
+            "message": "Order simulated successfully (Dummy mode)"
+        }
+
+    async def get_order_status(self, account_id: str, order_id: str) -> dict:
+        """模拟获取订单状态"""
+        return {
+            "status": "FILLED",
+            "filled_quantity": 100.0,
+            "avg_fill_price": 100.0,
+            "message": "Simulation fill"
+        }
+

@@ -58,6 +58,48 @@ class JournalService:
         journals = list(result.scalars().all())
         return journals, total
 
+    async def create_from_execution(
+        self, account_id: str, symbol: str, direction: str, price: float, quantity: float, signal_id: Optional[str] = None
+    ) -> TradeJournal:
+        """从成交事件自动创建交易日志"""
+        # 映射方向名称 (LONG->BUY, SHORT->SELL) 以保持一致性
+        dir_map = {"LONG": "BUY", "SHORT": "SELL"}
+        journal_direction = dir_map.get(direction.upper(), direction.upper())
+        
+        journal = TradeJournal(
+            account_id=account_id,
+            symbol=symbol,
+            direction=journal_direction,
+            entry_date=date.today(),
+            entry_price=price,
+            quantity=quantity,
+            journal_status="DRAFT",
+            signal_id=signal_id,
+            lesson_learned=f"系统自动执行 {'看多' if direction.upper() == 'LONG' else '看空'} 信号 (SignalID: {signal_id})" if signal_id else "系统自动执行"
+        )
+        self.session.add(journal)
+        await self.session.commit()
+        await self.session.refresh(journal)
+        return journal
+
+    async def update_journal_by_signal(
+        self, signal_id: str, updates: dict
+    ) -> bool:
+        """根据信号 ID 更新交易日志"""
+        stmt = select(TradeJournal).where(TradeJournal.signal_id == signal_id)
+        result = await self.session.execute(stmt)
+        journal = result.scalars().first()
+        
+        if not journal:
+            return False
+            
+        for key, value in updates.items():
+            if hasattr(journal, key):
+                setattr(journal, key, value)
+                
+        await self.session.commit()
+        return True
+
     async def ai_review(self, journal_id: int, account_id: str) -> Optional[str]:
         """AI 自动复盘"""
         journal = await self._get_by_id(journal_id, account_id)
