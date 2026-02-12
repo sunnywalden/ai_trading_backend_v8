@@ -17,21 +17,16 @@ from app.models.strategy import (
 
 logger = logging.getLogger(__name__)
 
-CANDIDATE_SYMBOLS = [
-    "AAPL",
-    "MSFT",
-    "NVDA",
-    "AMZN",
-    "GOOGL",
-    "META",
-    "TSLA",
-    "AVGO",
-    "INTC",
-    "AMD",
-    "ORCL",
-    "QCOM",
-    "CRM",
-]
+UNIVERSE_MAPPING = {
+    "US_LARGE_MID_TECH": ["AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AVGO", "INTC", "AMD", "ORCL", "QCOM", "CRM"],
+    "PRECIOUS_METALS": ["GLD", "SLV", "IAU", "NEM", "GOLD", "AU", "AG", "FNV", "WPM", "PAAS", "GFI"],
+    "US_SMALL_TECH": ["U", "PLTR", "SNOW", "NET", "OKTA", "FSLR", "ENPH", "SHOP", "SQ", "ROKU"],
+    "TRADITIONAL_QUALITY": ["JPM", "V", "BRK.B", "PG", "JNJ", "WMT", "KO", "XOM", "CVX", "CAT", "BA"],
+    "EMERGING_QUALITY": ["TSM", "ASML", "BABA", "PDD", "JD", "ARM", "LI", "NIO", "XPEV"],
+    "BLOCKCHAIN_CRYPTO": ["COIN", "MARA", "RIOT", "CLSK", "MSTR", "HOOD"],
+}
+
+DEFAULT_SYMBOLS = UNIVERSE_MAPPING["US_LARGE_MID_TECH"]
 
 PHASES = [
     ("signal_collection", "Collecting signals"),
@@ -45,9 +40,10 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-
-def _sample_assets(count: int, strategy_name: str = "") -> List[dict]:
-    symbols = random.sample(CANDIDATE_SYMBOLS, min(count, len(CANDIDATE_SYMBOLS)))
+def _sample_assets(count: int, strategy_name: str = "", universe_symbols: List[str] = None) -> List[dict]:
+    if not universe_symbols:
+        universe_symbols = DEFAULT_SYMBOLS
+    symbols = random.sample(universe_symbols, min(count, len(universe_symbols)))
     assets = []
     
     # 根据策略名称调整模拟数据
@@ -161,9 +157,15 @@ async def execute_strategy_run_job(run_id: str, task_id: Optional[str] = None) -
                 await asyncio.sleep(0.1)
                 timeline[phase_key]["end"] = datetime.now(timezone.utc).isoformat()
 
-            candidate_count = min(len(CANDIDATE_SYMBOLS), 5)
+            # 根据 target_universe 选择股票池
+            universe_key = run.target_universe or "US_LARGE_MID_TECH"
+            universe_symbols = UNIVERSE_MAPPING.get(universe_key, DEFAULT_SYMBOLS)
+            
+            logger.info("Executing strategy with universe: %s, symbols count: %d", universe_key, len(universe_symbols))
+            
+            candidate_count = min(len(universe_symbols), run.max_results or 5)
             strategy_name = run.strategy.name if run.strategy else ""
-            sampled = _sample_assets(count=candidate_count, strategy_name=strategy_name)
+            sampled = _sample_assets(count=candidate_count, strategy_name=strategy_name, universe_symbols=universe_symbols)
 
             assets_records = []
             total_strength = 0.0

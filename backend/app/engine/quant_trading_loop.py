@@ -108,7 +108,7 @@ class QuantTradingLoop:
                 )
             )
             .order_by(desc(StrategyRun.finished_at))
-            .limit(5)  # 处理最近5次策略运行
+            .limit(1)  # 只处理最近 1 次策略运行，确保信号与最新筛选逻辑一致
         )
         
         result = await self.session.execute(stmt)
@@ -290,6 +290,14 @@ class QuantTradingLoop:
     ) -> Dict[str, Any]:
         """获取闭环系统状态"""
         
+        # 🛡️ 每次获取状态时同步正在执行的订单状态
+        try:
+            sync_results = await self.order_executor.sync_executing_orders(account_id)
+            if sync_results.get("updates", 0) > 0:
+                print(f"[Loop] Sync completed: {sync_results['updates']} updates found.")
+        except Exception as e:
+            print(f"[Loop] Error during order sync: {e}")
+            
         from app.models.trading_signal import TradingSignal, SignalStatus
         from sqlalchemy import select, func, and_
         

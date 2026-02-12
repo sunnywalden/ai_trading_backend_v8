@@ -23,6 +23,7 @@ class TradeJournal(Base):
     lesson_learned = Column(Text, nullable=True)
     ai_review = Column(Text, nullable=True)
     journal_status = Column(String(16), nullable=False, default="DRAFT")
+    signal_id = Column(String(64), nullable=True)  # V9: 关联交易信号
     created_at = Column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
     updated_at = Column(DateTime, server_default=text("CURRENT_TIMESTAMP"), onupdate=text("CURRENT_TIMESTAMP"))
 

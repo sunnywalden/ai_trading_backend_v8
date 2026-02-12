@@ -55,12 +55,16 @@ async def list_journals(
     size: int = Query(20, ge=1, le=100),
     symbol: Optional[str] = None,
     status: Optional[str] = None,
+    account_id: Optional[str] = Query(None, description="子账户ID"),
     session: AsyncSession = Depends(get_session),
     current_user: str = Depends(get_current_user),
 ):
     """获取交易日志列表"""
-    broker = make_option_broker_client()
-    account_id = await broker.get_account_id()
+    # 如果没传 account_id，则从 Broker 获取默认账户
+    if not account_id:
+        broker = make_option_broker_client()
+        account_id = await broker.get_account_id()
+    
     svc = JournalService(session)
     journals, total = await svc.list_journals(account_id, page, size, symbol, status)
     items = [JournalView.model_validate(j, from_attributes=True) for j in journals]

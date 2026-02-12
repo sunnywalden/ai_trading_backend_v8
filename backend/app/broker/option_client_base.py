@@ -21,3 +21,34 @@ class OptionBrokerClient(Protocol):
         """获取账户权益（USD）"""
         ...
 
+    async def place_order(self, account_id: str, order_params: dict) -> dict:
+        """下单接口
+        
+        Args:
+            account_id: 账户号
+            order_params: 包含 symbol, direction, quantity, price, order_type 等
+            
+        Returns:
+            {
+                "success": bool,
+                "order_id": str,
+                "status": str,
+                "message": str,
+                "ext_order_id": str (broker内部ID)
+            }
+        """
+        ...
+
+    async def get_order_status(self, account_id: str, order_id: str) -> dict:
+        """获取订单状态
+        
+        Returns:
+            {
+                "status": str (FILLED, CANCELLED, REJECTED, PENDING, EXECUTING),
+                "filled_quantity": float,
+                "avg_fill_price": float,
+                "message": str
+            }
+        """
+        ...
+

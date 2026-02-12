@@ -49,6 +49,7 @@ class JournalView(BaseModel):
     lesson_learned: Optional[str] = None
     ai_review: Optional[str] = None
     journal_status: str = "DRAFT"
+    signal_id: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -56,7 +57,9 @@ class JournalView(BaseModel):
 class JournalListResponse(BaseModel):
     status: str = "ok"
     total: int = 0
-    journals: list[JournalView] = []
+    items: list[JournalView] = []
+    page: int = 1
+    size: int = 20
 
 
 class JournalAiReviewResponse(BaseModel):
