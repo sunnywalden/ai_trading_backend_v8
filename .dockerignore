@@ -9,10 +9,11 @@ __pycache__
 *.sqlite3
 .env
 .env.*
-backend/demo.db
+demo.db
 keys/
-backend/keys/
+
 docs/
-scripts/
+# scripts/
+scripts/test_scripts
 .DS_Store
 ./deploy

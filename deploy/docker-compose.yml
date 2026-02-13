@@ -97,7 +97,7 @@ services:
       # 数据库/数据持久化目录
       - ./backend_data:/data
       # Tiger 私钥目录（可选：如果不使用 Tiger，可注释掉）
-      - ./keys:/app/backend/keys:ro
+      - ./keys:/app/keys:ro
     restart: unless-stopped
     networks:
       - ai-trading-network

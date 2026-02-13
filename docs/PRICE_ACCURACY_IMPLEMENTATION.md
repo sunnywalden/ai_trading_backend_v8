@@ -11,7 +11,7 @@
 
 #### 1. 后端修改 (3个文件)
 
-##### 1.1 `backend/app/services/quick_trade_service.py`
+##### 1.1 `app/services/quick_trade_service.py`
 
 **修改内容**：
 
@@ -89,7 +89,7 @@
        )
    ```
 
-##### 1.2 `backend/docs/PRICE_ACCURACY_FIX.md`
+##### 1.2 `docs/PRICE_ACCURACY_FIX.md`
 - 详细测试文档
 - 包含场景说明、验收标准、部署步骤
 

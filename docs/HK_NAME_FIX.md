@@ -20,7 +20,7 @@
 
 ### 1. 代码修复（已完成）
 
-修改了 `/Users/admin/IdeaProjects/ai_trading_backend_v8/backend/app/broker/tiger_option_client.py` 第96行：
+修改了 `/Users/admin/IdeaProjects/ai_trading_backend_v8/app/broker/tiger_option_client.py` 第96行：
 
 **修改前：**
 
@@ -120,10 +120,10 @@ curl "http://localhost:8088/api/v1/positions/assessment"
 
 ## 相关文件
 
-- `/backend/app/broker/tiger_option_client.py`: Tiger API 客户端，获取和缓存港股名称
-- `/backend/app/routers/position_macro.py`: 持仓评估API端点，使用港股名称
-- `/backend/clear_hk_name_cache.py`: 清除港股名称缓存的工具脚本
-- `/backend/test_assessment_hk_name.py`: 测试港股名称显示的脚本
+- `app/broker/tiger_option_client.py`: Tiger API 客户端，获取和缓存港股名称
+- `app/routers/position_macro.py`: 持仓评估API端点，使用港股名称
+- `scripts/clear_hk_name_cache.py`: 清除港股名称缓存的工具脚本
+- `tests/unit/test_assessment_hk_name.py`: 测试港股名称显示的脚本
 
 ## 常见问题
 

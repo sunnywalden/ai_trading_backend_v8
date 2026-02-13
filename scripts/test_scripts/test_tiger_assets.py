@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """测试 Tiger API 返回的 assets 数据结构
 
-说明：该脚本原位于 backend/ 下，现统一归档到 scripts/test_scripts/。
+说明：该脚本原位于旧的 `backend/` 目录，现统一归档到 `scripts/test_scripts/`。
 """
 
 import json
@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT_DIR / "backend"))
+sys.path.insert(0, str(ROOT_DIR))
 
 from app.core.config import settings
 
