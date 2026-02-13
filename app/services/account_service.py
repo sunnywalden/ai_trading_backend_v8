@@ -28,3 +28,33 @@ class AccountService:
         # 降级：返回默认值
         return 100000.0
 
+    async def get_account_info(self, account_id: str) -> dict:
+        """获取账户详细信息 (Cash, Buying Power, etc.)"""
+        if not self.broker:
+            return {}
+            
+        try:
+            # 直接通过 broker 获取 assets 信息
+            from tigeropen.trade.trade_client import TradeClient
+            # TigerOptionClient 暴露了 trade_client
+            if hasattr(self.broker, 'trade_client'):
+                assets = await self.broker._run_in_executor(
+                    self.broker.trade_client.get_assets,
+                    account=account_id
+                )
+                if assets:
+                    asset = assets[0] if isinstance(assets, list) and len(assets) > 0 else assets
+                    summary = getattr(asset, 'summary', None)
+                    if summary:
+                        return {
+                            "cash": float(getattr(summary, 'cash', 0.0)),
+                            "market_value": float(getattr(summary, 'market_value', 0.0)),
+                            "buying_power": float(getattr(summary, 'buying_power', 0.0)),
+                            "margin_used": float(getattr(summary, 'margin_used', 0.0)),
+                            "margin_available": float(getattr(summary, 'margin_available', 0.0)),
+                        }
+        except Exception as e:
+            logger.error(f" Error in get_account_info: {e}")
+            
+        return {}
+
