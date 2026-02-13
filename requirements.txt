@@ -1,28 +1,34 @@
-fastapi
-uvicorn
-pydantic
-pydantic-settings
-orjson
-sqlalchemy
-aiosqlite
-aiomysql
-redis
-cryptography
-python-jose[cryptography]
-python-multipart
-greenlet
-tigeropen
+fastapi>=0.95.2,<1.0
+uvicorn[standard]>=0.22.0,<1.0
+pydantic>=2.2.1,<3.0
+pydantic-settings>=2.0.0,<3.0
+orjson>=3.9.0
+sqlalchemy>=2.0.20,<3.0
+aiosqlite>=0.18.0
+aiomysql>=0.1.2
+redis>=4.6.0
+cryptography>=40.0.0
+python-jose[cryptography]>=3.3.0
+python-multipart>=0.0.6
+greenlet>=2.0.2
+tigeropen>=3.5.1
+httpx>=0.24.0
+python-dotenv>=1.0.0
+typing_extensions>=4.8.0
 
 # 持仓评估和宏观风险分析依赖
 yfinance>=0.2.37
 pandas-ta>=0.3.14b0
 fredapi>=0.5.1
 newsapi-python>=0.2.7
-openai>=1.12.0
+openai>=1.28.0
 apscheduler>=3.10.4
-pandas>=2.0.0
-# numpy版本放宽以满足pandas-ta依赖
-numpy>=2.2.6
+pandas>=2.1.3,<3.0
+# numpy 与 numba / pandas-ta 兼容：保持在 1.x 系列（>=1.24 且 <2.3）
+numpy>=1.25.0,<2.3
 
 # Testing
 pytest-asyncio>=0.24.0
+pytest>=7.4.0
+black>=24.3.0
+isort>=6.0.0
