@@ -176,7 +176,7 @@ pip install -r requirements.txt
 
 ```bash
 # 运行测试脚本验证配置
-python scripts/test_scripts/test_tiger_api.py
+python tests/integration/test_tiger_api.py
 ```
 
 ### 初始化数据库

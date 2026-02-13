@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """测试 AI 分析服务配置
 
-说明：该脚本已从项目根目录归档到 scripts/test_scripts/。
+说明：该脚本位于 `tests/unit/`（单元测试）。
 """
 
 import asyncio

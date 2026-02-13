@@ -179,10 +179,10 @@ export default defineConfig({
 
 ### Smoke tests 与 CI（验证部署健康）
 
-项目包含端到端 Smoke Test 脚本：`smoke_test.py`（也存在 `scripts/test_scripts/smoke_test.py`）。建议在部署后或 CI 管道中运行：
+项目包含端到端 Smoke Test 脚本：`smoke_test.py`（位于 `tests/integration/`）。建议在部署后或 CI 管道中运行：
 
 ```bash
-python scripts/test_scripts/smoke_test.py
+python tests/integration/smoke_test.py
 ```
 
 它会验证：健康端点、关键 API、Redis 缓存、数据库写读、调度器基本信息以及 API 监控端点（共 13 项测试）。
