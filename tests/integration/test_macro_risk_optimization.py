@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """测试宏观风险服务的限流优化
 
-说明：该脚本已从项目根目录归档到 scripts/test_scripts/。
+说明：该脚本位于 `tests/integration/`（集成测试）。
 """
 
 import asyncio

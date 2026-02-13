@@ -11,9 +11,13 @@ __pycache__
 .env.*
 demo.db
 keys/
+exports/
+logs/
+*.log
 
 docs/
-# scripts/
-scripts/test_scripts
+tests/
+
 .DS_Store
 ./deploy
+.pytest_cache/
