@@ -1,5 +1,6 @@
 from typing import Dict, Iterable, Optional
 from dataclasses import dataclass, asdict
+import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
@@ -7,6 +8,8 @@ from sqlalchemy import select, and_
 from app.models.symbol_risk_profile import SymbolRiskProfile
 from app.models.symbol_behavior_stats import SymbolBehaviorStats
 from app.services.policies import ShockPolicy, EarningsShockPolicy
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -122,7 +125,7 @@ class SymbolRiskProfileService:
         if not symbol_list:
             return {}
 
-        print(f"[get_behavior_stats] Querying with account_id={account_id}, symbols={symbol_list}, window_days={window_days}")
+        logger.info(f" Querying with account_id={account_id}, symbols={symbol_list}, window_days={window_days}")
         
         stmt = select(SymbolBehaviorStats).where(
             and_(
@@ -134,7 +137,7 @@ class SymbolRiskProfileService:
         result = await self.session.execute(stmt)
         rows = result.scalars().all()
         
-        print(f"[get_behavior_stats] Found {len(rows)} rows in database")
+        logger.info(f" Found {len(rows)} rows in database")
 
         stats_map: Dict[str, SymbolBehaviorStatsDTO] = {}
         for row in rows:

@@ -7,7 +7,7 @@ AI分析服务 - 使用GPT生成持仓和宏观分析摘要
 3. 持仓综合评估AI建议
 4. 宏观风险AI解读
 
-回退策略: 配置模型 → 智能回退 → 规则生成
+回退策略: OpenAI → DeepSeek → 规则生成
 模型验证: 自动获取可用模型列表并验证配置
 """
 
@@ -20,6 +20,7 @@ import time
 from app.core.config import settings
 from app.core.proxy import apply_proxy_env, ProxyConfig
 from app.services.api_monitoring_service import api_monitor, APIProvider
+from app.services.ai_client_manager import call_ai_with_fallback, AIProvider as AIProviderEnum
 
 logger = logging.getLogger(__name__)
 
@@ -507,103 +508,72 @@ class AIAnalysisService:
         temperature: float = 0.5,
         prefer_cheap: bool = False
     ) -> Optional[str]:
-        """调用GPT API（带回退策略与成本优化）
+        """调用 AI API（支持 OpenAI + DeepSeek 多提供商降级）
         
         Args:
             prompt: 提示词
             max_tokens: 最大token数
             temperature: 温度系数
-            prefer_cheap: 是否优先使用低成本模型
+            prefer_cheap: 是否优先使用低成本模型（暂不支持，保留接口兼容）
         
         Returns:
-            GPT生成的文本
+            AI生成的文本，失败返回 None
         """
-        if not self.client:
-            return None
-
-        gate = await api_monitor.can_call_provider(APIProvider.OPENAI)
-        if not gate.get("can_call", True):
-            logger.warning(f"OpenAI in cooldown/limit: {gate.get('reason')}")
-            return None
-        
         # 使用配置的max_tokens
         if max_tokens is None:
             max_tokens = self.max_tokens
         
-        # 获取模型列表
-        models = await self._get_models(prefer_cheap=prefer_cheap)
-        now = time.time()
+        # 检查 OpenAI 限流状态
+        gate = await api_monitor.can_call_provider(APIProvider.OPENAI)
+        if not gate.get("can_call", True):
+            logger.warning(f"OpenAI in cooldown/limit: {gate.get('reason')}")
         
-        # 尝试不同的模型
-        for model in models:
-            # 检查模型是否在熔断期
-            if model in _model_skip_list:
-                if now < _model_skip_list[model]:
-                    logger.debug(f"Skipping model {model} (cooling down)")
-                    continue
-                else:
-                    del _model_skip_list[model]
-
-            start_time = time.time()
-            success = False
-            error_msg = None
-            try:
-                # GPT-5 系列在 chat.completions 上不支持 max_tokens，需要改用 max_completion_tokens。
-                # 为了兼容 GPT-4 等老模型，这里按模型前缀做参数分流。
-                request_kwargs = {
-                    "model": model,
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": "你是一位专业的投资分析师，擅长提供简洁、准确、实用的投资建议。请用中文回答。",
-                        },
-                        {"role": "user", "content": prompt},
-                    ],
-                    "timeout": self.timeout,
-                }
-
-                if model.startswith("gpt-5"):
-                    request_kwargs["max_completion_tokens"] = max_tokens
-                    # GPT-5：某些路由只支持默认 temperature=1；非 1 的值会直接 400。
-                    # 为兼容性：temperature 不是 1 时不传该参数（让服务端使用默认值）。
-                    if temperature in (None, 1, 1.0):
-                        request_kwargs["temperature"] = 1
-                else:
-                    request_kwargs["max_tokens"] = max_tokens
-                    request_kwargs["temperature"] = temperature
-
-                response = await self.client.chat.completions.create(**request_kwargs)
-                
-                content = response.choices[0].message.content.strip()
-                logger.info(f"GPT response generated using {model} (max_tokens={max_tokens}, timeout={self.timeout}s)")
+        # 构建消息
+        messages = [
+            {
+                "role": "system",
+                "content": "你是一位专业的投资分析师，擅长提供简洁、准确、实用的投资建议。请用中文回答。",
+            },
+            {"role": "user", "content": prompt},
+        ]
+        
+        start_time = time.time()
+        success = False
+        error_msg = None
+        used_provider = None
+        
+        try:
+            # 调用多提供商降级函数（OpenAI → DeepSeek）
+            content, used_provider = await call_ai_with_fallback(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            
+            if content:
                 success = True
+                provider_name = used_provider.value if used_provider else "unknown"
+                logger.info(f"✅ AI response generated using {provider_name} (max_tokens={max_tokens})")
                 return content
+            else:
+                error_msg = "All AI providers failed"
+                logger.warning("❌ All AI providers unavailable, will use rule-based fallback")
+                return None
                 
-            except Exception as e:
-                error_msg = str(e)
-                # 区分连接错误和API错误
-                if "429" in error_msg or "insufficient_quota" in error_msg.lower() or "rate_limit" in error_msg.lower():
-                    logger.warning(f"Model {model} hit rate limit/quota. Cooling down for 10 min.")
-                    _model_skip_list[model] = now + 600 # 冷却10分钟
-                elif "Connection" in error_msg or "timeout" in error_msg.lower():
-                    logger.warning(f"Failed to call {model}: Connection error. Check network or API endpoint.")
-                elif "API key" in error_msg or "authentication" in error_msg.lower():
-                    logger.warning(f"Failed to call {model}: Authentication error. Check OPENAI_API_KEY.")
-                else:
-                    logger.warning(f"Failed to call {model}: {error_msg}")
-                continue
-            finally:
-                response_time = (time.time() - start_time) * 1000
-                await api_monitor.record_api_call(
-                    provider=APIProvider.OPENAI,
-                    endpoint=f"chat.completions:{model}",
-                    success=success,
-                    response_time_ms=response_time,
-                    error_message=error_msg,
-                )
-        
-        logger.info("All GPT models unavailable, using rule-based generation as fallback")
-        return None
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Unexpected error in _call_gpt: {error_msg}")
+            return None
+        finally:
+            # 记录 API 调用监控（仅记录主提供商 OpenAI）
+            response_time = (time.time() - start_time) * 1000
+            await api_monitor.record_api_call(
+                provider=APIProvider.OPENAI,
+                endpoint="chat.completions",
+                success=success,
+                response_time_ms=response_time,
+                error_message=error_msg,
+            )
     
     def _build_technical_prompt(self, symbol: str, data: Dict[str, Any]) -> str:
         """构建技术分析提示词"""

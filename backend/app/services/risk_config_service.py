@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, Optional
+import logging
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -9,6 +10,8 @@ from app.services.symbol_risk_profile_service import (
     SymbolRiskProfileService,
     SymbolBehaviorStatsDTO,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -47,7 +50,7 @@ class RiskConfigService:
         from sqlalchemy import select, distinct, and_
         from app.models.symbol_behavior_stats import SymbolBehaviorStats
         
-        print(f"[RiskConfigService] Querying symbols for account: {account_id}, window_days: {window_days}")
+        logger.info(f" Querying symbols for account: {account_id}, window_days: {window_days}")
         
         if window_days is not None:
             # 如果指定了 window_days，只返回该窗口期有数据的标的
@@ -66,11 +69,11 @@ class RiskConfigService:
         result = await self.session.execute(stmt)
         symbols = [row[0] for row in result.all()]
         
-        print(f"[RiskConfigService] Found {len(symbols)} symbols from DB: {symbols}")
+        logger.info(f" Found {len(symbols)} symbols from DB: {symbols}")
         
         # 如果没有数据，返回空列表或者根据配置返回
         if not symbols:
-            print(f"[RiskConfigService] No symbols found in behavior stats. Returning empty list.")
+            logger.info(f" No symbols found in behavior stats. Returning empty list.")
             return []
         
         return symbols
@@ -80,18 +83,18 @@ class RiskConfigService:
         from sqlalchemy import select, distinct
         from app.models.symbol_behavior_stats import SymbolBehaviorStats
         
-        print(f"[RiskConfigService] Querying window_days for account: {account_id}")
+        logger.info(f" Querying window_days for account: {account_id}")
         stmt = select(distinct(SymbolBehaviorStats.window_days)).where(
             SymbolBehaviorStats.account_id == account_id
         ).order_by(SymbolBehaviorStats.window_days.asc())
         result = await self.session.execute(stmt)
         window_days_list = [row[0] for row in result.all()]
         
-        print(f"[RiskConfigService] Found window_days: {window_days_list}")
+        logger.info(f" Found window_days: {window_days_list}")
         
         # 返回最小的 window_days，如果没有数据则返回 60
         result_days = window_days_list[0] if window_days_list else 60
-        print(f"[RiskConfigService] Using window_days: {result_days}")
+        logger.info(f" Using window_days: {result_days}")
         return result_days
 
     def _load_global_shock_policy(self) -> ShockPolicy:
@@ -227,7 +230,7 @@ class RiskConfigService:
         )
 
     async def apply_shock_risk_factor(self, account_id: str, factor: float, scope: str, reason: str):
-        print(f"[RiskConfig] apply_shock_risk_factor account={account_id} factor={factor} scope={scope} reason={reason}")
+        logger.info(f" apply_shock_risk_factor account={account_id} factor={factor} scope={scope} reason={reason}")
 
     async def apply_emergency_mode(self, account_id: str, symbol: str, policy: ShockPolicy):
-        print(f"[RiskConfig] EMERGENCY mode for {account_id} {symbol}")
+        logger.info(f" EMERGENCY mode for {account_id} {symbol}")

@@ -32,6 +32,14 @@ from app.schemas.strategy import (
     StrategyExportResponse,
     StrategyRunAssetView,
 )
+from app.schemas.quick_trade import (
+    QuickTradeRequest,
+    QuickTradeResponse,
+    QuickTradePreview,
+    BatchQuickTradeRequest,
+    BatchQuickTradeResponse,
+)
+from app.services.quick_trade_service import QuickTradeService
 
 router = APIRouter()
 
@@ -316,3 +324,106 @@ async def export_strategy_run(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return StrategyExportResponse(run_id=run.id, **result)
+
+
+@router.get("/strategy-runs/{run_id}/assets/{symbol}/preview", response_model=QuickTradeResponse)
+async def preview_quick_trade(
+    run_id: str,
+    symbol: str,
+    risk_budget: Optional[float] = Query(None, description="风险预算（账户权益占比）"),
+    session: AsyncSession = Depends(get_session),
+    current_user: str = Depends(get_current_user),
+):
+    """预览快捷交易参数（不创建信号）"""
+    svc = QuickTradeService(session)
+    try:
+        preview_data = await svc.preview_quick_trade(run_id, symbol, risk_budget)
+        return QuickTradeResponse(
+            status="ok",
+            message="预览成功",
+            preview=QuickTradePreview(**preview_data)
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"预览失败: {str(e)}")
+
+
+@router.post("/strategy-runs/{run_id}/assets/{symbol}/quick-trade", response_model=QuickTradeResponse)
+async def execute_quick_trade(
+    run_id: str,
+    symbol: str,
+    payload: QuickTradeRequest,
+    session: AsyncSession = Depends(get_session),
+    current_user: str = Depends(get_current_user),
+):
+    """从策略结果快速创建并执行交易"""
+    _ensure_permission(current_user, "execute")
+    svc = QuickTradeService(session)
+    
+    try:
+        override_params = {
+            "override_direction": payload.override_direction,
+            "override_quantity": payload.override_quantity,
+            "override_price": payload.override_price,
+            "override_stop_loss": payload.override_stop_loss,
+            "override_take_profit": payload.override_take_profit,
+            "risk_budget": payload.risk_budget,
+        }
+        
+        result = await svc.execute_quick_trade(
+            run_id=run_id,
+            symbol=symbol,
+            execution_mode=payload.execution_mode.value,
+            override_params=override_params,
+            notes=payload.notes
+        )
+        
+        return QuickTradeResponse(
+            status=result["status"],
+            signal_id=result.get("signal_id"),
+            order_id=result.get("order_id"),
+            message=result["message"],
+            preview=QuickTradePreview(**result["preview"]) if "preview" in result else None
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"执行失败: {str(e)}")
+
+
+@router.post("/strategy-runs/{run_id}/batch-quick-trade", response_model=BatchQuickTradeResponse)
+async def batch_quick_trade(
+    run_id: str,
+    payload: BatchQuickTradeRequest,
+    session: AsyncSession = Depends(get_session),
+    current_user: str = Depends(get_current_user),
+):
+    """批量快捷交易"""
+    _ensure_permission(current_user, "execute")
+    svc = QuickTradeService(session)
+    
+    try:
+        result = await svc.batch_quick_trade(
+            run_id=run_id,
+            symbols=payload.asset_symbols,
+            execution_mode=payload.execution_mode.value,
+            position_sizing_method=payload.position_sizing_method.value,
+            custom_weights=payload.custom_weights,
+            total_risk_budget=payload.total_risk_budget,
+            notes=payload.notes
+        )
+        
+        return BatchQuickTradeResponse(
+            status="ok",
+            total_signals=result["total_signals"],
+            success_count=result["success_count"],
+            failed_count=result["failed_count"],
+            signal_ids=result["signal_ids"],
+            failures=result["failures"],
+            message=f"批量交易完成: {result['success_count']} 成功, {result['failed_count']} 失败"
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"批量交易失败: {str(e)}")

@@ -89,6 +89,20 @@ class Settings(BaseSettings):
     OPENAI_MAX_TOKENS: int = 500
     OPENAI_TIMEOUT_SECONDS: int = 30
 
+    # DeepSeek API 配置（兜底方案）
+    # DeepSeek API 完全兼容 OpenAI 格式，用作备用 AI 能力
+    DEEPSEEK_API_KEY: str | None = None
+    DEEPSEEK_API_BASE: str = "https://api.deepseek.com"
+    DEEPSEEK_MODEL: str = "deepseek-chat"  # 或 "deepseek-reasoner" (思考模式)
+    DEEPSEEK_ENABLED: bool = True  # 是否启用 DeepSeek 作为兜底
+    DEEPSEEK_TIMEOUT_SECONDS: int = 30  # DeepSeek 超时时间（reasoner 模式需要更长时间）
+
+    # AI 提供商策略配置
+    # 可用的提供商列表，逗号分隔
+    AI_PROVIDERS: str = "openai,deepseek"
+    # 优先使用的提供商（如果存在于 AI_PROVIDERS 中，则会被移到首位）
+    AI_PREFERRED_PROVIDER: str = "openai"
+
     # ==================== 网络代理配置 ====================
     # 通过配置管理代理开关；启用后会在应用启动时设置 HTTP(S)_PROXY/NO_PROXY 环境变量，
     # 使 OpenAI SDK、fredapi（requests）等都能通过代理访问。

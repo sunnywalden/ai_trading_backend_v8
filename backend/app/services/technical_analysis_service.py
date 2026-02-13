@@ -1,9 +1,12 @@
 """技术分析服务"""
+import logging
 from typing import Dict, Optional, List
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, delete
 from datetime import datetime, date
 import json
+
+logger = logging.getLogger(__name__)
 
 from app.models.technical_indicator import TechnicalIndicator
 from app.models.position_trend_snapshot import PositionTrendSnapshot
@@ -283,7 +286,33 @@ class TechnicalAnalysisService:
         if use_ai:
             try:
                 from app.services.ai_analysis_service import AIAnalysisService
-                # ... 省略中间 payload 构建部分，保持逻辑一致 ...
+                
+                # 构建 payload 给 AI 分析
+                payload = {
+                    "timeframe": timeframe,
+                    "trend": {
+                        "trend_direction": trend_direction,
+                        "trend_strength": trend_strength,
+                        "bollinger_position": bb_position,
+                        "volume_ratio": volume_ratio,
+                    },
+                    "momentum": {
+                        "rsi_value": rsi_value,
+                        "rsi_status": rsi_status,
+                        "macd_status": macd_signal,
+                    },
+                    "levels": {
+                        "support": support_levels[0] if support_levels else None,
+                        "resistance": resistance_levels[0] if resistance_levels else None,
+                    },
+                    "stats": {
+                        "return_5d": None,  # 可后续补充
+                        "return_20d": None,
+                        "vol_20d": None,
+                    },
+                    "recent_ohlcv": df.tail(10)[['Open', 'High', 'Low', 'Close', 'Volume']].to_dict(orient='records') if not df.empty else [],
+                }
+                
                 ai_service = AIAnalysisService()
                 ai_summary = await ai_service.generate_daily_trend_conclusion(symbol, payload)
             except Exception as e:

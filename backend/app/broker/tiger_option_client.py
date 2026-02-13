@@ -2,6 +2,7 @@ from typing import List, Dict
 from decimal import Decimal, ROUND_FLOOR, ROUND_CEILING
 from datetime import datetime, date
 import asyncio
+import logging
 from concurrent.futures import ThreadPoolExecutor
 
 from tigeropen.tiger_open_config import get_client_config
@@ -14,6 +15,7 @@ from .option_client_base import OptionBrokerClient
 from .models import OptionPosition, UnderlyingPosition, OptionContract, Greeks
 from app.core.cache import cache
 
+logger = logging.getLogger(__name__)
 
 class TigerOptionClient(OptionBrokerClient):
     """老虎证券期权敞口客户端（基于官方 tigeropen SDK）
@@ -57,7 +59,7 @@ class TigerOptionClient(OptionBrokerClient):
             name = await cache.get(cache_key)
             if name:
                 result[symbol] = name
-                print(f"[TigerOptionClient] Got HK stock name from cache: {symbol} -> {name}")
+                logger.info(f" Got HK stock name from cache: {symbol} -> {name}")
         return result
     
     async def _set_hk_stock_names_to_cache(self, stock_names: Dict[str, str]):
@@ -71,7 +73,7 @@ class TigerOptionClient(OptionBrokerClient):
                 cache_key = f"hk_stock_name:{symbol}"
                 # 缓存 30 天（股票名称几乎不变）
                 await cache.set(cache_key, name, expire=30*24*3600)
-                print(f"[TigerOptionClient] Cached HK stock name: {symbol} -> {name}")
+                logger.info(f" Cached HK stock name: {symbol} -> {name}")
     
     async def _fetch_hk_stock_names(self, symbols: List[str]) -> Dict[str, str]:
         """从 Tiger API 批量获取港股名称
@@ -98,9 +100,9 @@ class TigerOptionClient(OptionBrokerClient):
                     name = row.get('nameCN') or row.get('name_cn') or row.get('localSymbol') or row.get('name')
                     if sym and name:
                         stock_names[sym] = name
-                        print(f"[TigerOptionClient] Fetched HK stock name from API: {sym} -> {name}")
+                        logger.info(f" Fetched HK stock name from API: {sym} -> {name}")
         except Exception as e:
-            print(f"[TigerOptionClient] Error fetching HK stock names from API: {e}")
+            logger.info(f" Error fetching HK stock names from API: {e}")
         
         return stock_names
     
@@ -119,7 +121,7 @@ class TigerOptionClient(OptionBrokerClient):
         results: List[UnderlyingPosition] = []
 
         try:
-            print(f"[TigerOptionClient] Fetching underlying positions for account: {account_id}")
+            logger.info(f" Fetching underlying positions for account: {account_id}")
             
             # 获取美股持仓
             us_positions = await self._run_in_executor(
@@ -129,12 +131,12 @@ class TigerOptionClient(OptionBrokerClient):
                 account=account_id
             )
             
-            print(f"[TigerOptionClient] Got {len(us_positions) if us_positions else 0} US underlying positions")
+            logger.info(f" Got {len(us_positions) if us_positions else 0} US underlying positions")
 
             if us_positions:
                 for pos in us_positions:
                     if not pos.contract or not pos.contract.symbol:
-                        print(f"[TigerOptionClient] Skipping position without contract/symbol")
+                        logger.info(f" Skipping position without contract/symbol")
                         continue
                     
                     symbol = pos.contract.symbol
@@ -142,10 +144,10 @@ class TigerOptionClient(OptionBrokerClient):
                     
                     # 跳过数量为0的持仓
                     if quantity == 0:
-                        print(f"[TigerOptionClient] Skipping {symbol} with zero quantity")
+                        logger.info(f" Skipping {symbol} with zero quantity")
                         continue
 
-                    print(f"[TigerOptionClient] US Position: {symbol}, qty={quantity}")
+                    logger.info(f" US Position: {symbol}, qty={quantity}")
                     
                     underlying = UnderlyingPosition(
                         symbol=symbol,
@@ -166,7 +168,7 @@ class TigerOptionClient(OptionBrokerClient):
                     account=account_id
                 )
                 
-                print(f"[TigerOptionClient] Got {len(hk_positions) if hk_positions else 0} HK underlying positions")
+                logger.info(f" Got {len(hk_positions) if hk_positions else 0} HK underlying positions")
                 
                 if hk_positions:
                     # 收集所有港股symbol，批量获取股票信息
@@ -190,7 +192,7 @@ class TigerOptionClient(OptionBrokerClient):
                     
                     # 如果有缺失的，从 API 获取
                     if missing_symbols:
-                        print(f"[TigerOptionClient] Fetching {len(missing_symbols)} HK stock names from API")
+                        logger.info(f" Fetching {len(missing_symbols)} HK stock names from API")
                         new_names = await self._fetch_hk_stock_names(missing_symbols)
                         
                         # 合并结果
@@ -200,7 +202,7 @@ class TigerOptionClient(OptionBrokerClient):
                         if new_names:
                             await self._set_hk_stock_names_to_cache(new_names)
                     else:
-                        print(f"[TigerOptionClient] All {len(hk_symbols)} HK stock names found in cache")
+                        logger.info(f" All {len(hk_symbols)} HK stock names found in cache")
                     
                     # 构建持仓对象
                     for symbol, pos in hk_position_map.items():
@@ -215,7 +217,7 @@ class TigerOptionClient(OptionBrokerClient):
                         elif symbol in stock_names:
                             stock_name = stock_names[symbol]
                         
-                        print(f"[TigerOptionClient] HK Position: {symbol} ({stock_name}), qty={quantity}")
+                        logger.info(f" HK Position: {symbol} ({stock_name}), qty={quantity}")
                         
                         underlying = UnderlyingPosition(
                             symbol=symbol,
@@ -228,12 +230,12 @@ class TigerOptionClient(OptionBrokerClient):
                         )
                         results.append(underlying)
             except Exception as hk_error:
-                print(f"[TigerOptionClient] Error fetching HK positions: {hk_error}")
+                logger.info(f" Error fetching HK positions: {hk_error}")
             
-            print(f"[TigerOptionClient] Total positions to return: {len(results)}")
+            logger.info(f" Total positions to return: {len(results)}")
 
         except Exception as e:
-            print(f"[TigerOptionClient] Error fetching underlying positions: {e}")
+            logger.info(f" Error fetching underlying positions: {e}")
 
         return results
 
@@ -246,7 +248,7 @@ class TigerOptionClient(OptionBrokerClient):
         results: List[OptionPosition] = []
 
         try:
-            print(f"[TigerOptionClient] Fetching option positions for account: {account_id}")
+            logger.info(f" Fetching option positions for account: {account_id}")
             # 获取期权持仓
             positions = await self._run_in_executor(
                 self.trade_client.get_positions,
@@ -255,7 +257,7 @@ class TigerOptionClient(OptionBrokerClient):
                 account=account_id
             )
             
-            print(f"[TigerOptionClient] Got {len(positions) if positions else 0} option positions")
+            logger.info(f" Got {len(positions) if positions else 0} option positions")
 
             if not positions:
                 return results
@@ -280,9 +282,9 @@ class TigerOptionClient(OptionBrokerClient):
                 except Exception as e:
                     err_str = str(e)
                     if "permission denied" in err_str.lower() or "rate limit" in err_str.lower():
-                        print(f"[TigerOptionClient] Option quote permission not available, using default greeks. {e}")
+                        logger.info(f" Option quote permission not available, using default greeks. {e}")
                     else:
-                        print(f"[TigerOptionClient] Error fetching option Greeks: {e}")
+                        logger.info(f" Error fetching option Greeks: {e}")
 
             ts = datetime.utcnow().timestamp()
 
@@ -349,7 +351,7 @@ class TigerOptionClient(OptionBrokerClient):
                 results.append(option_pos)
 
         except Exception as e:
-            print(f"[TigerOptionClient] Error fetching option positions: {e}")
+            logger.info(f" Error fetching option positions: {e}")
 
         return results
 
@@ -364,7 +366,7 @@ class TigerOptionClient(OptionBrokerClient):
             if assets and hasattr(assets, 'account'):
                 return str(assets.account)
         except Exception as e:
-            print(f"[TigerOptionClient] Error fetching account ID: {e}")
+            logger.info(f" Error fetching account ID: {e}")
         
         # 降级返回配置的账户名
         return self.account
@@ -375,19 +377,19 @@ class TigerOptionClient(OptionBrokerClient):
         返回账户的总资产价值（USD）
         """
         try:
-            print(f"[TigerOptionClient] Fetching account equity for: {account_id}")
+            logger.info(f" Fetching account equity for: {account_id}")
             assets = await self._run_in_executor(
                 self.trade_client.get_assets,
                 account=account_id
             )
             
             if assets:
-                print(f"[TigerOptionClient] Got assets object: {type(assets)}")
+                logger.info(f" Got assets object: {type(assets)}")
                 
                 # 如果是列表，取第一个元素
                 if isinstance(assets, list) and len(assets) > 0:
                     asset = assets[0]
-                    print(f"[TigerOptionClient] Using first asset from list")
+                    logger.info(f" Using first asset from list")
                 else:
                     asset = assets
                 
@@ -398,27 +400,27 @@ class TigerOptionClient(OptionBrokerClient):
                         net_liq = asset.summary.net_liquidation
                         # Tiger API 可能返回 inf，需要检查
                         if net_liq and net_liq != float('inf'):
-                            print(f"[TigerOptionClient] Net liquidation: {net_liq}")
+                            logger.info(f" Net liquidation: {net_liq}")
                             return float(net_liq)
                 
                 # 降级尝试其他字段
                 for attr in ['net_liquidation', 'equity_with_loan', 'total_cash_balance']:
                     value = getattr(asset, attr, None)
                     if value and value != float('inf'):
-                        print(f"[TigerOptionClient] Using {attr}: {value}")
+                        logger.info(f" Using {attr}: {value}")
                         return float(value)
                 
-                print(f"[TigerOptionClient] Warning: Could not find valid equity value in assets")
+                logger.info(f" Warning: Could not find valid equity value in assets")
             else:
-                print(f"[TigerOptionClient] Warning: assets is None")
+                logger.info(f" Warning: assets is None")
                         
         except Exception as e:
-            print(f"[TigerOptionClient] Error fetching account equity: {e}")
+            logger.info(f" Error fetching account equity: {e}")
             import traceback
             traceback.print_exc()
         
         # 如果获取失败，返回 None（由调用方决定默认值）
-        print(f"[TigerOptionClient] Returning None for equity")
+        logger.info(f" Returning None for equity")
         return None
 
     async def place_order(self, account_id: str, order_params: dict) -> dict:
@@ -446,7 +448,7 @@ class TigerOptionClient(OptionBrokerClient):
             order_type_upper = (order_type or "").upper()
             sdk_order_type = mapping.get(order_type_upper, order_type_upper)
 
-            print(f"[TigerOptionClient] Placing {sdk_order_type} order for {symbol}: {action} {quantity} @ {price}")
+            logger.info(f" Placing {sdk_order_type} order for {symbol}: {action} {quantity} @ {price}")
             
             # 1. 创建订单对象
             # 注意: tigeropen API 创建订单通常使用 TradeClient.create_order
@@ -497,7 +499,7 @@ class TigerOptionClient(OptionBrokerClient):
 
                 aligned_price = float(aligned)
                 if aligned_price != limit_price:
-                    print(f"[TigerOptionClient] Aligning price {limit_price} -> {aligned_price} using tick {tick}")
+                    logger.info(f" Aligning price {limit_price} -> {aligned_price} using tick {tick}")
                 limit_price = aligned_price
             tiger_order = Order(
                 account_id,
@@ -515,7 +517,7 @@ class TigerOptionClient(OptionBrokerClient):
             )
             
             if order_id:
-                print(f"[TigerOptionClient] Order placed successfully, id: {order_id}")
+                logger.info(f" Order placed successfully, id: {order_id}")
                 return {
                     "success": True,
                     "order_id": str(order_id),
@@ -532,7 +534,7 @@ class TigerOptionClient(OptionBrokerClient):
                 }
                 
         except Exception as e:
-            print(f"[TigerOptionClient] Place order failed: {e}")
+            logger.info(f" Place order failed: {e}")
             import traceback
             traceback.print_exc()
             return {
@@ -552,13 +554,13 @@ class TigerOptionClient(OptionBrokerClient):
             )
             
             if not orders:
-                print(f"[TigerOptionClient] No orders returned for account {account_id}")
+                logger.info(f" No orders returned for account {account_id}")
                 return {"status": "NOT_FOUND", "message": "No orders found"}
             
             # 本地按 ID 过滤
             target_order = None
             search_ids = [str(order_id)]
-            print(f"[TigerOptionClient] Searching for order_id: {order_id} in {len(orders)} recent orders")
+            logger.info(f" Searching for order_id: {order_id} in {len(orders)} recent orders")
             
             for o in orders:
                 # Tiger SDK 的 Order 对象通常有 id 和 order_id，且可能包含外部 ID
@@ -575,7 +577,7 @@ class TigerOptionClient(OptionBrokerClient):
                 debug_info = []
                 for o in orders[:3]:
                     debug_info.append(f"id={getattr(o,'id','?')}, order_id={getattr(o,'order_id','?')}")
-                print(f"[TigerOptionClient] Order {order_id} not found. Recent orders: {', '.join(debug_info)}")
+                logger.info(f" Order {order_id} not found. Recent orders: {', '.join(debug_info)}")
                 return {"status": "NOT_FOUND", "message": "Order not found in recent history"}
             
             status = target_order.status
@@ -615,5 +617,5 @@ class TigerOptionClient(OptionBrokerClient):
             }
             
         except Exception as e:
-            print(f"[TigerOptionClient] Error getting order status: {e}")
+            logger.info(f" Error getting order status: {e}")
             return {"status": "ERROR", "message": str(e)}
