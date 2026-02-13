@@ -7,7 +7,9 @@
 """
 import asyncio
 import sys
-sys.path.insert(0, '/Users/admin/IdeaProjects/ai_trading_backend_v8/backend')
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
 
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker

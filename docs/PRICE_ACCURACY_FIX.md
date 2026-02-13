@@ -3,7 +3,7 @@
 ### 📋 修改内容
 
 #### 1. 价格获取逻辑修改
-**文件**: `backend/app/services/quick_trade_service.py`
+**文件**: `app/services/quick_trade_service.py`
 
 **修改前**:
 ```python
@@ -304,7 +304,7 @@ notes: 策略快捷交易: AAPL [MARKET] | Order Mode: MARKET
 2. **应用修改**
    ```bash
    # 修改已完成，文件：
-   # backend/app/services/quick_trade_service.py
+   # app/services/quick_trade_service.py
    ```
 
 3. **数据库兼容性检查**
@@ -316,9 +316,9 @@ notes: 策略快捷交易: AAPL [MARKET] | Order Mode: MARKET
 
 4. **重启服务**
    ```bash
-   cd backend
-   # 重启 FastAPI 服务
-   ```
+# 在仓库根目录重启 FastAPI 服务（示例）
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8088
+```
 
 5. **冒烟测试**
    ```bash

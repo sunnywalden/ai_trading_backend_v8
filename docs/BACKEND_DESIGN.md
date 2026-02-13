@@ -19,7 +19,7 @@
 ### 1.2 项目结构
 
 ```
-backend/
+# 仓库（扁平化后）
 ├── app/
 │   ├── main.py                    # FastAPI 应用入口
 │   ├── core/

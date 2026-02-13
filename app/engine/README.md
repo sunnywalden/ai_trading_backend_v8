@@ -241,7 +241,7 @@ async def example_evaluation_and_optimization():
 系统已集成到定时任务系统,每日自动运行:
 
 ```python
-# backend/app/jobs/quant_loop_jobs.py
+# app/jobs/quant_loop_jobs.py
 
 08:00 - run_daily_trading_cycle()        # 信号生成
 18:00 - run_performance_evaluation()     # 性能评估

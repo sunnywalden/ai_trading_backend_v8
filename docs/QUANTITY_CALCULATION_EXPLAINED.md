@@ -153,7 +153,7 @@ quantity = int($10,000 ÷ $200) = 50股
 
 ### 🔧 代码位置
 
-**文件**: `backend/app/services/quick_trade_service.py`  
+**文件**: `app/services/quick_trade_service.py`  
 **方法**: `_calculate_quantity()`  
 **行数**: 261-275
 

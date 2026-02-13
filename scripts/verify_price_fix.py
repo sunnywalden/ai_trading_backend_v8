@@ -5,8 +5,9 @@ import sys
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-# 添加项目路径
-sys.path.insert(0, '/Users/admin/IdeaProjects/ai_trading_backend_v8/backend')
+# 添加项目根路径（使脚本在任意路径下均可导入 `app` 包）
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
 
 from app.core.config import settings
 from app.services.quick_trade_service import QuickTradeService

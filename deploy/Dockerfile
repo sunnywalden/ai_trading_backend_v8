@@ -14,11 +14,11 @@ RUN apt-get update \
 WORKDIR /app
 
 # Install python deps first for better layer caching
-COPY backend/requirements.txt /app/backend/requirements.txt
-RUN pip install --no-cache-dir -r /app/backend/requirements.txt
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# Copy application code
-COPY backend/ /app/backend/
+# Copy application code (flattened repository — app/ is at repo root)
+COPY . /app/
 
 # Default: SQLite file will be resolved relative to BASE_DIR (see config.py).
 # In containers, you typically want to set DATABASE_URL to an absolute path, e.g.
@@ -26,7 +26,7 @@ COPY backend/ /app/backend/
 
 EXPOSE 8088
 
-WORKDIR /app/backend
+WORKDIR /app
 
 # Note: For K8s multi-replica deployments, consider setting ENABLE_SCHEDULER=false
 # (or keep replicas=1) to avoid duplicated scheduled jobs.

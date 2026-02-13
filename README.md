@@ -21,7 +21,7 @@ AI Trading Backend V8 是一个基于 FastAPI 的**交易风控 + 持仓评估 +
 - [docs/Configuration.md](docs/Configuration.md)
 - [docs/API.md](docs/API.md)
 - [docs/API_Monitoring.md](docs/API_Monitoring.md)（**新增**：API监控与Rate Limit管理）
-- [backend/docs/HK_NAME_FIX.md](backend/docs/HK_NAME_FIX.md)（**新增**：港股名称中文显示修复）
+- [docs/HK_NAME_FIX.md](docs/HK_NAME_FIX.md)（**新增**：港股名称中文显示修复）
 
 ## 🚀 核心功能
 
@@ -78,10 +78,9 @@ cp .env.example .env
 # 编辑 .env，至少设置：DATABASE_URL / OPENAI_API_KEY / JWT_SECRET_KEY
 ```
 
-2) 安装依赖并激活虚拟环境：
+2) 安装依赖并激活虚拟环境（在仓库根目录执行）：
 
 ```bash
-cd backend
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -162,7 +161,6 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8088
 ### 安装依赖
 
 ```bash
-cd backend
 pip install -r requirements.txt
 ```
 

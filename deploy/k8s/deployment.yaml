@@ -62,7 +62,7 @@ spec:
           persistentVolumeClaim:
             claimName: ai-trading-data
         # 方式A：用 Secret 直接挂载 Tiger 私钥文件（推荐）
-        # 创建方式示例：kubectl -n ai-trading create secret generic tiger-keys --from-file=tiger_private_key.pem=./backend/keys/your.pem
+        # 创建方式示例：kubectl -n ai-trading create secret generic tiger-keys --from-file=tiger_private_key.pem=./keys/your.pem
         - name: tiger-keys
           secret:
             secretName: tiger-keys

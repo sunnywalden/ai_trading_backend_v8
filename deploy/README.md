@@ -20,7 +20,7 @@
 在仓库根目录执行：
 
 - Dockerfile 路径：`deploy/Dockerfile`
-- Build context：仓库根目录（用于 COPY backend/）
+- Build context：仓库根目录（构建时会把仓库复制到容器内部 `/app/backend/`）
 
 示例构建命令：
 
@@ -40,7 +40,7 @@ docker build -f deploy/Dockerfile -t sunnywalden/ai-trading-backend:latest .
 
 ### 1.2.1 使用 `.env`（推荐、且已同步到 `.env.example`）
 
-本项目使用 `pydantic-settings` 读取环境变量（见 `backend/app/core/config.py`）；仓库根目录包含一个最新的 `.env.example`，建议复制并填充后再运行：
+本项目使用 `pydantic-settings` 读取环境变量（见 `app/core/config.py`）；仓库根目录包含一个最新的 `.env.example`，建议复制并填充后再运行：
 
 ```bash
 cp .env.example .env
@@ -194,7 +194,7 @@ python scripts/test_scripts/smoke_test.py
 开发（可热重载）:
 
 ```bash
-# 在 backend/ 下
+# 在仓库根目录下
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8088
 ```
 
@@ -273,7 +273,7 @@ docker push <account>.dkr.ecr.<region>.amazonaws.com/ai-trading-backend:latest
 
 创建方式示例（供参考）：
 
-- `kubectl -n ai-trading create secret generic tiger-keys --from-file=tiger_private_key.pem=./backend/keys/your.pem`
+- `kubectl -n ai-trading create secret generic tiger-keys --from-file=tiger_private_key.pem=./keys/your.pem`
 
 然后确保：
 

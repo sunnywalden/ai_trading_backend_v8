@@ -10,9 +10,9 @@ import asyncio
 import sys
 from pathlib import Path
 
-# 确保无论从哪里执行，都能正确导入 backend/app
+# 确保无论从哪里执行，都能正确导入项目根目录下的 `app` 包
 ROOT_DIR = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT_DIR / "backend"))
+sys.path.insert(0, str(ROOT_DIR))
 
 from app.core.config import settings
 from app.broker.factory import make_option_broker_client
