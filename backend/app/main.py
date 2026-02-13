@@ -10,7 +10,11 @@ import asyncio
 import os
 
 from app.core.config import settings
+from app.core.logging_config import setup_logging
 from app.models.db import engine, SessionLocal, get_session, redis_client, ensure_mysql_indexes, ensure_mysql_tables
+
+# 初始化系统日志
+setup_logging()
 from app.engine.auto_hedge_engine import AutoHedgeEngine
 from app.services.risk_config_service import RiskConfigService
 from app.services.symbol_risk_profile_service import SymbolRiskProfileService
@@ -35,8 +39,11 @@ from app.routers import trading_plan
 from app.routers import strategy
 from app.routers import hotspots
 from app.routers import quant_loop  # NEW: 量化交易闭环路由
+from app.routers import execution_center  # NEW: 执行中心（Layer 3）
+from app.routers import ai_advisor  # AI 交易决策（统一入口）
 # V9 routers
 from app.routers import dashboard as v9_dashboard
+from app.routers import dashboard_v2  # V10: 全新Dashboard
 from app.routers import equity as v9_equity
 from app.routers import journal as v9_journal
 from app.routers import alerts as v9_alerts
@@ -49,8 +56,10 @@ from app.core.proxy import apply_proxy_env, ProxyConfig
 from app.core.auth import get_current_user, login_for_access_token
 from fastapi.security import OAuth2PasswordRequestForm
 from datetime import datetime
+import logging
 from app.core.cache import cache
 
+logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -71,29 +80,29 @@ async def lifespan(app: FastAPI):
         register_all_jobs(scheduler)
         register_quant_loop_jobs(scheduler)  # NEW: 注册量化交易闭环任务
         start_scheduler()
-        print("✓ Scheduler started with periodic tasks")
+        logger.info("Scheduler started with periodic tasks")
     else:
-        print("• Scheduler disabled (ENABLE_SCHEDULER=false)")
+        logger.info("Scheduler disabled (ENABLE_SCHEDULER=false)")
 
     # 启动时检查/创建MySQL表与索引
     try:
         await ensure_mysql_tables()
         await ensure_mysql_indexes()
         if settings.DB_TYPE == "mysql":
-            print("✓ MySQL tables/indexes checked/ensured")
+            logger.info("MySQL tables/indexes checked and ensured")
     except Exception as e:
-        print(f"⚠ Failed to ensure MySQL tables/indexes: {e}")
+        logger.error(f"Failed to ensure MySQL tables/indexes: {e}")
     
     yield
     
     # 关闭时执行
     if settings.ENABLE_SCHEDULER:
         shutdown_scheduler(wait=True)
-        print("✓ Scheduler shut down")
+        logger.info("Scheduler shut down")
     
     if redis_client:
         await redis_client.close()
-        print("✓ Redis connection closed")
+        logger.info("Redis connection closed")
 
     # 显式释放数据库异步引擎，避免 aiomysql 在事件循环关闭时触发 __del__ 异常
     try:
@@ -128,9 +137,12 @@ app.include_router(trading_plan.router, prefix="/api/v1", tags=["交易计划"],
 app.include_router(hotspots.router, prefix="/api/v1", tags=["市场热点"], dependencies=[Depends(get_current_user)])
 app.include_router(strategy.router, prefix="/api/v1", tags=["策略管理"], dependencies=[Depends(get_current_user)])
 app.include_router(quant_loop.router, dependencies=[Depends(get_current_user)])  # NEW: 量化交易闭环
+app.include_router(execution_center.router, dependencies=[Depends(get_current_user)])  # NEW: 执行中心（Layer 3）
+app.include_router(ai_advisor.router, dependencies=[Depends(get_current_user)])  # AI 交易决策
 
 # V9 路由注册
 app.include_router(v9_dashboard.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
+app.include_router(dashboard_v2.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])  # V10: 全新Dashboard
 app.include_router(v9_equity.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
 app.include_router(v9_journal.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
 app.include_router(v9_alerts.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])

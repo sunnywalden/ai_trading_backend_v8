@@ -5,6 +5,7 @@ from datetime import datetime, date
 from decimal import Decimal
 from typing import Optional, Protocol
 from uuid import uuid4
+import logging
 
 from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,6 +14,8 @@ from app.core.config import settings
 from app.models.trade_pnl_attribution import TradePnlAttribution
 from app.schemas.orders import OrderView
 from app.broker.factory import make_option_broker_client
+
+logger = logging.getLogger(__name__)
 
 
 class OrderExecutor(Protocol):
@@ -54,7 +57,7 @@ class PaperOrderExecutor:
             "updated_at": datetime.utcnow(),
         }
         self._orders[order_id] = order_record
-        print(f"[PaperTrade] 模拟成交: {order['direction']} {order['quantity']} {order['symbol']} @ ${filled_price:.2f}")
+        logger.info(f" 模拟成交: {order['direction']} {order['quantity']} {order['symbol']} @ ${filled_price:.2f}")
         return order_record
 
     async def cancel_order(self, order_id: str) -> bool:

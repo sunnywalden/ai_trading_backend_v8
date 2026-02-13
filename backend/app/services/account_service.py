@@ -1,7 +1,10 @@
 from typing import TYPE_CHECKING
+import logging
 
 if TYPE_CHECKING:
     from app.broker.option_client_base import OptionBrokerClient
+
+logger = logging.getLogger(__name__)
 
 
 class AccountService:
@@ -20,7 +23,7 @@ class AccountService:
                 if equity is not None:
                     return float(equity)
             except Exception as e:
-                print(f"[AccountService] Error fetching equity from broker: {e}")
+                logger.error(f" Error fetching equity from broker: {e}")
         
         # 降级：返回默认值
         return 100000.0

@@ -15,6 +15,7 @@ from typing import Optional, List, Dict, Any
 from enum import Enum
 import re
 import time
+import logging
 
 from newsapi import NewsApiClient
 from sqlalchemy import select, and_
@@ -26,6 +27,7 @@ from app.core.config import settings
 from app.core.cache import cache
 from app.services.api_monitoring_service import api_monitor, APIProvider
 
+logger = logging.getLogger(__name__)
 
 # 延迟导入避免循环依赖
 def _get_session():
@@ -132,7 +134,7 @@ class GeopoliticalEventsService:
             
             # 从News API获取新事件
             if not self.news_api:
-                print("News API key not configured, using fallback")
+                logger.warning("News API key not configured, using fallback")
                 return await self._get_cached_events(session, days) or []
             
             new_events = await self._fetch_from_news_api(days)
@@ -319,14 +321,14 @@ class GeopoliticalEventsService:
         redis_key = f"news_api:geopolitical_events:{days}d"
         cached_events = await cache.get(redis_key)
         if cached_events:
-            print(f"[NewsAPI] Using Redis cache for {days} days events")
+            logger.info(f" Using Redis cache for {days} days events")
             # 将缓存的字典转换回对象
             return [self._dict_to_event(event_dict) for event_dict in cached_events]
         
         # 2. 检查API调用限制/冷却
         gate = await api_monitor.can_call_provider(APIProvider.NEWS_API)
         if not gate.get("can_call", True):
-            print(f"[NewsAPI] Skip fetch due to cooldown/limit: {gate.get('reason')}")
+            logger.info(f" Skip fetch due to cooldown/limit: {gate.get('reason')}")
             return []
         
         # 3. 调用API
@@ -359,11 +361,11 @@ class GeopoliticalEventsService:
             events_dict = [self._event_to_dict(e) for e in events]
             await cache.set(redis_key, events_dict, expire=self.cache_ttl_hours * 3600)
             success = True
-            print(f"[NewsAPI] Successfully fetched {len(events)} events")
+            logger.info(f" Successfully fetched {len(events)} events")
             
         except Exception as e:
             error_msg = str(e)
-            print(f"Error fetching from News API: {e}")
+            logger.error(f"Error fetching from News API: {e}")
         
         # 4. 记录API调用
         response_time = (time.time() - start_time) * 1000
@@ -428,7 +430,7 @@ class GeopoliticalEventsService:
             return event
             
         except Exception as e:
-            print(f"Error converting article to event: {e}")
+            logger.error(f"Error converting article to event: {e}")
             return None
 
     async def _get_cached_events(

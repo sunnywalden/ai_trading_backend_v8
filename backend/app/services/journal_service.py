@@ -145,13 +145,9 @@ class JournalService:
         }
 
     async def _generate_ai_review(self, journal: TradeJournal) -> str:
-        """调用 GPT 生成单笔交易复盘"""
+        """调用 AI 生成单笔交易复盘（支持 OpenAI + DeepSeek 降级）"""
         try:
-            from openai import AsyncOpenAI
-            client = AsyncOpenAI(
-                api_key=settings.OPENAI_API_KEY,
-                base_url=settings.OPENAI_API_BASE,
-            )
+            from app.services.ai_client_manager import call_ai_with_fallback
 
             prompt = f"""作为一位华尔街资深交易教练，请对以下交易进行复盘分析：
 
@@ -174,13 +170,20 @@ class JournalService:
 
 请用中文回答，控制在 300 字以内。"""
 
-            response = await client.chat.completions.create(
-                model=settings.OPENAI_MODEL,
-                messages=[{"role": "user", "content": prompt}],
+            messages = [{"role": "user", "content": prompt}]
+            
+            # 使用多提供商降级调用（OpenAI → DeepSeek）
+            content, provider = await call_ai_with_fallback(
+                messages=messages,
                 max_tokens=500,
                 temperature=0.7,
             )
-            return response.choices[0].message.content.strip()
+            
+            if content:
+                return content.strip()
+            else:
+                # 所有AI提供商失败，降级到规则
+                return self._rule_based_review(journal)
         except Exception as e:
             # 降级为规则复盘
             return self._rule_based_review(journal)
@@ -214,13 +217,9 @@ class JournalService:
         return "\n".join(lines) if lines else "暂无复盘建议。"
 
     async def _generate_weekly_report(self, journals: list, total_trades: int, total_pnl: float, win_rate: float) -> str:
-        """生成 AI 周报"""
+        """生成 AI 周报（支持 OpenAI + DeepSeek 降级）"""
         try:
-            from openai import AsyncOpenAI
-            client = AsyncOpenAI(
-                api_key=settings.OPENAI_API_KEY,
-                base_url=settings.OPENAI_API_BASE,
-            )
+            from app.services.ai_client_manager import call_ai_with_fallback
 
             trades_summary = "\n".join([
                 f"- {j.symbol} {j.direction} PnL=${float(j.realized_pnl or 0):.2f} 情绪:{j.emotion_state}"
@@ -245,13 +244,19 @@ class JournalService:
 
 用中文回答，500 字以内。"""
 
-            response = await client.chat.completions.create(
-                model=settings.OPENAI_MODEL,
-                messages=[{"role": "user", "content": prompt}],
+            messages = [{"role": "user", "content": prompt}]
+            
+            # 使用多提供商降级调用（OpenAI → DeepSeek）
+            content, provider = await call_ai_with_fallback(
+                messages=messages,
                 max_tokens=800,
                 temperature=0.7,
             )
-            return response.choices[0].message.content.strip()
+            
+            if content:
+                return content.strip()
+            else:
+                return f"本周共 {total_trades} 笔交易，总盈亏 ${total_pnl:.2f}，胜率 {win_rate:.1%}。"
         except Exception:
             return f"本周共 {total_trades} 笔交易，总盈亏 ${total_pnl:.2f}，胜率 {win_rate:.1%}。"
 
