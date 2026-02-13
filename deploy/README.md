@@ -38,54 +38,48 @@ docker build -f deploy/Dockerfile -t sunnywalden/ai-trading-backend:latest .
 
 ### 1.2 本地运行
 
-### 1.2.1 使用 `.env`（推荐）
+### 1.2.1 使用 `.env`（推荐、且已同步到 `.env.example`）
 
-本项目使用 `pydantic-settings` 读取环境变量，并会在启动时从仓库中向上查找最近的 `.env` 文件（见 `backend/app/core/config.py`）。
-
-建议做法：
-
-1) 在仓库根目录从模板生成 `.env`（不要提交到 Git）：
+本项目使用 `pydantic-settings` 读取环境变量（见 `backend/app/core/config.py`）；仓库根目录包含一个最新的 `.env.example`，建议复制并填充后再运行：
 
 ```bash
 cp .env.example .env
+# 必填（至少）: DATABASE_URL / JWT_SECRET_KEY
+# 可选（取决于功能）: OPENAI_API_KEY / TIGER_ID / TIGER_PRIVATE_KEY_PATH / PROXY_ENABLED
 ```
 
-2) 编辑 `.env`，按需填写（常见项）：
+安全建议：
+- 不要将 `.env` 提交到 Git；使用 Vault/Secrets Manager 或 CI Secret 注入生产密钥。
+- `.env.example` 仅为示例，已替换所有敏感值为占位符。
 
-- `DATABASE_URL`：本地可继续用默认 `sqlite+aiosqlite:///./demo.db`；容器内建议用绝对路径（如 `sqlite+aiosqlite:////data/demo.db`）
-- `OPENAI_API_KEY` / `OPENAI_MODEL` / `OPENAI_API_BASE`
-- Tiger：`TIGER_ID`、`TIGER_PRIVATE_KEY_PATH`、`TIGER_ACCOUNT`
-- 代理：`PROXY_ENABLED` + `HTTP_PROXY/HTTPS_PROXY/NO_PROXY`
-
-> 注意：镜像构建时不会把 `.env` 打包进镜像（仓库根目录的 `.dockerignore` 已忽略 `.env*`）。
+> 开发快速启动（SQLite 默认）:
+> `DATABASE_URL=sqlite+aiosqlite:///./demo.db`（无需额外依赖）
 
 ### 1.2.2 Docker 运行时注入 `.env`
 
-如果你用 Docker 在本机运行，推荐用 `--env-file` 传入 `.env`：
+运行示例（开发/本地）：
 
 ```bash
+# 在仓库根目录
 docker run --rm \
-	-p 8088:8088 \
-	--env-file ./.env \
-	sunnywalden/ai-trading-backend:latest
+  -p 8088:8088 \
+  --env-file ./.env \
+  -v $(pwd)/data:/data \  # 可选：用于持久化 sqlite
+  sunnywalden/ai-trading-backend:latest
 ```
 
-如使用 SQLite 且希望数据持久化，建议同时挂载 `/data` 并设置：
+关键环境变量（最小集合）示例：
 
-- `.env` 中：`DATABASE_URL=sqlite+aiosqlite:////data/demo.db`
-- 运行时：`-v $(pwd)/data:/data`
+- `DATABASE_URL`（容器内示例）：`sqlite+aiosqlite:////data/demo.db` 或 `mysql+aiomysql://user:pwd@host:3306/db`
+- `TRADE_MODE`：`DRY_RUN`（开发）/ `REAL`（生产）
+- `JWT_SECRET_KEY`：生产环境务必设置强随机值
 
-关键环境变量（最小集合）：
+环境注入建议：
+- 本地：使用 `--env-file .env`
+- CI/CD：通过仓库/构建平台的 Secret 注入环境变量
+- Kubernetes：使用 ConfigMap（非敏感）与 Secret（敏感）注入
 
-- `DATABASE_URL`：建议 `sqlite+aiosqlite:////data/demo.db`（或 MySQL URI，例如 `mysql+aiomysql://user:pwd@host:3306/dbname`）
-- `TRADE_MODE`：`DRY_RUN` / `REAL` / `OFF`
-
-可选能力：
-
-- Tiger：`TIGER_ID`、`TIGER_PRIVATE_KEY_PATH`、`TIGER_ACCOUNT`、`TIGER_QUOTE_MODE`
-- OpenAI：`OPENAI_API_KEY`、`OPENAI_MODEL`、`OPENAI_API_BASE`
-- 代理：`PROXY_ENABLED` + `HTTP_PROXY/HTTPS_PROXY/NO_PROXY`
-
+> 注意：`deploy/docker-compose.yml` 中已把 `.env` 与 `volumes` 作为示例（请替换成你自己的 Secret/Volumes）。
 ---
 
 ## 2) 线上环境部署与 SSL 支持 (Traefik)

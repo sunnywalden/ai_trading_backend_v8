@@ -71,19 +71,37 @@ AI Trading Backend V8 是一个基于 FastAPI 的**交易风控 + 持仓评估 +
 
 ## ✅ 运行（最短路径）
 
-1) 复制 `.env.example` 为 `.env` 并按需修改
+1) 从 `.env.example` 生成 `.env` 并按需填写（不要提交含密钥的 `.env` 到 Git）
 
-2) 安装依赖：`cd backend && pip install -r requirements.txt`
+```bash
+cp .env.example .env
+# 编辑 .env，至少设置：DATABASE_URL / OPENAI_API_KEY / JWT_SECRET_KEY
+```
 
-3) 启动：`uvicorn app.main:app --reload --host 0.0.0.0 --port 8088`
+2) 安装依赖并激活虚拟环境：
 
-4) 验证（注意：默认启用了后端认证，需先登录拿 token）：
-- `GET /health`  （公开）
-- `POST /api/v1/login`  （表单提交 username/password，获取 Bearer token）
+```bash
+cd backend
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+3) 启动开发服务器：
+
+```bash
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8088
+```
+
+4) 快速验证：
+- `GET /health`（公开）
+- `POST /api/v1/login`（表单提交 username/password，获取 Bearer token）
 - 使用 `Authorization: Bearer <token>` 访问受保护接口，如：
   - `GET /api/v1/ai/state`
   - `POST /api/v1/positions/refresh`
   - `GET /api/v1/positions/assessment`
+
+> Tip: `.env.example` 与仓库内 `docs/` 已同步；示例文件中不会包含真实密钥或密码。请在部署前使用安全的密钥管理工具（Vault / Secrets Manager / Kubernetes Secret）。
 
 ## ⚙️ 配置
 
