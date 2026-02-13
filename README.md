@@ -16,12 +16,11 @@ AI Trading Backend V8 是一个基于 FastAPI 的**交易风控 + 持仓评估 +
 
 ## 📚 文档（请从这里开始）
 
-- [docs/README.md](docs/README.md)（权威入口）
-- [docs/Getting_Started.md](docs/Getting_Started.md)
-- [docs/Configuration.md](docs/Configuration.md)
-- [docs/API.md](docs/API.md)
-- [docs/API_Monitoring.md](docs/API_Monitoring.md)（**新增**：API监控与Rate Limit管理）
-- [docs/HK_NAME_FIX.md](docs/HK_NAME_FIX.md)（**新增**：港股名称中文显示修复）
+- [docs/PRODUCT.md](docs/PRODUCT.md) — 产品需求（Alpha Loop / 核心功能）
+- [docs/API.md](docs/API.md) — API 参考
+- [docs/BACKEND_DESIGN.md](docs/BACKEND_DESIGN.md) — 后端架构设计
+
+> 其余历史或实现细节已归档到 `docs/archived/`，如需查看请到该目录检索历史记录。
 
 ## 🚀 核心功能
 
