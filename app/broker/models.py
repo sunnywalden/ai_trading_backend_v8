@@ -35,6 +35,20 @@ class OptionPosition:
     greeks: Greeks              # 当前 Greeks
     last_update_ts: float       # 时间戳（秒）方便做缓存
 
+    @property
+    def market_value(self) -> float:
+        return float(self.quantity) * float(self.last_price) * float(self.contract.multiplier)
+
+    @property
+    def unrealized_pnl(self) -> float:
+        return float(self.quantity) * (float(self.last_price) - float(self.avg_price)) * float(self.contract.multiplier)
+
+    @property
+    def unrealized_pnl_pct(self) -> float:
+        if self.avg_price == 0:
+            return 0.0
+        return (self.last_price / self.avg_price - 1) * 100
+
 
 @dataclass
 class UnderlyingPosition:
@@ -46,3 +60,17 @@ class UnderlyingPosition:
     last_price: float
     currency: str
     name: Optional[str] = None  # 股票名称（对于港股显示中文名）
+
+    @property
+    def market_value(self) -> float:
+        return float(self.quantity) * float(self.last_price)
+
+    @property
+    def unrealized_pnl(self) -> float:
+        return float(self.quantity) * (float(self.last_price) - float(self.avg_price))
+
+    @property
+    def unrealized_pnl_pct(self) -> float:
+        if self.avg_price == 0:
+            return 0.0
+        return (self.last_price / self.avg_price - 1) * 100

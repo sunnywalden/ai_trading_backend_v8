@@ -57,31 +57,18 @@ class DashboardV2Service:
         """获取完整Dashboard数据"""
         now = datetime.utcnow()
         
-        # 并行获取所有数据
-        results = await asyncio.gather(
-            self._get_account_overview(account_id),
-            self._get_pnl_metrics(account_id),
-            self._get_risk_metrics(account_id),
-            self._get_signal_pipeline(account_id),
-            self._get_execution_stats(account_id),
-            self._get_ai_insights(account_id),
-            self._get_strategy_performance(account_id),
-            self._get_api_health(),
-            self._get_market_hotspots(),
-            self._get_todos(account_id),
-            self._get_performance_trend(account_id, days=30),
-            return_exceptions=True
-        )
-        
-        # 解包结果（处理异常）
-        (account, pnl_data, risk, signals, execution, 
-         insights, strategies, api_health, hotspots, todos, trend) = [
-            r if not isinstance(r, Exception) else self._get_fallback(i) 
-            for i, r in enumerate(results)
-        ]
-        
-        pnl, top_performers, top_losers = pnl_data
-        signal_pipeline, pending_signals = signals
+        # 顺序执行以避免 SQLAlchemy 会话并行冲突
+        account = await self._get_account_overview(account_id)
+        pnl, top_performers, top_losers = await self._get_pnl_metrics(account_id)
+        risk = await self._get_risk_metrics(account_id)
+        signal_pipeline, pending_signals = await self._get_signal_pipeline(account_id)
+        execution = await self._get_execution_stats(account_id)
+        insights = await self._get_ai_insights(account_id)
+        strategies = await self._get_strategy_performance(account_id)
+        api_health = await self._get_api_health()
+        hotspots = await self._get_market_hotspots()
+        todos = await self._get_todos(account_id)
+        trend = await self._get_performance_trend(account_id, days=30)
         
         # 计算衍生指标
         signal_notifications = len([s for s in pending_signals if s.confidence > 0.8])
@@ -107,7 +94,7 @@ class DashboardV2Service:
             signal_notifications=signal_notifications,
             positions_count=positions_count,
             positions_summary=positions_summary,
-            concentration_top5=await self._calc_concentration_top5(account_id),
+            concentration_top5=await self._calc_concentration_top5(positions_summary),
             execution_stats=execution,
             active_plans=await self._get_active_plans(account_id),
             ai_insights=insights[:10],
@@ -154,7 +141,7 @@ class DashboardV2Service:
         try:
             account_svc = AccountService(self.session, self.broker)
             acct_info = await account_svc.get_account_info(account_id)
-            equity = await self.broker.get_equity()
+            equity = await self.broker.get_account_equity(account_id)
             
             return AccountOverview(
                 total_equity=float(equity or 0),
@@ -171,7 +158,7 @@ class DashboardV2Service:
     async def _get_current_equity(self, account_id: str) -> float:
         """获取当前权益"""
         try:
-            equity = await self.broker.get_equity()
+            equity = await self.broker.get_account_equity(account_id)
             return float(equity or 0)
         except:
             return 0.0
@@ -258,9 +245,40 @@ class DashboardV2Service:
     
     async def _get_pnl_attribution(self, account_id: str) -> tuple[List[PnLAttribution], List[PnLAttribution]]:
         """获取盈亏归因（Top贡献者和亏损者）"""
-        # TODO: 从持仓中计算每个标的的贡献
-        # 这里返回模拟数据
-        return [], []
+        try:
+            # 获取当前持仓的未实现盈亏作为归因参考
+            stk_positions = await self.broker.list_underlying_positions(account_id)
+            opt_positions = await self.broker.list_option_positions(account_id)
+            
+            all_attrs = []
+            for p in stk_positions:
+                all_attrs.append(PnLAttribution(
+                    symbol=p.symbol,
+                    contribution=float(p.unrealized_pnl),
+                    contribution_pct=0.0, # TODO: 计算贡献占比
+                    position_size=float(p.market_value),
+                ))
+            
+            for p in opt_positions:
+                all_attrs.append(PnLAttribution(
+                    symbol=p.symbol,
+                    contribution=float(p.unrealized_pnl or 0),
+                    contribution_pct=0.0,
+                    position_size=float(p.market_value or 0),
+                ))
+                
+            # 分离盈利和亏损
+            performers = [a for a in all_attrs if a.contribution > 0]
+            losers = [a for a in all_attrs if a.contribution < 0]
+            
+            # 排序并取Top5
+            performers = sorted(performers, key=lambda x: x.contribution, reverse=True)[:5]
+            losers = sorted(losers, key=lambda x: x.contribution)[:5]
+            
+            return performers, losers
+        except Exception as e:
+            print(f"获取盈亏归因失败: {e}")
+            return [], []
     
     # ============ 风险相关 ============
     async def _get_risk_metrics(self, account_id: str) -> RiskMetrics:
@@ -394,13 +412,84 @@ class DashboardV2Service:
     # ============ 持仓相关 ============
     async def _get_positions_summary(self, account_id: str) -> List[PositionSummary]:
         """获取持仓摘要"""
-        # TODO: 从持仓表读取
-        return []
+        try:
+            # 1. 获取股票持仓
+            stk_positions = await self.broker.list_underlying_positions(account_id)
+            # 2. 获取期权持仓
+            opt_positions = await self.broker.list_option_positions(account_id)
+            
+            # 获取总权益用于计算权重
+            total_equity = await self._get_current_equity(account_id) or 1.0
+            
+            results = []
+            
+            # 处理股票
+            for p in stk_positions:
+                quantity = float(p.quantity)
+                last_price = float(p.last_price or 0)
+                avg_price = float(p.avg_price or 0)
+                market_value = last_price * quantity
+                unrealized_pnl = (last_price - avg_price) * quantity
+                unrealized_pnl_pct = (last_price / avg_price - 1) * 100 if avg_price != 0 else 0.0
+                
+                results.append(PositionSummary(
+                    symbol=p.symbol,
+                    name=p.name or p.symbol,
+                    quantity=quantity,
+                    avg_cost=avg_price,
+                    current_price=last_price,
+                    market_value=market_value,
+                    unrealized_pnl=unrealized_pnl,
+                    unrealized_pnl_pct=unrealized_pnl_pct,
+                    weight=abs(market_value) / total_equity * 100,
+                    risk_score=0.0,
+                    technical_score=0.0,
+                    fundamental_score=0.0,
+                ))
+            
+            # 处理期权
+            for p in opt_positions:
+                quantity = float(p.quantity)
+                last_price = float(p.last_price or 0)
+                avg_price = float(p.avg_price or 0)
+                # 计算期权代码 (e.g. AAPL 240621C165)
+                full_symbol = p.contract.broker_symbol
+                market_value = last_price * quantity * p.contract.multiplier
+                unrealized_pnl = (last_price - avg_price) * quantity * p.contract.multiplier
+                unrealized_pnl_pct = (last_price / avg_price - 1) * 100 if avg_price != 0 else 0.0
+                
+                results.append(PositionSummary(
+                    symbol=full_symbol,
+                    name=full_symbol,
+                    quantity=quantity,
+                    avg_cost=avg_price,
+                    current_price=last_price,
+                    market_value=market_value,
+                    unrealized_pnl=unrealized_pnl,
+                    unrealized_pnl_pct=unrealized_pnl_pct,
+                    weight=abs(market_value) / total_equity * 100,
+                    risk_score=0.0,
+                    technical_score=0.0,
+                    fundamental_score=0.0,
+                ))
+            
+            # 按市值排序显示前10
+            return sorted(results, key=lambda x: abs(x.market_value), reverse=True)
+        except Exception as e:
+            print(f"获取持仓摘要失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
     
-    async def _calc_concentration_top5(self, account_id: str) -> float:
+    async def _calc_concentration_top5(self, positions: List[PositionSummary]) -> float:
         """计算Top5集中度"""
-        # TODO: 计算Top5持仓占比
-        return 0.0
+        if not positions:
+            return 0.0
+        total_mv = sum(abs(p.market_value) for p in positions)
+        if total_mv == 0:
+            return 0.0
+        top5_mv = sum(abs(p.market_value) for p in positions[:5])
+        return (top5_mv / total_mv * 100)
     
     # ============ 交易计划相关 ============
     async def _get_execution_stats(self, account_id: str) -> ExecutionStats:
@@ -464,10 +553,86 @@ class DashboardV2Service:
     
     # ============ AI洞察相关 ============
     async def _get_ai_insights(self, account_id: str) -> List[AIInsight]:
-        """获取AI洞察"""
-        # TODO: 实现AI洞察生成逻辑
-        # 可以包括：风险警告、交易机会、策略建议等
-        return []
+        """获取AI洞察 (基准规则引擎版)"""
+        insights = []
+        now = datetime.utcnow()
+        
+        try:
+            # 1. 检查集中度
+            positions = await self._get_positions_summary(account_id)
+            if positions:
+                top1 = positions[0]
+                if top1.weight > 40:
+                    insights.append(AIInsight(
+                        insight_id="risk_concentration",
+                        insight_type="risk",
+                        priority="high",
+                        title="高仓位集中度警告",
+                        content=f"单一标的 {top1.symbol} 权重达 {top1.weight:.1f}%，超出 40% 安全阈值。建议考虑减仓或对冲。",
+                        action_label="查看详情",
+                        action_link="/quant-loop",
+                        created_at=now
+                    ))
+            
+            # 2. 检查待执行信号
+            pipeline, pending = await self._get_signal_pipeline(account_id)
+            if pending:
+                high_conf = [s for s in pending if s.confidence > 0.8]
+                if high_conf:
+                    insights.append(AIInsight(
+                        insight_id="opportunity_signals",
+                        insight_type="opportunity",
+                        priority="medium",
+                        title="高置信度交易机会",
+                        content=f"发现 {len(high_conf)} 个置信度高于 80% 的交易信号（如 {high_conf[0].symbol}），建议尽快审核执行。",
+                        action_label="去执行",
+                        action_link="/quant-loop",
+                        created_at=now
+                    ))
+
+            # 3. 总体状态
+            if not insights:
+                insights.append(AIInsight(
+                    insight_id="status_normal",
+                    insight_type="info",
+                    priority="low",
+                    title="组合状态良好",
+                    content="当前账户风险指标均在正常范围内，暂时没有需要处理的紧急事项。行情波动平稳。",
+                    action_label="查看风控",
+                    action_link="/quant-loop",
+                    created_at=now
+                ))
+            
+            # 4. 权益趋势
+            trend = await self._get_performance_trend(account_id, days=7)
+            if len(trend) >= 2:
+                ret_7d = (trend[-1].equity / trend[0].equity - 1) * 100
+                if ret_7d > 5:
+                    insights.append(AIInsight(
+                        insight_id="perf_good",
+                        insight_type="advice",
+                        priority="medium",
+                        title="近期业绩优异",
+                        content=f"过去 7 天组合收益率达 {ret_7d:.1f}%。建议锁住部分利润，或对现有盈利持仓上移止盈位。",
+                        action_label="调整计划",
+                        action_link="/plans",
+                        created_at=now
+                    ))
+
+        except Exception as e:
+            logger.error(f"生成AI洞察失败: {e}")
+            insights.append(AIInsight(
+                insight_id="error",
+                insight_type="info",
+                priority="low",
+                title="AI 洞察初始化中",
+                content="正在分析您的账户数据，请稍后刷新...",
+                action_label="刷新",
+                action_link="/dashboard",
+                created_at=now
+            ))
+            
+        return insights
     
     # ============ 策略相关 ============
     async def _get_strategy_performance(self, account_id: str) -> List[StrategyPerformance]:
