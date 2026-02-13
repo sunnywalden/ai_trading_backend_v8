@@ -20,7 +20,7 @@
 在仓库根目录执行：
 
 - Dockerfile 路径：`deploy/Dockerfile`
-- Build context：仓库根目录（构建时会把仓库复制到容器内部 `/app/backend/`）
+- Build context：仓库根目录（构建时会把仓库复制到容器内部 `/app/`）
 
 示例构建命令：
 
