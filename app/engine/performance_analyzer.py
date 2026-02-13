@@ -21,6 +21,8 @@ from app.models.trading_signal import TradingSignal, SignalStatus, SignalPerform
 from app.models.strategy import Strategy, StrategyRun
 from app.models.trade_pnl_attribution import TradePnlAttribution
 from app.models.equity_snapshot import EquitySnapshot
+from app.services.benchmark_service import BenchmarkService
+from app.engine.alpha_beta_calculator import AlphaBetaCalculator
 
 
 class PerformanceAnalyzer:
@@ -28,6 +30,8 @@ class PerformanceAnalyzer:
     
     def __init__(self, session: AsyncSession):
         self.session = session
+        self.benchmark_service = BenchmarkService(session)
+        self.calculator = AlphaBetaCalculator()
     
     async def evaluate_daily_performance(
         self,
@@ -373,3 +377,284 @@ class PerformanceAnalyzer:
             "patterns": patterns,
             "recommendations": recommendations
         }
+    
+    async def get_account_returns(
+        self,
+        account_id: str,
+        days: int = 30
+    ) -> List[float]:
+        """
+        获取账户日收益率序列
+        
+        Returns:
+            日收益率列表 [r1, r2, r3, ...]
+        """
+        from datetime import date
+        
+        # 获取历史权益快照
+        period_start_date = (datetime.utcnow() - timedelta(days=days)).date()
+        
+        stmt = (
+            select(EquitySnapshot)
+            .where(
+                and_(
+                    EquitySnapshot.account_id == account_id,
+                    EquitySnapshot.snapshot_date >= period_start_date
+                )
+            )
+            .order_by(EquitySnapshot.snapshot_date)
+        )
+        
+        result = await self.session.execute(stmt)
+        snapshots = result.scalars().all()
+        
+        if not snapshots or len(snapshots) < 2:
+            return []
+        
+        # 计算日收益率
+        returns = []
+        for i in range(1, len(snapshots)):
+            prev_equity = float(snapshots[i-1].total_equity)
+            curr_equity = float(snapshots[i].total_equity)
+            
+            if prev_equity > 0:
+                daily_return = (curr_equity - prev_equity) / prev_equity
+                returns.append(daily_return)
+        
+        return returns
+    
+    async def calculate_alpha_beta_metrics(
+        self,
+        account_id: str,
+        days: int = 30,
+        benchmark: str = "SPY",
+        risk_free_rate: float = 0.04  # 4%年化
+    ) -> Dict[str, Any]:
+        """
+        计算Alpha和Beta指标
+        
+        Returns:
+            {
+                "alpha_annualized": 0.08,  # 年化Alpha
+                "beta": 0.75,
+                "sharpe_ratio": 1.5,
+                "information_ratio": 0.8,
+                "sortino_ratio": 2.0,
+                ...
+            }
+        """
+        # 获取账户收益率
+        account_returns = await self.get_account_returns(account_id, days)
+        
+        if not account_returns or len(account_returns) < 5:
+            return {
+                "error": "数据不足",
+                "message": f"至少需要5天数据，当前: {len(account_returns)}天"
+            }
+        
+        # 获取基准收益率
+        benchmark_returns = await self.benchmark_service.get_benchmark_returns(benchmark, days)
+        
+        # 对齐长度
+        min_len = min(len(account_returns), len(benchmark_returns))
+        account_returns = account_returns[-min_len:]
+        benchmark_returns = benchmark_returns[-min_len:]
+        
+        # 计算Alpha/Beta
+        alpha_daily = self.calculator.calculate_alpha(
+            account_returns, benchmark_returns, risk_free_rate
+        )
+        beta = self.calculator.calculate_beta(account_returns, benchmark_returns)
+        
+        # 计算其他指标
+        sharpe = self.calculator.calculate_sharpe_ratio(account_returns, risk_free_rate)
+        information_ratio = self.calculator.calculate_information_ratio(
+            account_returns, benchmark_returns
+        )
+        sortino = self.calculator.calculate_sortino_ratio(account_returns, risk_free_rate)
+        
+        # 计算累计收益
+        cumulative_return = sum(account_returns)
+        benchmark_cumulative = sum(benchmark_returns)
+        
+        # 计算跟踪误差
+        active_returns = [ar - br for ar, br in zip(account_returns, benchmark_returns)]
+        tracking_error = statistics.stdev(active_returns) if len(active_returns) > 1 else 0
+        
+        return {
+            "account_id": account_id,
+            "benchmark": benchmark,
+            "period_days": days,
+            "sample_size": len(account_returns),
+            
+            # 核心指标
+            "alpha_daily": alpha_daily,
+            "alpha_annualized": alpha_daily * 252,
+            "beta": beta,
+            
+            # 风险调整收益
+            "sharpe_ratio": sharpe,
+            "sortino_ratio": sortino,
+            "information_ratio": information_ratio,
+            
+            # 收益比较
+            "portfolio_return": cumulative_return,
+            "benchmark_return": benchmark_cumulative,
+            "active_return": cumulative_return - benchmark_cumulative,
+            "tracking_error_annualized": tracking_error * (252 ** 0.5),
+            
+            # 解读
+            "interpretation": self._interpret_alpha_beta(alpha_daily * 252, beta, sharpe)
+        }
+    
+    def _interpret_alpha_beta(
+        self,
+        alpha_annualized: float,
+        beta: float,
+        sharpe: float
+    ) -> Dict[str, str]:
+        """解读Alpha/Beta指标"""
+        
+        # Alpha解读
+        if alpha_annualized > 0.05:
+            alpha_msg = "优秀 - 产生显著超额收益"
+        elif alpha_annualized > 0:
+            alpha_msg = "良好 - 产生正超额收益"
+        elif alpha_annualized > -0.02:
+            alpha_msg = "一般 - 接近市场水平"
+        else:
+            alpha_msg = "差 - 跑输市场基准"
+        
+        # Beta解读
+        if beta < 0.5:
+            beta_msg = "低风险 - 市场敏感度低"
+        elif beta < 0.8:
+            beta_msg = "中低风险 - 相对稳健"
+        elif beta < 1.2:
+            beta_msg = "市场风险 - 与市场同步"
+        else:
+            beta_msg = "高风险 - 波动性大于市场"
+        
+        # Sharpe解读
+        if sharpe > 2.0:
+            sharpe_msg = "卓越 - 风险调整后收益极佳"
+        elif sharpe > 1.0:
+            sharpe_msg = "优秀 - 风险调整后收益良好"
+        elif sharpe > 0.5:
+            sharpe_msg = "合格 - 承受风险获得合理回报"
+        else:
+            sharpe_msg = "不佳 - 风险收益比不理想"
+        
+        return {
+            "alpha": alpha_msg,
+            "beta": beta_msg,
+            "sharpe": sharpe_msg
+        }
+    
+    async def calculate_signal_win_rate(
+        self,
+        account_id: str,
+        days: int = 30,
+        group_by: Optional[str] = None  # strategy/source/None
+    ) -> Dict[str, Any]:
+        """
+        计算信号胜率统计
+        
+        Args:
+            account_id: 账户ID
+            days: 回溯天数
+            group_by: 分组维度 (strategy/source/None)
+            
+        Returns:
+            信号胜率详细统计
+        """
+        period_start = datetime.utcnow() - timedelta(days=days)
+        
+        # 获取已平仓的信号（有is_winner标记）
+        stmt = (
+            select(TradingSignal)
+            .where(
+                and_(
+                    TradingSignal.account_id == account_id,
+                    TradingSignal.executed_at >= period_start,
+                    TradingSignal.is_winner.isnot(None)
+                )
+            )
+        )
+        
+        result = await self.session.execute(stmt)
+        signals = result.scalars().all()
+        
+        if not signals:
+            return {
+                "total_signals": 0,
+                "message": "暂无已平仓信号数据"
+            }
+        
+        # 总体统计
+        total = len(signals)
+        winners = len([s for s in signals if s.is_winner == "YES"])
+        losers = len([s for s in signals if s.is_winner == "NO"])
+        
+        win_rate = winners / total if total > 0 else 0
+        
+        # 计算盈亏比
+        winning_pnls = [float(s.pnl_pct) for s in signals if s.is_winner == "YES" and s.pnl_pct]
+        losing_pnls = [abs(float(s.pnl_pct)) for s in signals if s.is_winner == "NO" and s.pnl_pct]
+        
+        avg_win = statistics.mean(winning_pnls) if winning_pnls else 0
+        avg_loss = statistics.mean(losing_pnls) if losing_pnls else 0
+        profit_loss_ratio = avg_win / avg_loss if avg_loss > 0 else 0
+        
+        result_data = {
+            "account_id": account_id,
+            "period_days": days,
+            "total_signals": total,
+            "winning_signals": winners,
+            "losing_signals": losers,
+            "win_rate": win_rate,
+            "avg_win_pct": avg_win,
+            "avg_loss_pct": avg_loss,
+            "profit_loss_ratio": profit_loss_ratio,
+            "expectancy": win_rate * avg_win - (1 - win_rate) * avg_loss  # 期望值
+        }
+        
+        # 按维度分组
+        if group_by == "strategy":
+            grouped = {}
+            for signal in signals:
+                if signal.strategy_id:
+                    key = signal.strategy_id
+                    if key not in grouped:
+                        grouped[key] = []
+                    grouped[key].append(signal)
+            
+            result_data["by_strategy"] = {}
+            for strategy_id, group_signals in grouped.items():
+                total_g = len(group_signals)
+                winners_g = len([s for s in group_signals if s.is_winner == "YES"])
+                result_data["by_strategy"][strategy_id] = {
+                    "total": total_g,
+                    "winners": winners_g,
+                    "win_rate": winners_g / total_g if total_g > 0 else 0
+                }
+        
+        elif group_by == "source":
+            grouped = {}
+            for signal in signals:
+                key = signal.signal_source.value
+                if key not in grouped:
+                    grouped[key] = []
+                grouped[key].append(signal)
+            
+            result_data["by_source"] = {}
+            for source, group_signals in grouped.items():
+                total_g = len(group_signals)
+                winners_g = len([s for s in group_signals if s.is_winner == "YES"])
+                result_data["by_source"][source] = {
+                    "total": total_g,
+                    "winners": winners_g,
+                    "win_rate": winners_g / total_g if total_g > 0 else 0
+                }
+        
+        return result_data

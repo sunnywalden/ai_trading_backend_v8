@@ -99,7 +99,9 @@ class TradingSignal(Base):
     # 评估结果
     actual_return = Column(Float, nullable=True)     # 实际收益率
     holding_days = Column(Integer, nullable=True)
-    pnl = Column(Float, nullable=True)               # 盈亏
+    pnl = Column(Float, nullable=True)               # 盈亏（绝对金额）
+    pnl_pct = Column(Float, nullable=True)           # 盈亏百分比
+    is_winner = Column(String(8), nullable=True)     # YES/NO - 是否盈利交易
     evaluation_score = Column(Float, nullable=True)  # 事后评分(0-100)
     evaluation_notes = Column(Text, nullable=True)
     

@@ -21,6 +21,7 @@ from uuid import uuid4
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.trading_signal import TradingSignal
 from app.engine.signal_engine import SignalEngine
 from app.engine.order_executor import OrderExecutor
 from app.engine.performance_analyzer import PerformanceAnalyzer
@@ -93,9 +94,9 @@ class QuantTradingLoop:
         self,
         account_id: str
     ) -> Dict[str, Any]:
-        """阶段1: 从策略运行结果生成交易信号"""
+        """阶段1: 从策略运行结果生成交易信号（多策略融合）"""
         
-        # 获取最近完成的策略运行
+        # 获取最近完成的策略运行（改为3个，增加多样性）
         from app.models.strategy import StrategyRun
         from sqlalchemy import select, desc, and_
         
@@ -108,15 +109,16 @@ class QuantTradingLoop:
                 )
             )
             .order_by(desc(StrategyRun.finished_at))
-            .limit(1)  # 只处理最近 1 次策略运行，确保信号与最新筛选逻辑一致
+            .limit(3)  # ← 改为3个策略，提高多样性
         )
         
         result = await self.session.execute(stmt)
         recent_runs = result.scalars().all()
         
-        total_signals = 0
+        all_signals = []
         signals_by_strategy = {}
         
+        # 从多个策略运行生成信号
         for run in recent_runs:
             # 从策略运行生成信号
             signals = await self.signal_engine.generate_signals_from_strategy_run(
@@ -126,14 +128,52 @@ class QuantTradingLoop:
             
             strategy_name = run.strategy.name if run.strategy else "Unknown"
             signals_by_strategy[strategy_name] = len(signals)
-            total_signals += len(signals)
+            all_signals.extend(signals)
+        
+        # 多策略信号去重和聚合（保留每个symbol置信度最高的信号）
+        deduplicated_signals = self._deduplicate_signals_by_symbol(all_signals)
+        
+        total_signals = len(deduplicated_signals)
         
         return {
             "status": "completed",
             "total_signals_generated": total_signals,
+            "signals_before_dedup": len(all_signals),
             "signals_by_strategy": signals_by_strategy,
             "strategy_runs_processed": len(recent_runs)
         }
+    
+    def _deduplicate_signals_by_symbol(
+        self,
+        signals: List[TradingSignal]
+    ) -> List[TradingSignal]:
+        """
+        跨策略信号去重：每个symbol只保留置信度最高的信号
+        
+        Args:
+            signals: 信号列表
+            
+        Returns:
+            去重后的信号列表
+        """
+        if not signals:
+            return []
+        
+        # 按symbol分组
+        by_symbol = {}
+        for signal in signals:
+            symbol = signal.symbol
+            if symbol not in by_symbol:
+                by_symbol[symbol] = []
+            by_symbol[symbol].append(signal)
+        
+        # 每个symbol保留置信度最高的
+        deduplicated = []
+        for symbol, symbol_signals in by_symbol.items():
+            best_signal = max(symbol_signals, key=lambda s: s.confidence * s.signal_strength)
+            deduplicated.append(best_signal)
+        
+        return deduplicated
     
     async def _phase_2_signal_validation(
         self,
