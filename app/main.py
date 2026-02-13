@@ -41,6 +41,7 @@ from app.routers import hotspots
 from app.routers import quant_loop  # NEW: 量化交易闭环路由
 from app.routers import execution_center  # NEW: 执行中心（Layer 3）
 from app.routers import ai_advisor  # AI 交易决策（统一入口）
+from app.routers import performance  # NEW: Alpha/Beta性能分析指标
 # V9 routers
 from app.routers import dashboard as v9_dashboard
 from app.routers import dashboard_v2  # V10: 全新Dashboard
@@ -139,6 +140,7 @@ app.include_router(strategy.router, prefix="/api/v1", tags=["策略管理"], dep
 app.include_router(quant_loop.router, dependencies=[Depends(get_current_user)])  # NEW: 量化交易闭环
 app.include_router(execution_center.router, dependencies=[Depends(get_current_user)])  # NEW: 执行中心（Layer 3）
 app.include_router(ai_advisor.router, dependencies=[Depends(get_current_user)])  # AI 交易决策
+app.include_router(performance.router, dependencies=[Depends(get_current_user)])  # NEW: Alpha/Beta性能分析指标
 
 # V9 路由注册
 app.include_router(v9_dashboard.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])

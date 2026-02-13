@@ -529,3 +529,184 @@ class SignalEngine:
         await self.session.refresh(perf)
         
         return perf
+    
+    async def update_signal_outcome(
+        self,
+        signal_id: str,
+        exit_price: float,
+        exit_time: Optional[datetime] = None
+    ) -> Dict[str, Any]:
+        """
+        信号平仓后更新结果（关键：标记is_winner）
+        
+        Args:
+            signal_id: 信号ID
+            exit_price: 平仓价格
+            exit_time: 平仓时间（默认当前时间）
+            
+        Returns:
+            更新结果
+        """
+        # 获取信号
+        stmt = select(TradingSignal).where(TradingSignal.signal_id == signal_id)
+        result = await self.session.execute(stmt)
+        signal = result.scalars().first()
+        
+        if not signal:
+            return {"error": "信号不存在"}
+        
+        if signal.status != SignalStatus.EXECUTED:
+            return {"error": f"信号状态不正确: {signal.status.value}"}
+        
+        if not signal.executed_price or not signal.executed_quantity:
+            return {"error": "缺少执行价格或数量"}
+        
+        # 计算盈亏
+        entry_price = float(signal.executed_price)
+        quantity = float(signal.executed_quantity)
+        
+        if signal.direction == "LONG":
+            pnl_pct = (exit_price - entry_price) / entry_price
+            pnl_amount = (exit_price - entry_price) * quantity
+        else:  # SHORT
+            pnl_pct = (entry_price - exit_price) / entry_price
+            pnl_amount = (entry_price - exit_price) * quantity
+        
+        # 更新信号
+        signal.pnl = pnl_amount
+        signal.pnl_pct = pnl_pct
+        signal.actual_return = pnl_pct
+        signal.is_winner = "YES" if pnl_amount > 0 else "NO"
+        
+        # 计算持仓天数
+        if exit_time and signal.executed_at:
+            holding_days = (exit_time - signal.executed_at).days
+            signal.holding_days = holding_days
+        
+        # 计算评估分数（综合考虑收益率、风险、持仓时间）
+        signal.evaluation_score = self._calculate_evaluation_score(
+            pnl_pct=pnl_pct,
+            expected_return=signal.expected_return or 0.05,
+            risk_score=signal.risk_score or 50,
+            holding_days=signal.holding_days or 1
+        )
+        
+        signal.updated_at = datetime.utcnow()
+        
+        await self.session.commit()
+        await self.session.refresh(signal)
+        
+        return {
+            "signal_id": signal_id,
+            "pnl": pnl_amount,
+            "pnl_pct": pnl_pct,
+            "is_winner": signal.is_winner,
+            "evaluation_score": signal.evaluation_score,
+            "message": "信号结果已更新"
+        }
+    
+    def _calculate_evaluation_score(
+        self,
+        pnl_pct: float,
+        expected_return: float,
+        risk_score: float,
+        holding_days: int
+    ) -> float:
+        """
+        计算信号评估分数（0-100）
+        
+        评分维度：
+        1. 实际vs预期收益（40%权重）
+        2. 风险调整收益（30%权重）
+        3. 时间效率（30%权重）
+        """
+        # 1. 收益达成度（0-40分）
+        if expected_return > 0:
+            return_achievement = min(pnl_pct / expected_return, 2.0)  # 最多2倍
+        else:
+            return_achievement = 1.0 if pnl_pct > 0 else 0.0
+        
+        return_score = return_achievement * 40
+        
+        # 2. 风险调整收益（0-30分）
+        # 风险越高，要求收益越高
+        required_return_for_risk = risk_score / 1000  # 50分风险要求5%收益
+        if pnl_pct > required_return_for_risk:
+            risk_adjusted_score = 30
+        else:
+            risk_adjusted_score = (pnl_pct / required_return_for_risk) * 30 if required_return_for_risk > 0 else 0
+        
+        # 3. 时间效率（0-30分）
+        # 持仓时间越短越好（假设目标是5天）
+        target_days = 5
+        if holding_days <= target_days:
+            time_score = 30
+        else:
+            time_score = max(0, 30 - (holding_days - target_days) * 2)
+        
+        # 总分
+        total_score = return_score + risk_adjusted_score + time_score
+        
+        # 如果亏损，大幅降分
+        if pnl_pct < 0:
+            total_score = min(total_score, 30)  # 亏损最多30分
+        
+        return max(0, min(100, total_score))
+    
+    async def batch_update_signal_outcomes(
+        self,
+        account_id: str
+    ) -> Dict[str, Any]:
+        """
+        批量更新所有已执行但未评估的信号结果
+        （需要从持仓历史或订单记录中获取平仓信息）
+        
+        Returns:
+            更新统计
+        """
+        # 获取已执行但未评估的信号
+        stmt = (
+            select(TradingSignal)
+            .where(
+                and_(
+                    TradingSignal.account_id == account_id,
+                    TradingSignal.status == SignalStatus.EXECUTED,
+                    TradingSignal.is_winner.is_(None)  # 未评估
+                )
+            )
+        )
+        
+        result = await self.session.execute(stmt)
+        signals = result.scalars().all()
+        
+        if not signals:
+            return {
+                "total_signals": 0,
+                "updated": 0,
+                "message": "没有待更新的信号"
+            }
+        
+        updated_count = 0
+        
+        # TODO: 这里需要从broker获取持仓历史来判断是否已平仓及平仓价格
+        # 当前简化处理：如果持仓时间超过max_holding_days，标记为过期
+        
+        for signal in signals:
+            if signal.executed_at:
+                days_held = (datetime.utcnow() - signal.executed_at).days
+                
+                # 如果超过最大持仓天数且未平仓，标记为过期
+                if signal.max_holding_days and days_held > signal.max_holding_days:
+                    signal.status = SignalStatus.EXPIRED
+                    signal.evaluation_notes = f"超过最大持仓天数({signal.max_holding_days}天)未平仓"
+                    updated_count += 1
+        
+        if updated_count > 0:
+            await self.session.commit()
+        
+        return {
+            "total_signals": len(signals),
+            "updated": updated_count,
+            "message": f"已更新{updated_count}个信号"
+        }
+
