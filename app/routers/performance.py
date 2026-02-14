@@ -214,8 +214,8 @@ async def run_stress_test(
 async def route_smart_order(
     symbol: str = Query(..., description="股票代码"),
     quantity: int = Query(..., ge=1, description="数量"),
-    side: str = Query(..., regex="^(BUY|SELL)$", description="买入/卖出"),
-    urgency: str = Query(default="NORMAL", regex="^(LOW|NORMAL|HIGH)$", description="紧急度"),
+    side: str = Query(..., pattern="^(BUY|SELL)$", description="买入/卖出"),
+    urgency: str = Query(default="NORMAL", pattern="^(LOW|NORMAL|HIGH)$", description="紧急度"),
     account_id: Optional[str] = Query(None, description="账户ID"),
     session: AsyncSession = Depends(get_session),
     current_user: str = Depends(get_current_user)
@@ -271,7 +271,7 @@ async def evaluate_execution_quality(
     symbol: str = Query(..., description="股票代码"),
     executed_price: float = Query(..., gt=0, description="成交价格"),
     quantity: int = Query(..., ge=1, description="成交数量"),
-    side: str = Query(..., regex="^(BUY|SELL)$", description="买入/卖出"),
+    side: str = Query(..., pattern="^(BUY|SELL)$", description="买入/卖出"),
     execution_time: Optional[datetime] = Query(None, description="成交时间"),
     session: AsyncSession = Depends(get_session),
     current_user: str = Depends(get_current_user)
