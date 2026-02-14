@@ -1,11 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Optional
+from typing import Optional, Callable
 
 from app.models.db import get_session
 from app.schemas.trading_plan import PlanCreateRequest, PlanUpdateRequest, PlanListResponse, PlanView
 from app.services.trading_plan_service import TradingPlanService
 from app.core.config import settings
+from app.i18n import get_translator
 
 router = APIRouter()
 
@@ -34,6 +35,7 @@ async def create_plan(
         plan = await svc.create_plan(account_id, payload.model_dump())
         return PlanView.model_validate(plan)
     except ValueError as e:
+        # TODO: Consider translating some known error messages from service layer if needed
         raise HTTPException(status_code=400, detail=str(e))
 
 
@@ -42,11 +44,12 @@ async def update_plan(
     plan_id: int,
     payload: PlanUpdateRequest,
     session: AsyncSession = Depends(get_session),
+    t: Callable = Depends(get_translator)
 ):
     svc = TradingPlanService(session)
     plan = await svc.update_plan(plan_id, payload.model_dump(exclude_none=True))
     if not plan:
-        raise HTTPException(status_code=404, detail="Plan not found")
+        raise HTTPException(status_code=404, detail=t("error.plan_not_found", id=plan_id))
     return PlanView.model_validate(plan)
 
 
@@ -54,9 +57,10 @@ async def update_plan(
 async def delete_plan(
     plan_id: int,
     session: AsyncSession = Depends(get_session),
+    t: Callable = Depends(get_translator)
 ):
     svc = TradingPlanService(session)
     ok = await svc.delete_plan(plan_id)
     if not ok:
-        raise HTTPException(status_code=404, detail="Plan not found")
+        raise HTTPException(status_code=404, detail=t("error.plan_not_found", id=plan_id))
     return {"status": "ok", "deleted": True}

@@ -3,7 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import ORJSONResponse
 from fastapi.staticfiles import StaticFiles
-from typing import Optional, AsyncGenerator
+from typing import Optional, AsyncGenerator, Callable
+from app.i18n import get_translator
 from sqlalchemy.ext.asyncio import AsyncSession
 from contextlib import asynccontextmanager
 import asyncio
@@ -360,7 +361,8 @@ async def rebuild_behavior_stats(
     payload: dict = Body(...),
     session: AsyncSession = Depends(get_session),
     async_run: bool = Query(False, description="是否异步执行"),
-    current_user: str = Depends(get_current_user)
+    current_user: str = Depends(get_current_user),
+    t: Callable = Depends(get_translator)
 ):
     """重计算最近 N 天的行为评分（基于老虎历史成交 + 盈亏数据）。
 
@@ -380,7 +382,7 @@ async def rebuild_behavior_stats(
 
     if async_run:
         if not settings.ENABLE_SCHEDULER:
-            raise HTTPException(status_code=400, detail="Scheduler disabled, cannot run async job")
+            raise HTTPException(status_code=400, detail=t("error.scheduler_disabled"))
         job_id = f"behavior_rebuild:{account_id}:{int(datetime.now().timestamp())}"
         add_job(
             _run_behavior_rebuild_job,
@@ -447,7 +449,12 @@ async def resume_scheduled_job(job_id: str, current_user: str = Depends(get_curr
 
 
 @app.put("/api/v1/admin/scheduler/jobs/{job_id}/schedule")
-async def update_job_schedule(job_id: str, payload: JobScheduleRequest, current_user: str = Depends(get_current_user)):
+async def update_job_schedule(
+    job_id: str, 
+    payload: JobScheduleRequest, 
+    current_user: str = Depends(get_current_user),
+    t: Callable = Depends(get_translator)
+):
     """按小时/分钟/时区更新定时任务的触发 cron"""
     from app.jobs.scheduler import reschedule_job, get_job, format_job
 
@@ -456,7 +463,7 @@ async def update_job_schedule(job_id: str, payload: JobScheduleRequest, current_
         reschedule_job(job_id=job_id, cron_expr=cron_expr, timezone=payload.timezone)
         job = get_job(job_id)
         if not job:
-            raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
+            raise HTTPException(status_code=404, detail=t("error.job_not_found", id=job_id))
         job_info = format_job(job)
         next_run = job_info.get("next_run_time") or "soon"
         message = f"Job schedule updated successfully. Next run: {next_run}"

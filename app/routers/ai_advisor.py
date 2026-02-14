@@ -10,8 +10,9 @@ AI 交易决策 API - 统一的智能交易入口
 - GET  /history     决策历史
 """
 
-from typing import Optional, List
+from typing import Optional, List, Callable
 from fastapi import APIRouter, Depends, HTTPException, Query
+from app.i18n import get_translator, get_locale
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, Field
 
@@ -64,6 +65,8 @@ class PlanUpdateRequest(BaseModel):
 async def evaluate_symbols(
     request: EvaluateRequest,
     session: AsyncSession = Depends(get_session),
+    t: Callable = Depends(get_translator),
+    locale: str = Depends(get_locale)
 ):
     """
     对一组标的进行 AI 多维度评估。
@@ -79,6 +82,7 @@ async def evaluate_symbols(
     evaluations = await svc.evaluate_symbols(
         symbols=request.symbols,
         account_id=request.account_id,
+        locale=locale
     )
     return {"status": "ok", "evaluations": evaluations}
 
@@ -151,6 +155,7 @@ async def list_plans(
 async def get_plan(
     plan_id: int,
     session: AsyncSession = Depends(get_session),
+    t: Callable = Depends(get_translator)
 ):
     svc = TradingPlanService(session)
     try:
@@ -159,7 +164,7 @@ async def get_plan(
         plan = None
 
     if not plan:
-        raise HTTPException(status_code=404, detail="计划不存在")
+        raise HTTPException(status_code=404, detail=t("error.plan_not_found", id=plan_id))
     return _plan_to_dict(plan)
 
 
@@ -188,12 +193,13 @@ async def update_plan(
     plan_id: int,
     request: PlanUpdateRequest,
     session: AsyncSession = Depends(get_session),
+    t: Callable = Depends(get_translator)
 ):
     svc = TradingPlanService(session)
     payload = request.dict(exclude_none=True)
     plan = await svc.update_plan(plan_id=plan_id, payload=payload)
     if not plan:
-        raise HTTPException(status_code=404, detail="计划不存在")
+        raise HTTPException(status_code=404, detail=t("error.plan_not_found", id=plan_id))
     await session.commit()
     return {"status": "ok", "plan": _plan_to_dict(plan)}
 
@@ -202,19 +208,21 @@ async def update_plan(
 async def delete_plan(
     plan_id: int,
     session: AsyncSession = Depends(get_session),
+    t: Callable = Depends(get_translator)
 ):
     svc = TradingPlanService(session)
     ok = await svc.delete_plan(plan_id)
     if not ok:
-        raise HTTPException(status_code=404, detail="计划不存在")
+        raise HTTPException(status_code=404, detail=t("error.plan_not_found", id=plan_id))
     await session.commit()
-    return {"status": "ok", "message": "计划已删除"}
+    return {"status": "ok", "message": "Plan deleted"}
 
 
 @router.post("/plans/{plan_id}/execute", summary="执行交易计划")
 async def execute_plan(
     plan_id: int,
     session: AsyncSession = Depends(get_session),
+    t: Callable = Depends(get_translator)
 ):
     """执行单个交易计划"""
     svc = TradingPlanService(session)
@@ -230,6 +238,7 @@ async def execute_plan(
 async def cancel_plan(
     plan_id: int,
     session: AsyncSession = Depends(get_session),
+    t: Callable = Depends(get_translator)
 ):
     svc = TradingPlanService(session)
     try:
@@ -304,6 +313,7 @@ async def delete_evaluation_record(
     record_id: int,
     account_id: Optional[str] = Query(None, description="账户ID"),
     session: AsyncSession = Depends(get_session),
+    t: Callable = Depends(get_translator)
 ):
     """删除指定的评估记录"""
     svc = AITradeAdvisorService(session)
@@ -312,9 +322,9 @@ async def delete_evaluation_record(
     success = await svc.delete_evaluation_record(record_id, acc_id)
     
     if not success:
-        raise HTTPException(status_code=404, detail="记录不存在或无权删除")
+        raise HTTPException(status_code=404, detail=t("error.delete_denied"))
     
-    return {"status": "ok", "message": "记录已删除"}
+    return {"status": "ok", "message": "Record deleted"}
 
 
 # ==================== 辅助函数 ====================
