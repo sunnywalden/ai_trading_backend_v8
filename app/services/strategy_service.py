@@ -64,6 +64,17 @@ class StrategyService:
         await self.session.commit()
         await self.session.refresh(strategy)
         return strategy
+    
+    async def toggle_strategy(self, strategy_id: str, is_active: bool) -> Optional[Strategy]:
+        """启用/禁用策略"""
+        strategy = await self.get_strategy(strategy_id)
+        if not strategy:
+            return None
+        strategy.is_active = is_active
+        strategy.updated_at = datetime.utcnow()
+        await self.session.commit()
+        await self.session.refresh(strategy)
+        return strategy
 
 
 class StrategyRunService:

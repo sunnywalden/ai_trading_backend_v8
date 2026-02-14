@@ -66,11 +66,12 @@
 │   │   ├── auto_hedge_engine.py  # 自动对冲引擎（已有）
 │   │   └── alert_engine.py       # 价格告警引擎
 │   │
-│   ├── routers/                  # API 路由层 (15+ 端点组)
+│   ├── routers/                  # API 路由层 (16+ 端点组)
 │   │   ├── dashboard_v2.py       # GET /api/v1/dashboard/v2/{full,quick}
 │   │   ├── ai_advisor.py         # AI 决策相关
 │   │   ├── signals.py            # 信号管理
 │   │   ├── trading_plan.py       # 计划管理
+│   │   ├── strategies.py         # 策略库管理（新增）
 │   │   ├── positions.py          # 持仓评估
 │   │   ├── macro_risk.py         # 宏观风险
 │   │   ├── opportunities.py      # 潜在机会
@@ -105,9 +106,52 @@
 
 ## 2. 数据库设计
 
-### 2.1 核心表结构（新增7张表 + 优化已有表）
+### 2.1 核心表结构（新增8张表 + 优化已有表）
 
-#### A. equity_snapshots - 账户权益快照
+#### A. strategies - 策略库
+
+```sql
+CREATE TABLE strategies (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  name VARCHAR(128) NOT NULL UNIQUE,
+  category VARCHAR(32) NOT NULL COMMENT '均值回归/趋势跟踪/多因子/防御/波动率/宏观对冲',
+  description TEXT COMMENT '策略描述',
+  enabled BOOLEAN DEFAULT TRUE COMMENT '是否启用',
+  is_builtin BOOLEAN DEFAULT TRUE COMMENT '是否内置策略',
+  
+  -- 策略参数（JSON存储）
+  default_params JSON NOT NULL COMMENT '默认参数配置',
+  current_params JSON COMMENT '当前参数配置（覆盖默认）',
+  
+  -- 信号源配置
+  signal_sources JSON COMMENT '["TECHNICAL","FUNDAMENTAL","SENTIMENT"]',
+  
+  -- 风险配置
+  risk_profile JSON COMMENT '{"max_position_pct": 0.15, "stop_loss_pct": 0.02}',
+  
+  -- 运行配置
+  run_schedule VARCHAR(64) COMMENT 'cron表达式：定时运行',
+  auto_execute BOOLEAN DEFAULT FALSE COMMENT '是否自动执行信号',
+  
+  -- 性能统计（定期更新）
+  win_rate DECIMAL(10, 4) DEFAULT 0,
+  sharpe_ratio DECIMAL(10, 4) DEFAULT 0,
+  total_signals INT DEFAULT 0,
+  last_run_at DATETIME,
+  
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  
+  INDEX idx_category (category),
+  INDEX idx_enabled (enabled)
+);
+```
+
+**用途**：策略库管理，存储12大类量化策略配置。
+
+> **详细设计参考**：`docs/STRATEGY_LIBRARY_DESIGN.md` - 12个策略完整技术规范
+
+#### B. equity_snapshots - 账户权益快照
 
 ```sql
 CREATE TABLE equity_snapshots (
@@ -296,7 +340,52 @@ CREATE TABLE audit_logs (
 
 ## 3. 核心引擎设计
 
-### 3.1 SignalEngine - 信号引擎
+### 3.1 StrategyEngine - 策略引擎
+
+**职责**：管理12大类量化策略，执行策略逻辑生成交易信号。
+
+**策略分类**：
+- **均值回归** (Mean Reversion): 布林带均值回归、配对交易
+- **趋势跟踪** (Trend Following): 突破动量、黄金交叉
+- **多因子** (Multi-Factor): Fama-French三因子、动量+质量
+- **防御策略** (Defensive): 低波动率、尾部对冲
+- **波动率** (Volatility): 铁鹰期权、波动率套利
+- **宏观对冲** (Macro Hedge): 行业轮动、CTA商品
+
+**关键方法**：
+- `get_all_strategies()` - 获取策略列表
+- `run_strategy(strategy_id)` - 运行指定策略
+- `update_strategy_params()` - 更新策略参数
+- `toggle_strategy()` - 启用/禁用策略
+- `get_strategy_performance()` - 获取历史表现
+
+**策略运行流程**：
+```python
+async def run_strategy(strategy_id: int, account_id: str):
+    # 1. 加载策略配置
+    strategy = await self.load_strategy(strategy_id)
+    
+    # 2. 创建策略运行记录
+    run = StrategyRun(strategy_id=strategy_id, status='RUNNING')
+    
+    # 3. 执行策略逻辑（根据类别调用不同实现）
+    signals = await self._execute_strategy_logic(strategy)
+    
+    # 4. 保存交易信号
+    for signal_data in signals:
+        signal = TradingSignal(strategy_id=strategy_id, **signal_data)
+        await self.save_signal(signal)
+    
+    # 5. 更新运行状态
+    run.status = 'COMPLETED'
+    run.signal_count = len(signals)
+    
+    return run
+```
+
+**详细设计**：参见 `docs/STRATEGY_LIBRARY_DESIGN.md`
+
+### 3.2 SignalEngine - 信号引擎
 
 **职责**：从策略运行结果生成交易信号，统一评分和验证。
 
@@ -388,7 +477,46 @@ async def run_complete_cycle():
 
 ## 4. 服务层设计
 
-### 4.1 AI Trade Advisor Service
+### 4.1 Strategy Service
+
+**核心功能**：策略库管理 + 策略运行 + 性能统计
+
+**关键方法**：
+```python
+class StrategyService:
+    async def get_all_strategies(category: Optional[str] = None) -> List[Strategy]:
+        """获取策略列表（支持分类筛选）"""
+    
+    async def get_strategy_detail(strategy_id: int) -> Strategy:
+        """获取策略详情（包含参数配置）"""
+    
+    async def run_strategy(strategy_id: int, account_id: str) -> StrategyRun:
+        """运行策略，生成交易信号"""
+    
+    async def update_strategy_params(strategy_id: int, params: dict):
+        """更新策略参数"""
+    
+    async def toggle_strategy(strategy_id: int) -> bool:
+        """启用/禁用策略"""
+    
+    async def get_strategy_performance(strategy_id: int) -> Dict:
+        """获取策略历史表现（胜率/Sharpe/盈亏比）"""
+    
+    async def get_strategy_signals(strategy_id: int, limit: int = 10) -> List[TradingSignal]:
+        """获取策略最近信号"""
+```
+
+**策略实现模块**：
+- `app/strategies/mean_reversion/` - 均值回归策略实现
+- `app/strategies/trend_following/` - 趋势跟踪策略实现
+- `app/strategies/multi_factor/` - 多因子策略实现
+- `app/strategies/defensive/` - 防御策略实现
+- `app/strategies/volatility/` - 波动率策略实现
+- `app/strategies/macro_hedge/` - 宏观对冲策略实现
+
+**详细实现**：参见 `docs/STRATEGY_LIBRARY_DESIGN.md` 第4-5章
+
+### 4.2 AI Trade Advisor Service
 
 **核心功能**：多维分析 + AI 综合决策
 
@@ -723,3 +851,4 @@ JWT_EXPIRE_DAYS=7
 - API.md - API 接口文档
 - PRODUCT.md - 产品需求文档
 - FRONTEND_DESIGN.md - 前端设计文档
+- STRATEGY_LIBRARY_DESIGN.md - 策略库扩充设计文档（新增）

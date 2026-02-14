@@ -68,11 +68,18 @@ def _to_summary(strategy) -> StrategySummaryView:
 
 def _to_detail(strategy) -> StrategyDetailView:
     base = _to_summary(strategy).dict()
+    
+    # Handle signal_sources: convert list to dict if needed
+    signal_sources = strategy.signal_sources or {}
+    if isinstance(signal_sources, list):
+        # Convert list of sources to dict format {"sources": [...]}
+        signal_sources = {"sources": signal_sources}
+    
     return StrategyDetailView(
         **base,
         version=strategy.version,
         default_params=strategy.default_params or {},
-        signal_sources=strategy.signal_sources or {},
+        signal_sources=signal_sources,
         risk_profile=strategy.risk_profile or {},
     )
 
@@ -427,3 +434,79 @@ async def batch_quick_trade(
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"批量交易失败: {str(e)}")
+
+
+@router.patch("/strategies/{strategy_id}/toggle")
+async def toggle_strategy(
+    strategy_id: str,
+    is_active: bool = Query(..., description="是否启用策略"),
+    session: AsyncSession = Depends(get_session),
+    current_user: str = Depends(get_current_user),
+):
+    """启用/禁用策略"""
+    _ensure_permission(current_user, "manage")
+    svc = StrategyService(session)
+    strategy = await svc.toggle_strategy(strategy_id, is_active)
+    if not strategy:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    return {"status": "ok", "strategy_id": strategy_id, "is_active": is_active}
+
+
+@router.get("/strategies/{strategy_id}/performance")
+async def get_strategy_performance(
+    strategy_id: str,
+    session: AsyncSession = Depends(get_session),
+    current_user: str = Depends(get_current_user),
+):
+    """获取策略表现统计"""
+    from app.engine.strategy_engine import StrategyEngine
+    
+    strategy_svc = StrategyService(session)
+    strategy = await strategy_svc.get_strategy(strategy_id)
+    if not strategy:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    
+    engine = StrategyEngine(session)
+    performance = await engine.get_strategy_performance(strategy_id)
+    
+    return {
+        "status": "ok",
+        "strategy_id": strategy_id,
+        "performance": performance
+    }
+
+
+@router.get("/strategies/{strategy_id}/signals")
+async def get_strategy_signals(
+    strategy_id: str,
+    limit: int = Query(50, ge=1, le=200),
+    session: AsyncSession = Depends(get_session),
+    current_user: str = Depends(get_current_user),
+):
+    """获取策略最近生成的信号"""
+    from app.engine.strategy_engine import StrategyEngine
+    
+    strategy_svc = StrategyService(session)
+    strategy = await strategy_svc.get_strategy(strategy_id)
+    if not strategy:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    
+    engine = StrategyEngine(session)
+    signals = await engine.get_strategy_signals(strategy_id, limit=limit)
+    
+    return {
+        "status": "ok",
+        "strategy_id": strategy_id,
+        "signals": [
+            {
+                "id": signal.id,
+                "symbol": signal.symbol,
+                "direction": signal.direction,
+                "strength": signal.strength,
+                "weight": signal.weight,
+                "risk_score": signal.risk_score,
+                "created_at": signal.created_at.isoformat() if signal.created_at else None,
+            }
+            for signal in signals
+        ]
+    }
