@@ -104,7 +104,7 @@ class SignalEngine:
         
         try:
             # 获取当前持仓
-            positions = await self.broker.get_stock_positions(account_id)
+            positions = await self.broker.list_underlying_positions(account_id)
             
             # 查找该symbol的持仓
             position = next((p for p in positions if p.get('symbol') == symbol), None)

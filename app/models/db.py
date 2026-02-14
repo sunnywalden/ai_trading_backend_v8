@@ -109,6 +109,73 @@ async def ensure_mysql_tables() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
+
+async def ensure_mysql_schema_updates() -> None:
+    """启动时检查并修复数据库表结构变更（如缺少的列）。"""
+    if settings.DB_TYPE != "mysql":
+        return
+
+    # 定义需要检查的列更新
+    # 格式: (table_name, column_name, add_column_sql)
+    column_updates = [
+        (
+            "trading_signals", 
+            "pnl", 
+            "ALTER TABLE trading_signals ADD COLUMN pnl FLOAT NULL COMMENT '盈亏（绝对金额）'"
+        ),
+        (
+            "trading_signals", 
+            "pnl_pct", 
+            "ALTER TABLE trading_signals ADD COLUMN pnl_pct FLOAT NULL COMMENT '盈亏百分比'"
+        ),
+        (
+            "trading_signals", 
+            "is_winner", 
+            "ALTER TABLE trading_signals ADD COLUMN is_winner VARCHAR(8) NULL COMMENT 'YES/NO - 是否盈利交易'"
+        ),
+    ]
+
+    async with engine.begin() as conn:
+        for table_name, column_name, add_sql in column_updates:
+            try:
+                # 1. 检查表是否存在
+                result = await conn.execute(
+                    text(
+                        """
+                        SELECT COUNT(*)
+                        FROM information_schema.tables 
+                        WHERE table_schema = DATABASE() 
+                        AND table_name = :table_name
+                        """
+                    ),
+                    {"table_name": table_name}
+                )
+                if (result.scalar() or 0) == 0:
+                    continue
+
+                # 2. 检查列是否存在
+                result = await conn.execute(
+                    text(
+                        """
+                        SELECT COUNT(*)
+                        FROM information_schema.columns 
+                        WHERE table_schema = DATABASE() 
+                        AND table_name = :table_name 
+                        AND column_name = :column_name
+                        """
+                    ),
+                    {"table_name": table_name, "column_name": column_name}
+                )
+                exists = (result.scalar() or 0) > 0
+                
+                # 3. 如果不存在则添加
+                if not exists:
+                    await conn.execute(text(add_sql))
+            except Exception:
+                # 忽略错误，避免阻断启动
+                pass
+
+
 async def get_redis():
     """获取 Redis 客户端的依赖项"""
     return redis_client
