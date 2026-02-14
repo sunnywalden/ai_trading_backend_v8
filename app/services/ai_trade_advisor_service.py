@@ -113,6 +113,7 @@ class AITradeAdvisorService:
             fundamental=fundamental,
             kline=kline,
             equity=equity,
+            locale=locale,
         )
 
         return {
@@ -139,6 +140,7 @@ class AITradeAdvisorService:
         fundamental: Dict[str, Any],
         kline: Dict[str, Any],
         equity: float,
+        locale: str = "zh",
     ) -> Dict[str, Any]:
         """
         调用 GPT 综合多维数据，给出交易决策。
@@ -467,12 +469,14 @@ class AITradeAdvisorService:
             plan_svc = TradingPlanService(self.session)
             plan = await plan_svc.create_plan(
                 account_id=account_id,
-                symbol=symbol,
-                entry_price=Decimal(str(price)) if price else Decimal("0"),
-                stop_loss=Decimal(str(stop_loss)) if stop_loss else Decimal("0"),
-                take_profit=Decimal(str(take_profit)) if take_profit else Decimal("0"),
-                target_position=Decimal(str(position_pct)),
-                notes=f"AI决策: {decision.get('reasoning', '')}",
+                payload={
+                    "symbol": symbol,
+                    "entry_price": Decimal(str(price)) if price else Decimal("0"),
+                    "stop_loss": Decimal(str(stop_loss)) if stop_loss else Decimal("0"),
+                    "take_profit": Decimal(str(take_profit)) if take_profit else Decimal("0"),
+                    "target_position": Decimal(str(position_pct)),
+                    "notes": f"AI决策: {decision.get('reasoning', '')}",
+                }
             )
             return {
                 "status": "plan_created",

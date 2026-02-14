@@ -177,12 +177,14 @@ async def create_plan(
     svc = TradingPlanService(session)
     plan = await svc.create_plan(
         account_id=settings.TIGER_ACCOUNT,
-        symbol=request.symbol.upper(),
-        entry_price=Decimal(str(request.entry_price)),
-        stop_loss=Decimal(str(request.stop_loss)),
-        take_profit=Decimal(str(request.take_profit)),
-        target_position=Decimal(str(request.target_position)),
-        notes=request.notes,
+        payload={
+            "symbol": request.symbol.upper(),
+            "entry_price": Decimal(str(request.entry_price)),
+            "stop_loss": Decimal(str(request.stop_loss)),
+            "take_profit": Decimal(str(request.take_profit)),
+            "target_position": Decimal(str(request.target_position)),
+            "notes": request.notes,
+        }
     )
     await session.commit()
     return {"status": "ok", "plan": _plan_to_dict(plan)}
