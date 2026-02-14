@@ -245,7 +245,64 @@ python -m app.jobs.behavior_rebuild_job
 
 注意：宏观风险分析模块保持独立，引用的是更长周期的 FRED/CPI/利率等数据，**不会与上述日线趋势快照耦合**。
 
-## 🔧 技术栈
+## �️ 数据库迁移
+
+### 版本管理
+
+本项目使用版本化的数据库迁移脚本，确保数据库结构随代码同步更新。
+
+### 快速开始
+
+```bash
+# 1. 初始化版本管理
+python scripts/migrations/version_manager.py --init
+
+# 2. 查看当前版本
+python scripts/migrations/version_manager.py --current
+
+# 3. 升级数据库（例如升级到 v3.1.1）
+python scripts/migrations/upgrade_to_v3.1.1.py
+
+# 4. 验证数据库结构
+python scripts/migrations/verify_v3.1.1.py
+
+# 5. 记录版本
+python scripts/migrations/version_manager.py --record v3.1.1
+```
+
+### 生产环境升级
+
+⚠️ 生产环境升级前务必：
+1. 完整备份数据库
+2. 在测试环境验证升级流程
+3. 选择低峰期执行
+4. 准备回滚方案
+
+```bash
+# 备份数据库
+mysqldump -u root -p ai_trading > backup_$(date +%Y%m%d_%H%M%S).sql
+
+# 执行升级（需要确认）
+python scripts/migrations/upgrade_to_v3.1.1.py --production
+
+# 验证结果
+python scripts/migrations/verify_v3.1.1.py
+```
+
+### 版本历史
+
+| 版本 | 主要变更 |
+|------|---------|
+| v3.1.2 | 修复联调接口错误，优化前端导航交互，完善数据库迁移工具链 |
+| v3.1.1 | 新增策略通知表、信号性能跟踪表；扩展至15个策略；添加 action/direction/strategy_id 字段 |
+| v2.2.2 | 基础版本 |
+
+### 详细文档
+
+- [数据库迁移完整指南](docs/DATABASE_MIGRATIONS.md) - 详细的表结构和升级说明
+- [迁移脚本文档](scripts/migrations/README.md) - 脚本使用和开发指南
+
+## �🔧 技术栈
 
 - **Web 框架**：FastAPI
 - **异步 ORM**：SQLAlchemy (async)
