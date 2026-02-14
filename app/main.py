@@ -11,7 +11,7 @@ import os
 
 from app.core.config import settings
 from app.core.logging_config import setup_logging
-from app.models.db import engine, SessionLocal, get_session, redis_client, ensure_mysql_indexes, ensure_mysql_tables
+from app.models.db import engine, SessionLocal, get_session, redis_client, ensure_mysql_indexes, ensure_mysql_tables, ensure_mysql_schema_updates
 
 # 初始化系统日志
 setup_logging()
@@ -88,6 +88,7 @@ async def lifespan(app: FastAPI):
     # 启动时检查/创建MySQL表与索引
     try:
         await ensure_mysql_tables()
+        await ensure_mysql_schema_updates()  # 修复缺少的列
         await ensure_mysql_indexes()
         if settings.DB_TYPE == "mysql":
             logger.info("MySQL tables/indexes checked and ensured")

@@ -237,7 +237,7 @@ async def cleanup_old_data_job():
                 # 清理行为统计数据
                 result = await session.execute(
                     delete(SymbolBehaviorStats).where(
-                        SymbolBehaviorStats.last_updated < cutoff_behavior
+                        SymbolBehaviorStats.updated_at < cutoff_behavior
                     )
                 )
                 deleted_counts["behavior_stats"] = result.rowcount
@@ -245,7 +245,7 @@ async def cleanup_old_data_job():
                 # 清理风险档案数据
                 result = await session.execute(
                     delete(SymbolRiskProfile).where(
-                        SymbolRiskProfile.last_updated < cutoff_risk
+                        SymbolRiskProfile.updated_at < cutoff_risk
                     )
                 )
                 deleted_counts["risk_profiles"] = result.rowcount

@@ -62,6 +62,39 @@ async def fix_database_schema():
             else:
                 print("✓ 唯一约束 uk_account_symbol 已存在")
 
+            print("\n--- 开始检查 trading_signals 表结构 ---")
+            
+            # 4. 检查 trading_signals 表
+            columns_query = text("SHOW COLUMNS FROM trading_signals")
+            result = await conn.execute(columns_query)
+            ts_columns = [row[0] for row in result.fetchall()]
+            
+            print(f"trading_signals 当前列: {', '.join(ts_columns)}")
+            
+            # 检查 pnl_pct
+            if 'pnl_pct' not in ts_columns:
+                print("未发现 pnl_pct 列，正在添加...")
+                await conn.execute(text("ALTER TABLE trading_signals ADD COLUMN pnl_pct FLOAT NULL COMMENT '盈亏百分比'"))
+                print("✓ 成功添加 pnl_pct 列")
+            else:
+                print("✓ pnl_pct 列已存在")
+                
+            # 检查 pnl
+            if 'pnl' not in ts_columns:
+                print("未发现 pnl 列，正在添加...")
+                await conn.execute(text("ALTER TABLE trading_signals ADD COLUMN pnl FLOAT NULL COMMENT '盈亏（绝对金额）'"))
+                print("✓ 成功添加 pnl 列")
+            else:
+                print("✓ pnl 列已存在")
+
+            # 检查 is_winner
+            if 'is_winner' not in ts_columns:
+                print("未发现 is_winner 列，正在添加...")
+                await conn.execute(text("ALTER TABLE trading_signals ADD COLUMN is_winner VARCHAR(8) NULL COMMENT 'YES/NO - 是否盈利交易'"))
+                print("✓ 成功添加 is_winner 列")
+            else:
+                print("✓ is_winner 列已存在")
+
             print("--- 修复完成 ---")
             
         except Exception as e:

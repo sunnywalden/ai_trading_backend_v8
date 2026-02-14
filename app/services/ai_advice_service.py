@@ -381,6 +381,13 @@ class AiAdviceService:
                     else: data["action"] = "HOLD"
                 else:
                     data["action"] = a
+            
+            # 强化：处理 details 可能被 AI 返回为对象的情况
+            if "details" in data and not isinstance(data["details"], str):
+                if isinstance(data["details"], (dict, list)):
+                    data["details"] = json.dumps(data["details"], ensure_ascii=False, indent=2)
+                else:
+                    data["details"] = str(data["details"])
 
             return KlineAnalysisResponse(symbol=symbol, **data)
         except Exception as e:
@@ -523,7 +530,7 @@ class AiAdviceService:
             if resistance:
                 details += f"   - 阻力位（Resistance）: {', '.join([f'${round(r, 2)}' for r in resistance[:3]])}\n"
             if support:
-                details += f"   - 支撑位（Support）: {', '.join([f'${round(s, 2)}' for r in support[:3]])}\n"
+                details += f"   - 支撑位（Support）: {', '.join([f'${round(s, 2)}' for s in support[:3]])}\n"
             details += f"\n"
             
             details += f"** III. 风险收益比与仓位管理 **\n"
