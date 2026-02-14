@@ -1,0 +1,16 @@
+{
+  "error": {
+    "plan_not_found": "Trading plan {id} not found",
+    "signals_empty": "signal_ids cannot be empty",
+    "signal_not_found": "Signal not found",
+    "fetch_hotspots_failed": "Failed to fetch market hotspots: {error}",
+    "scheduler_disabled": "Scheduler disabled, cannot run async job",
+    "job_not_found": "Job not found: {id}",
+    "auth_disabled": "Authentication is disabled",
+    "login_failed": "Incorrect username or password",
+    "execution_failed": "Execution failed: {error}",
+    "sync_failed": "Sync failed: {error}",
+    "cycle_failed": "Cycle execution failed: {error}",
+    "delete_denied": "Record not found or access denied"
+  }
+}

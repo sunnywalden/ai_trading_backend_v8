@@ -57,6 +57,7 @@ class AITradeAdvisorService:
         symbols: List[str],
         account_id: Optional[str] = None,
         save_history: bool = True,
+        locale: str = "zh"
     ) -> List[Dict[str, Any]]:
         """
         并行评估多个标的，返回每个标的的多维分析 + AI 交易决策。
@@ -70,7 +71,7 @@ class AITradeAdvisorService:
         """
         account_id = account_id or settings.TIGER_ACCOUNT
         
-        tasks = [self._evaluate_single(sym, account_id) for sym in symbols]
+        tasks = [self._evaluate_single(sym, account_id, locale=locale) for sym in symbols]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         evaluations = []
@@ -91,7 +92,7 @@ class AITradeAdvisorService:
         
         return evaluations
 
-    async def _evaluate_single(self, symbol: str, account_id: str) -> Dict[str, Any]:
+    async def _evaluate_single(self, symbol: str, account_id: str, locale: str = "zh") -> Dict[str, Any]:
         """单标的多维评估"""
         # 并行获取各维度数据
         price_task = self._safe_get_price(symbol)
@@ -249,6 +250,9 @@ class AITradeAdvisorService:
 - 量化所有判断（避免 "可能"、"或许" 等模糊词）
 - 给出可执行的价格锚点和仓位数字"""
 
+        lang_instruction = "IMPORTANT: You MUST respond in English for text fields like 'reasoning', 'key_factors', 'scenarios' and 'catalysts'." if locale == "en" else "重要提示：必须使用中文返回 'reasoning', 'key_factors', 'scenarios' 和 'catalysts' 等文本字段。"
+        system_prompt += f"\n\n{lang_instruction}"
+        
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": json.dumps(context, ensure_ascii=False)},

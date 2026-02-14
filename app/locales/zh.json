@@ -1,0 +1,16 @@
+{
+  "error": {
+    "plan_not_found": "交易计划 {id} 不存在",
+    "signals_empty": "signal_ids不能为空",
+    "signal_not_found": "未找到信号",
+    "fetch_hotspots_failed": "获取市场热点失败: {error}",
+    "scheduler_disabled": "调度器已禁用，无法运行异步任务",
+    "job_not_found": "任务未找到: {id}",
+    "auth_disabled": "身份验证已禁用",
+    "login_failed": "用户名或密码错误",
+    "execution_failed": "执行失败: {error}",
+    "sync_failed": "同步失败: {error}",
+    "cycle_failed": "周期执行失败: {error}",
+    "delete_denied": "记录不存在或无权删除"
+  }
+}

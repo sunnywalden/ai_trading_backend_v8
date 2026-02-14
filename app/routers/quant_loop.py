@@ -4,8 +4,9 @@
 提供完整的监控、控制和报表接口
 """
 from fastapi import APIRouter, Depends, HTTPException, Query, Body
+from app.i18n import get_translator
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Optional, List
+from typing import Optional, List, Callable
 from datetime import datetime
 from pydantic import BaseModel
 
@@ -39,7 +40,8 @@ async def run_full_cycle(
     execute_trades: bool = False,
     optimize: bool = True,
     session: AsyncSession = Depends(get_session),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
+    t: Callable = Depends(get_translator)
 ):
     """
     运行完整的量化交易闭环周期
@@ -63,7 +65,7 @@ async def run_full_cycle(
             "data": results
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Cycle execution failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=t("error.cycle_failed", error=str(e)))
 
 
 @router.get("/status")
@@ -187,7 +189,8 @@ async def validate_signal(
 async def get_signal_summary(
     signal_id: str,
     session: AsyncSession = Depends(get_session),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
+    t: Callable = Depends(get_translator)
 ):
     """获取交易信号的AI生成摘要"""
     from sqlalchemy import select
@@ -199,7 +202,7 @@ async def get_signal_summary(
     signal = result.scalars().first()
     
     if not signal:
-        raise HTTPException(status_code=404, detail="Signal not found")
+        raise HTTPException(status_code=404, detail=t("error.signal_not_found"))
     
     ai_service = AIAnalysisService()
     
@@ -247,7 +250,8 @@ async def execute_signals_batch(
     request: ExecuteSignalsRequest,
     account_id: Optional[str] = None,
     session: AsyncSession = Depends(get_session),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
+    t: Callable = Depends(get_translator)
 ):
     """
     批量执行指定的信号
@@ -259,7 +263,7 @@ async def execute_signals_batch(
         account_id = settings.TIGER_ACCOUNT
     
     if not request.signal_ids:
-        raise HTTPException(status_code=400, detail="signal_ids不能为空")
+        raise HTTPException(status_code=400, detail=t("error.signals_empty"))
     
     executor = OrderExecutor(session)
     signal_engine = SignalEngine(session)
@@ -362,7 +366,8 @@ async def execute_signals_batch(
 async def reject_signals_batch(
     request: RejectSignalsRequest,
     session: AsyncSession = Depends(get_session),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
+    t: Callable = Depends(get_translator)
 ):
     """
     批量拒绝指定的信号
@@ -371,7 +376,7 @@ async def reject_signals_batch(
     - **reason**: 拒绝原因（可选）
     """
     if not request.signal_ids:
-        raise HTTPException(status_code=400, detail="signal_ids不能为空")
+        raise HTTPException(status_code=400, detail=t("error.signals_empty"))
     
     from sqlalchemy import select
     from app.models.trading_signal import TradingSignal, SignalStatus
@@ -389,7 +394,7 @@ async def reject_signals_batch(
             "data": {
                 "rejected_count": 0,
                 "failed_count": 0,
-                "message": "未找到指定的信号"
+                "message": t("error.signal_not_found")
             }
         }
     
@@ -621,7 +626,8 @@ async def get_dashboard_overview(
 async def sync_executing_orders(
     account_id: Optional[str] = None,
     session: AsyncSession = Depends(get_session),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
+    t: Callable = Depends(get_translator)
 ):
     """
     同步所有执行中订单的状态
@@ -642,4 +648,4 @@ async def sync_executing_orders(
             "data": result
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"同步失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=t("error.sync_failed", error=str(e)))

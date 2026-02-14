@@ -1,6 +1,7 @@
 """执行中心 API - Layer 3 集中管理所有待执行的交易计划"""
-from typing import Optional, List
+from typing import Optional, List, Callable
 from fastapi import APIRouter, Depends, HTTPException, Query
+from app.i18n import get_translator
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, Field
 
@@ -120,14 +121,15 @@ async def get_plans(
 @router.get("/plans/{plan_id}", response_model=TradingPlanResponse, summary="获取计划详情")
 async def get_plan_detail(
     plan_id: int,
-    session: AsyncSession = Depends(get_session)
+    session: AsyncSession = Depends(get_session),
+    t: Callable = Depends(get_translator)
 ):
     """获取单个交易计划的详细信息"""
     service = TradingPlanService(session)
     plan = await service.get_plan_by_id(plan_id)
     
     if not plan:
-        raise HTTPException(status_code=404, detail=f"交易计划 {plan_id} 不存在")
+        raise HTTPException(status_code=404, detail=t("error.plan_not_found", id=plan_id))
     
     return plan
 
@@ -135,7 +137,8 @@ async def get_plan_detail(
 @router.post("/plans", response_model=TradingPlanResponse, summary="创建交易计划")
 async def create_plan(
     request: TradingPlanCreate,
-    session: AsyncSession = Depends(get_session)
+    session: AsyncSession = Depends(get_session),
+    t: Callable = Depends(get_translator)
 ):
     """
     创建新的交易计划
@@ -160,7 +163,8 @@ async def create_plan(
 async def update_plan(
     plan_id: int,
     request: TradingPlanUpdate,
-    session: AsyncSession = Depends(get_session)
+    session: AsyncSession = Depends(get_session),
+    t: Callable = Depends(get_translator)
 ):
     """更新交易计划参数"""
     service = TradingPlanService(session)
@@ -171,7 +175,7 @@ async def update_plan(
     )
     
     if not plan:
-        raise HTTPException(status_code=404, detail=f"交易计划 {plan_id} 不存在")
+        raise HTTPException(status_code=404, detail=t("error.plan_not_found", id=plan_id))
     
     return plan
 
@@ -179,22 +183,24 @@ async def update_plan(
 @router.delete("/plans/{plan_id}", summary="删除交易计划")
 async def delete_plan(
     plan_id: int,
-    session: AsyncSession = Depends(get_session)
+    session: AsyncSession = Depends(get_session),
+    t: Callable = Depends(get_translator)
 ):
     """彻底删除交易计划"""
     service = TradingPlanService(session)
     success = await service.delete_plan(plan_id)
     
     if not success:
-        raise HTTPException(status_code=404, detail=f"交易计划 {plan_id} 不存在")
+        raise HTTPException(status_code=404, detail=t("error.plan_not_found", id=plan_id))
     
-    return {"success": True, "message": f"计划 {plan_id} 已删除"}
+    return {"success": True, "message": f"Plan {plan_id} deleted"}
 
 
 @router.post("/execute", summary="执行交易计划")
 async def execute_plans(
     request: ExecutePlanRequest,
-    session: AsyncSession = Depends(get_session)
+    session: AsyncSession = Depends(get_session),
+    t: Callable = Depends(get_translator)
 ):
     """
     执行一个或多个交易计划

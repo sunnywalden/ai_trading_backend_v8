@@ -231,8 +231,8 @@ class DatabaseVerifier:
         print("\n📋 测试示例查询...")
         
         queries = [
-            ("查询前5个策略", "SELECT id, name, category FROM strategies LIMIT 5"),
-            ("查询最近运行", "SELECT run_id, status, started_at FROM strategy_runs ORDER BY started_at DESC LIMIT 3"),
+            ("查询前5个策略", "SELECT id, name, style FROM strategies LIMIT 5"),
+            ("查询最近运行", "SELECT id, status, started_at FROM strategy_runs ORDER BY started_at DESC LIMIT 3"),
             ("查询通知记录", "SELECT id, channel, status FROM strategy_notifications LIMIT 3"),
         ]
         
