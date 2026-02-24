@@ -35,11 +35,12 @@ from app.models.audit_log import AuditLog
 from app.models.backtest_task import BacktestTask
 from app.models.portfolio_snapshot import PortfolioSnapshot
 from app.models.paper_account import PaperAccount
-from app.models.task_config import TaskConfig
+from app.models.task_config import TaskTriggerConfig
 from app.models.algo_execution_task import AlgoExecutionTask
 from app.models.position_eval_task import PositionEvalTask
 from app.models.autonomy_audit_log import AutonomyAuditLog
 from app.models.copilot_message import CopilotMessage
+from app.models.ai_evaluation_history import AIEvaluationHistory
 
 DEFAULT_BUILTIN_STRATEGIES = [
     {
