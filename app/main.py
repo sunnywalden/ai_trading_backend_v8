@@ -43,6 +43,15 @@ from app.routers import quant_loop  # NEW: 量化交易闭环路由
 from app.routers import execution_center  # NEW: 执行中心（Layer 3）
 from app.routers import ai_advisor  # AI 交易决策（统一入口）
 from app.routers import performance  # NEW: Alpha/Beta性能分析指标
+# V10 新路由
+from app.routers import autonomy      # V10: AI自主中枢
+from app.routers import copilot       # V10: AI助手
+from app.routers import backtest      # V10: 回测引擎
+from app.routers import portfolio     # V10: 组合优化
+from app.routers import stress_test   # V10: 压力测试
+from app.routers import paper_trading  # V10: 模拟盘
+from app.routers import options_analysis  # V10: 期权分析
+from app.routers import execution_algo    # V10: 算法执行
 # V9 routers
 from app.routers import dashboard as v9_dashboard
 from app.routers import dashboard_v2  # V10: 全新Dashboard
@@ -152,6 +161,15 @@ app.include_router(v9_journal.router, prefix="/api/v1", dependencies=[Depends(ge
 app.include_router(v9_alerts.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
 app.include_router(v9_orders.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
 app.include_router(v9_websocket.router, prefix="/api/v1")
+# V10 新路由注册
+app.include_router(autonomy.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
+app.include_router(copilot.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
+app.include_router(backtest.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
+app.include_router(portfolio.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
+app.include_router(stress_test.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
+app.include_router(paper_trading.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
+app.include_router(options_analysis.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
+app.include_router(execution_algo.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
 
 
 @app.get("/health")
