@@ -52,6 +52,7 @@ from app.routers import stress_test   # V10: 压力测试
 from app.routers import paper_trading  # V10: 模拟盘
 from app.routers import options_analysis  # V10: 期权分析
 from app.routers import execution_algo    # V10: 算法执行
+from app.routers import position_eval      # 持仓评估任务
 # V9 routers
 from app.routers import dashboard as v9_dashboard
 from app.routers import dashboard_v2  # V10: 全新Dashboard
@@ -170,6 +171,7 @@ app.include_router(stress_test.router, prefix="/api/v1", dependencies=[Depends(g
 app.include_router(paper_trading.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
 app.include_router(options_analysis.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
 app.include_router(execution_algo.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
+app.include_router(position_eval.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
 
 
 @app.get("/health")
