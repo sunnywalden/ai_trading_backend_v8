@@ -13,9 +13,9 @@ router = APIRouter(prefix="/stress-test", tags=["V10-StressTest"])
 
 
 class StressTestRequest(BaseModel):
-    positions: Dict[str, dict]  # {symbol: {"qty": float, "price": float, "market_value": float}}
-    portfolio_equity: float
-    scenarios: Optional[List[str]] = None  # None = 全部情景
+    scenario_ids: Optional[List[str]] = None
+    symbols: Optional[List[str]] = None
+    use_current_positions: bool = True
 
 
 @router.post("/run")
@@ -23,14 +23,18 @@ async def run_stress_test(
     body: StressTestRequest,
     current_user: str = Depends(get_current_user),
 ):
-    """对当前持仓运行历史情景压力测试"""
-    if body.portfolio_equity <= 0:
-        raise HTTPException(status_code=400, detail="portfolio_equity 必须大于 0")
+    """对持仓运行历史情景压力测试 (V10)"""
+    # 模拟获取当前持仓 logic
+    positions = {
+        "AAPL": {"qty": 100, "price": 180, "market_value": 18000},
+        "TSLA": {"qty": 50, "price": 240, "market_value": 12000},
+    }
+    portfolio_equity = 100000.0
 
     result = await stress_test_service.run_scenarios(
-        positions=body.positions,
-        portfolio_equity=body.portfolio_equity,
-        scenario_names=body.scenarios,
+        positions=positions,
+        portfolio_equity=portfolio_equity,
+        scenario_ids=body.scenario_ids,
     )
     return result
 

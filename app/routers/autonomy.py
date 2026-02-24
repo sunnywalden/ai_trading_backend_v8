@@ -23,17 +23,14 @@ class RevokeRequest(BaseModel):
 
 @router.get("/status")
 async def get_autonomy_status(current_user: str = Depends(get_current_user)):
-    """获取 AI 自主运行状态"""
+    """获取 AI 自主运行状态 (V10)"""
     return {
-        "autonomy_level": settings.AI_AUTONOMY_LEVEL,
-        "allowed_asset_types": settings.ALLOWED_ASSET_TYPES,
-        "max_single_position_pct": settings.MAX_SINGLE_POSITION_PCT,
-        "max_var_pct": settings.MAX_VAR_PCT,
+        "level": settings.AI_AUTONOMY_LEVEL,
+        "paused": not autonomous_engine.is_running,
+        "circuit_breaker_triggered": False,  # TODO: 从监控服务获取真实触发状态
+        "daily_trades_today": 0,             # TODO: 实时统计
         "max_daily_trades": settings.MAX_DAILY_TRADES,
-        "max_daily_loss_pct": settings.MAX_DAILY_LOSS_PCT,
         "revoke_window_minutes": settings.REVOKE_WINDOW_MINUTES,
-        "ai_lightweight_model": settings.AI_LIGHTWEIGHT_MODEL,
-        "ai_complex_model": settings.AI_COMPLEX_MODEL,
     }
 
 
@@ -54,16 +51,16 @@ async def update_autonomy_level(
 
 @router.post("/pause")
 async def pause_autonomy(current_user: str = Depends(get_current_user)):
-    """紧急暂停 AI（切换为 ADVISORY 模式）"""
-    settings.AI_AUTONOMY_LEVEL = "ADVISORY"
-    return {"success": True, "autonomy_level": "ADVISORY", "message": "AI 自主交易已暂停，切换为建议模式"}
+    """紧急暂停 AI (V10)"""
+    autonomous_engine.pause()
+    return {"success": True, "message": "AI 自主决策循环已停止"}
 
 
 @router.post("/resume")
 async def resume_autonomy(current_user: str = Depends(get_current_user)):
-    """恢复 AI 为 SEMI 模式"""
-    settings.AI_AUTONOMY_LEVEL = "SEMI"
-    return {"success": True, "autonomy_level": "SEMI", "message": "AI 已恢复半自主模式"}
+    """恢复 AI (V10)"""
+    autonomous_engine.resume()
+    return {"success": True, "message": "AI 自主决策循环已恢复"}
 
 
 @router.get("/audit-log")
@@ -106,7 +103,7 @@ async def get_audit_log(
 @router.post("/revoke/{exec_id}")
 async def revoke_order(
     exec_id: str = Path(..., description="审计日志中的 order_id"),
-    body: RevokeRequest = None,
+    body: Optional[RevokeRequest] = None,
     session: AsyncSession = Depends(get_session),
     current_user: str = Depends(get_current_user),
 ):

@@ -15,7 +15,7 @@ class RiskGateResult:
     passed: bool
     reason: Optional[str] = None
     circuit_breaker: bool = False
-    details: dict = None
+    details: Optional[dict] = None
 
     def __post_init__(self):
         if self.details is None:

@@ -1,5 +1,5 @@
 """V10: 回测中心路由"""
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -8,13 +8,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
 from app.engine.backtest.runner import backtest_runner
+from app.models.backtest_task import BacktestTask
 from app.models.db import get_session
 
 router = APIRouter(prefix="/backtest", tags=["V10-Backtest"])
 
 
 class BacktestRunRequest(BaseModel):
-    strategy_name: str
+    strategy_type: str  # V10 ALIGNMENT
     symbols: List[str]
     start_date: date
     end_date: date
@@ -29,12 +30,10 @@ async def run_backtest(
     current_user: str = Depends(get_current_user),
 ):
     """提交回测任务（同步执行，小数据集；大数据集建议用后台任务）"""
-    from app.models.backtest_task import BacktestTask
-    from datetime import datetime, timezone
 
     task = BacktestTask(
         account_id=current_user,
-        strategy_name=body.strategy_name,
+        strategy_name=body.strategy_type,
         symbols=body.symbols,
         start_date=body.start_date,
         end_date=body.end_date,
@@ -48,7 +47,7 @@ async def run_backtest(
 
     try:
         result = await backtest_runner.run(
-            strategy_name=body.strategy_name,
+            strategy_name=body.strategy_type,
             symbols=body.symbols,
             start=body.start_date,
             end=body.end_date,
@@ -89,7 +88,7 @@ async def list_tasks(
         "tasks": [
             {
                 "id": r[0],
-                "strategy_name": r[1],
+                "strategy_type": r[1],  # V10 FE Alignment
                 "symbols": r[2],
                 "status": r[3],
                 "result": r[4],

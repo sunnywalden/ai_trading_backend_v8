@@ -1,5 +1,5 @@
 """V10: Paper Trading 路由"""
-from typing import List
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -15,8 +15,9 @@ router = APIRouter(prefix="/paper-trading", tags=["V10-PaperTrading"])
 class PaperTradeRequest(BaseModel):
     symbol: str
     side: str  # BUY / SELL
-    qty: float
-    price: float
+    quantity: float
+    order_type: str = "MKT"
+    limit_price: Optional[float] = None
 
 
 class GraduationCheckRequest(BaseModel):
@@ -34,23 +35,23 @@ async def get_paper_status(
 
 
 @router.post("/trade")
-async def execute_paper_trade(
+async def execute_trade(
     body: PaperTradeRequest,
     session: AsyncSession = Depends(get_session),
     current_user: str = Depends(get_current_user),
 ):
-    """执行模拟交易"""
+    """执行模拟交易 (V10)"""
     if body.side.upper() not in ("BUY", "SELL"):
         raise HTTPException(status_code=400, detail="side 必须是 BUY 或 SELL")
-    if body.qty <= 0 or body.price <= 0:
-        raise HTTPException(status_code=400, detail="qty 和 price 必须大于 0")
+    if body.quantity <= 0:
+        raise HTTPException(status_code=400, detail="quantity 必须大于 0")
 
     result = await paper_trading_service.execute_paper_trade(
         account_id=current_user,
         symbol=body.symbol,
         side=body.side,
-        qty=body.qty,
-        price=body.price,
+        qty=body.quantity,
+        price=body.limit_price or 0.0,  # 简化：如果是 MKT 价格可在 service 层处理
         db=session,
     )
     if not result["success"]:

@@ -5,7 +5,7 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any, cast
 
 import numpy as np
 import pandas as pd
@@ -96,7 +96,7 @@ class BacktestRunner:
         # 4. 事件回放
         state = BacktestState(cash=initial_capital)
         for dt in all_dates:
-            prices = {sym: float(price_data[sym].loc[dt, "close"]) for sym in price_data if dt in price_data[sym].index}
+            prices = {sym: float(cast(Any, price_data[sym].loc[dt, "close"])) for sym in price_data if dt in price_data[sym].index}
             slices = {sym: price_data[sym].loc[:dt] for sym in price_data if dt in price_data[sym].index}
 
             signals = signal_fn(slices, state)  # {"AAPL": "BUY", "NVDA": "SELL", ...}
@@ -139,7 +139,7 @@ class BacktestRunner:
         # 5. 强制平仓
         if all_dates and state.positions:
             last_dt = all_dates[-1]
-            last_prices = {sym: float(price_data[sym].loc[last_dt, "close"]) for sym in state.positions if last_dt in price_data.get(sym, pd.DataFrame()).index}
+            last_prices = {sym: float(cast(Any, price_data[sym].loc[last_dt, "close"])) for sym in state.positions if last_dt in price_data.get(sym, pd.DataFrame()).index}
             for sym, qty in list(state.positions.items()):
                 pr = last_prices.get(sym, 0)
                 state.cash += qty * pr * (1 - COMMISSION)

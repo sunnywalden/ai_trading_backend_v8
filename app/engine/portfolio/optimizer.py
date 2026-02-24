@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import date, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any, cast
 
 import numpy as np
 import pandas as pd
@@ -26,6 +26,7 @@ class PortfolioOptimizer:
         method: str = "MARKOWITZ",
         lookback_days: int = 252,
         current_weights: Optional[Dict[str, float]] = None,
+        risk_free_rate: float = 0.04,
     ) -> dict:
         """
         返回:
@@ -48,15 +49,15 @@ class PortfolioOptimizer:
 
         if method == "MARKOWITZ":
             return await asyncio.to_thread(
-                self._markowitz, returns, symbols, current_weights
+                self._markowitz, returns, symbols, current_weights, risk_free_rate
             )
         elif method == "RISK_PARITY":
             return await asyncio.to_thread(
-                self._risk_parity, returns, symbols, current_weights
+                self._risk_parity, returns, symbols, current_weights, risk_free_rate
             )
         elif method == "KELLY":
             return await asyncio.to_thread(
-                self._kelly, returns, symbols, current_weights
+                self._kelly, returns, symbols, current_weights, risk_free_rate
             )
         else:
             raise ValueError(f"Unknown optimization method: {method}")
@@ -66,14 +67,13 @@ class PortfolioOptimizer:
     # ──────────────────────────────────────────
 
     def _markowitz(
-        self, returns: pd.DataFrame, symbols: List[str], current_weights: dict
+        self, returns: pd.DataFrame, symbols: List[str], current_weights: dict, rf: float = 0.04
     ) -> dict:
         from scipy.optimize import minimize
 
         mu = returns.mean() * 252
         cov = returns.cov() * 252
         n = len(symbols)
-        rf = 0.045
 
         def neg_sharpe(w):
             port_ret = w @ mu.values
@@ -89,19 +89,19 @@ class PortfolioOptimizer:
 
         # 有效前沿采样（50个点）
         frontier = []
-        for target_ret in np.linspace(float(mu.min()), float(mu.max()), 50):
-            cons = constraints + [{"type": "eq", "fun": lambda w, r=target_ret: w @ mu.values - r}]
-            res = minimize(lambda w: w @ cov.values @ w, w0, method="SLSQP", bounds=bounds, constraints=cons)
+        for target_ret in np.linspace(float(cast(Any, mu.min())), float(cast(Any, mu.max())), 50):
+            cons = constraints + [{"type": "eq", "fun": lambda w, r=target_ret: cast(Any, w) @ cast(Any, mu.values) - r}]
+            res = minimize(lambda w: cast(Any, w) @ cast(Any, cov.values) @ cast(Any, w), w0, method="SLSQP", bounds=bounds, constraints=cons)
             if res.success:
                 vol = np.sqrt(res.fun)
                 frontier.append({"return": round(target_ret, 4), "volatility": round(vol, 4)})
 
-        port_ret = float(opt_w @ mu.values)
-        port_vol = float(np.sqrt(opt_w @ cov.values @ opt_w))
+        port_ret = float(cast(Any, opt_w) @ cast(Any, mu.values))
+        port_vol = float(np.sqrt(cast(Any, opt_w) @ cast(Any, cov.values) @ cast(Any, opt_w)))
         sharpe = (port_ret - rf) / port_vol if port_vol > 0 else 0.0
 
         return {
-            "target_weights": {sym: round(float(w), 4) for sym, w in zip(symbols, opt_w)},
+            "target_weights": {sym: round(float(cast(Any, w)), 4) for sym, w in zip(symbols, opt_w)},
             "current_weights": current_weights,
             "frontier_data": frontier,
             "expected_return": round(port_ret, 4),
@@ -115,7 +115,7 @@ class PortfolioOptimizer:
     # ──────────────────────────────────────────
 
     def _risk_parity(
-        self, returns: pd.DataFrame, symbols: List[str], current_weights: dict
+        self, returns: pd.DataFrame, symbols: List[str], current_weights: dict, rf: float = 0.04
     ) -> dict:
         from scipy.optimize import minimize
 
@@ -127,7 +127,7 @@ class PortfolioOptimizer:
             marginal_risk = (cov @ w) / port_vol
             risk_contrib = w * marginal_risk
             target = port_vol / n
-            return float(np.sum((risk_contrib - target) ** 2))
+            return float(cast(Any, np.sum((risk_contrib - target) ** 2)))
 
         constraints = [{"type": "eq", "fun": lambda w: np.sum(w) - 1}]
         bounds = [(0.01, MAX_SINGLE_WEIGHT)] * n
@@ -136,16 +136,16 @@ class PortfolioOptimizer:
         opt_w = result.x if result.success else w0
 
         mu = returns.mean() * 252
-        port_ret = float(opt_w @ mu.values)
-        port_vol = float(np.sqrt(opt_w @ cov @ opt_w))
+        port_ret = float(cast(Any, opt_w) @ cast(Any, mu.values))
+        port_vol = float(np.sqrt(cast(Any, opt_w) @ cast(Any, cov) @ cast(Any, opt_w)))
 
         return {
-            "target_weights": {sym: round(float(w), 4) for sym, w in zip(symbols, opt_w)},
+            "target_weights": {sym: round(float(cast(Any, w)), 4) for sym, w in zip(symbols, opt_w)},
             "current_weights": current_weights,
             "frontier_data": [],
             "expected_return": round(port_ret, 4),
             "expected_volatility": round(port_vol, 4),
-            "sharpe_ratio": round((port_ret - 0.045) / port_vol, 4) if port_vol > 0 else 0.0,
+            "sharpe_ratio": round((port_ret - rf) / port_vol, 4) if port_vol > 0 else 0.0,
             "method": "RISK_PARITY",
         }
 
@@ -154,7 +154,7 @@ class PortfolioOptimizer:
     # ──────────────────────────────────────────
 
     def _kelly(
-        self, returns: pd.DataFrame, symbols: List[str], current_weights: dict
+        self, returns: pd.DataFrame, symbols: List[str], current_weights: dict, rf: float = 0.04
     ) -> dict:
         mu = returns.mean() * 252
         cov = returns.cov() * 252
@@ -163,7 +163,7 @@ class PortfolioOptimizer:
         except np.linalg.LinAlgError:
             inv_cov = np.linalg.pinv(cov.values)
 
-        kelly_w = inv_cov @ mu.values
+        kelly_w = cast(Any, inv_cov) @ cast(Any, mu.values)
         kelly_w = np.clip(kelly_w, 0, None)
         if kelly_w.sum() > 0:
             kelly_w /= kelly_w.sum()
@@ -173,16 +173,16 @@ class PortfolioOptimizer:
         half_w = np.clip(half_w, 0, MAX_SINGLE_WEIGHT)
         half_w /= half_w.sum() if half_w.sum() > 0 else 1
 
-        port_ret = float(half_w @ mu.values)
-        port_vol = float(np.sqrt(half_w @ cov.values @ half_w))
+        port_ret = float(cast(Any, half_w) @ cast(Any, mu.values))
+        port_vol = float(np.sqrt(cast(Any, half_w) @ cast(Any, cov.values) @ cast(Any, half_w)))
 
         return {
-            "target_weights": {sym: round(float(w), 4) for sym, w in zip(symbols, half_w)},
+            "target_weights": {sym: round(float(cast(Any, w)), 4) for sym, w in zip(symbols, half_w)},
             "current_weights": current_weights,
             "frontier_data": [],
             "expected_return": round(port_ret, 4),
             "expected_volatility": round(port_vol, 4),
-            "sharpe_ratio": round((port_ret - 0.045) / port_vol, 4) if port_vol > 0 else 0.0,
+            "sharpe_ratio": round((port_ret - rf) / port_vol, 4) if port_vol > 0 else 0.0,
             "method": "KELLY",
         }
 
@@ -195,10 +195,11 @@ class PortfolioOptimizer:
         results = await asyncio.gather(*tasks, return_exceptions=True)
         close_dict = {}
         for sym, r in zip(symbols, results):
-            if isinstance(r, Exception):
+            if isinstance(r, BaseException):
                 logger.warning(f"Portfolio optimizer: skip {sym}: {r}")
                 continue
-            close_dict[sym] = r["close"]
+            # pd.DataFrame Access
+            close_dict[sym] = cast(Any, r)["close"]
 
         if not close_dict:
             return pd.DataFrame()

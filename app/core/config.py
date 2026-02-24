@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit, quote_plus
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -120,8 +121,8 @@ class Settings(BaseSettings):
     # 用于签发 JWT token 的密钥，请在部署时设置为强随机值
     JWT_SECRET_KEY: str = "change-me-please"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
-    STRATEGY_EXECUTE_USERS: list[str] = ["admin"]
-    STRATEGY_MANAGE_USERS: list[str] = ["admin"]
+    STRATEGY_EXECUTE_USERS: Any = ["admin"]
+    STRATEGY_MANAGE_USERS: Any = ["admin"]
     EXPORT_ROOT: str = "./exports"
 
     # FRED API 配置（宏观经济数据）
@@ -212,6 +213,14 @@ class Settings(BaseSettings):
         case_sensitive=True,
         extra="ignore",
     )
+
+    @field_validator("STRATEGY_EXECUTE_USERS", "STRATEGY_MANAGE_USERS", mode="before")
+    @classmethod
+    def _parse_user_list(cls, v: Any) -> list[str]:
+        if isinstance(v, str):
+            # 支持逗号分隔
+            return [x.strip() for x in v.split(",") if x.strip()]
+        return v
 
     @field_validator("TIGER_PRIVATE_KEY_PATH", mode="before")
     @classmethod

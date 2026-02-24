@@ -117,9 +117,9 @@ class DataHub:
         self, symbol: str, start: date, end: date, interval: str
     ) -> pd.DataFrame:
         """Tiger API OHLCV — 需要有效 Tiger 账户配置"""
-        from app.broker.factory import get_option_client  # 复用 broker factory
+        from app.broker.factory import make_option_broker_client  # 复用 broker factory
 
-        client = get_option_client()
+        client = make_option_broker_client()
         # 若是 DummyClient，抛出异常让 fallback 处理
         from app.broker.dummy_option_client import DummyOptionClient
 

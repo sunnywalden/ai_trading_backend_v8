@@ -73,24 +73,48 @@ class CopilotService:
         }
         return response
 
-    async def morning_brief(self, account_id: str) -> str:
-        """每日 08:15 生成盘前摘要（复杂模型）"""
+    async def morning_brief(self, account_id: str) -> dict:
+        """每日 08:15 生成盘前摘要 (V10 structured)"""
         context = await self._build_context(account_id)
         prompt = f"""你是专业量化交易 AI，请基于以下信息生成今日盘前交易摘要。
 
 当前状态：{json.dumps(context, ensure_ascii=False, indent=2)}
 
-请生成结构化摘要，包含：
-1. 昨日表现回顾（盈亏、关键事件）
-2. 今日 AI 计划（策略扫描安排）
-3. 重点关注标的 TOP3（理由）
-4. 主要风险提示
-
-使用中文，格式清晰。"""
+请务必按以下 JSON 格式输出：
+{{
+  "date": "YYYY-MM-DD",
+  "summary": "概要描述",
+  "market_outlook": "市场展望",
+  "top_signals": [
+    {{"symbol": "AAPL", "action": "BUY", "reason": "突破压力位"}}
+  ],
+  "risk_alerts": ["波动率上升", "关键支撑位跌破"]
+}}
+仅输出 JSON。"""
 
         messages = [{"role": "user", "content": prompt}]
-        response, _, _ = await self._call_ai(messages, "complex")
-        return response
+        raw_response, _, _ = await self._call_ai(messages, "complex")
+        
+        try:
+            # 简单提取 JSON
+            match = re.search(r"(\{.*\})", raw_response, re.DOTALL)
+            if match:
+                return json.loads(match.group(1))
+            return {
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "summary": raw_response[:200] + "...",
+                "market_outlook": "AI 正在分析中...",
+                "top_signals": [],
+                "risk_alerts": []
+            }
+        except Exception:
+            return {
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "summary": "解析摘要失败",
+                "market_outlook": raw_response,
+                "top_signals": [],
+                "risk_alerts": []
+            }
 
     async def confirm_action(
         self, account_id: str, action_id: str, db: AsyncSession
