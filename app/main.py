@@ -65,6 +65,7 @@ from app.routers import websocket as v9_websocket
 from app.jobs.scheduler import init_scheduler, start_scheduler, shutdown_scheduler, add_job
 from app.jobs.data_refresh_jobs import register_all_jobs
 from app.jobs.quant_loop_jobs import register_quant_loop_jobs  # NEW: 闭环定时任务
+from app.jobs.task_config_jobs import register_task_config_jobs  # V10: 动态配置同步任务
 from app.core.proxy import apply_proxy_env, ProxyConfig
 from app.core.auth import get_current_user, login_for_access_token
 from fastapi.security import OAuth2PasswordRequestForm
@@ -87,16 +88,6 @@ async def lifespan(app: FastAPI):
         )
     )
 
-    scheduler = None
-    if settings.ENABLE_SCHEDULER:
-        scheduler = init_scheduler()
-        register_all_jobs(scheduler)
-        register_quant_loop_jobs(scheduler)  # NEW: 注册量化交易闭环任务
-        start_scheduler()
-        logger.info("Scheduler started with periodic tasks")
-    else:
-        logger.info("Scheduler disabled (ENABLE_SCHEDULER=false)")
-
     # 启动时检查/创建MySQL表与索引
     try:
         await ensure_mysql_tables()
@@ -106,6 +97,17 @@ async def lifespan(app: FastAPI):
             logger.info("MySQL tables/indexes checked and ensured")
     except Exception as e:
         logger.error(f"Failed to ensure MySQL tables/indexes: {e}")
+
+    scheduler = None
+    if settings.ENABLE_SCHEDULER:
+        scheduler = init_scheduler()
+        register_all_jobs(scheduler)
+        register_quant_loop_jobs(scheduler)  # NEW: 注册量化交易闭环任务
+        register_task_config_jobs(scheduler)   # V10: 注册动态配置同步任务
+        start_scheduler()
+        logger.info("Scheduler started with periodic tasks")
+    else:
+        logger.info("Scheduler disabled (ENABLE_SCHEDULER=false)")
     
     yield
     

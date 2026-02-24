@@ -66,7 +66,7 @@ async def trigger_task(
             except Exception as exc:
                 logger.exception("Background eval task %s failed: %s", task.id, exc)
 
-    background_tasks.add_task(asyncio.ensure_future, _run())
+    background_tasks.add_task(_run)
     return PositionEvalTaskView.model_validate(task)
 
 
