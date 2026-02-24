@@ -42,11 +42,28 @@ async def get_latest_snapshot(
         if not row:
             return {}  # V10: Return empty object instead of null to avoid client-side or middleware issues
         
+        import json
         data = dict(row._mapping)
+        
+        # V10: Ensure JSON strings are parsed to dict/list for frontend
+        weights = data["weights"]
+        if isinstance(weights, str):
+            try:
+                weights = json.loads(weights)
+            except:
+                pass
+        
+        frontier = data["frontier"]
+        if isinstance(frontier, str):
+            try:
+                frontier = json.loads(frontier)
+            except:
+                pass
+
         return {
             "method": data["method"],
-            "weights": data["weights"],
-            "frontier": data["frontier"],
+            "weights": weights,
+            "frontier": frontier,
             "metrics": {
                 "expected_return": float(data["expected_return"]) if data["expected_return"] else 0,
                 "volatility": float(data["volatility"]) if data["volatility"] else 0,

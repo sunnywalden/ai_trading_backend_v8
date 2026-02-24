@@ -167,6 +167,7 @@ app.include_router(v9_websocket.router, prefix="/api/v1")
 # V10 新路由注册
 app.include_router(portfolio.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
 app.include_router(autonomy.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
+app.include_router(backtest.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
 app.include_router(copilot.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
 app.include_router(stress_test.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
 app.include_router(paper_trading.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])

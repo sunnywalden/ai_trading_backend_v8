@@ -1,6 +1,6 @@
 """V10: 回测中心路由"""
 from datetime import date, datetime, timezone
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -21,6 +21,7 @@ class BacktestRunRequest(BaseModel):
     end_date: date
     initial_capital: float = 100000.0
     walk_forward: bool = False
+    params: Optional[Dict[str, Any]] = None
 
 
 @router.post("/run")
