@@ -5,11 +5,9 @@ from typing import List, Optional
 from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.position_eval_config import PositionEvalConfig
+from app.models.task_config import TaskTriggerConfig
 from app.models.position_eval_task import PositionEvalTask
 from app.schemas.position_eval import (
-    PositionEvalConfigCreate,
-    PositionEvalConfigUpdate,
     TriggerEvalTaskRequest,
 )
 
@@ -17,75 +15,10 @@ logger = logging.getLogger(__name__)
 
 
 class PositionEvalService:
-    """持仓评估任务服务"""
+    """持仓评估任务服务（仅处理任务执行和结果，配置由 TaskTriggerConfigService 管理）"""
 
     def __init__(self, session: AsyncSession):
         self.session = session
-
-    # ─────────────────────────────────────────
-    # 配置管理
-    # ─────────────────────────────────────────
-
-    async def list_configs(self, account_id: str) -> List[PositionEvalConfig]:
-        result = await self.session.execute(
-            select(PositionEvalConfig)
-            .where(PositionEvalConfig.account_id == account_id)
-            .order_by(PositionEvalConfig.created_at.desc())
-        )
-        return list(result.scalars().all())
-
-    async def get_config(self, account_id: str, config_id: int) -> Optional[PositionEvalConfig]:
-        result = await self.session.execute(
-            select(PositionEvalConfig).where(
-                PositionEvalConfig.id == config_id,
-                PositionEvalConfig.account_id == account_id,
-            )
-        )
-        return result.scalar_one_or_none()
-
-    async def create_config(
-        self, account_id: str, data: PositionEvalConfigCreate
-    ) -> PositionEvalConfig:
-        config = PositionEvalConfig(
-            account_id=account_id,
-            name=data.name,
-            description=data.description,
-            scope=data.scope.value,
-            symbols=data.symbols,
-            eval_dimensions=data.eval_dimensions,
-            trigger_mode=data.trigger_mode.value,
-            trigger_time=data.trigger_time,
-            enabled=data.enabled,
-            extra_params=data.extra_params,
-        )
-        self.session.add(config)
-        await self.session.commit()
-        await self.session.refresh(config)
-        return config
-
-    async def update_config(
-        self, account_id: str, config_id: int, data: PositionEvalConfigUpdate
-    ) -> Optional[PositionEvalConfig]:
-        config = await self.get_config(account_id, config_id)
-        if config is None:
-            return None
-        for field, value in data.model_dump(exclude_unset=True).items():
-            # scope / trigger_mode 需要取 .value（Enum → str）
-            if hasattr(value, "value"):
-                value = value.value
-            setattr(config, field, value)
-        config.updated_at = datetime.utcnow()
-        await self.session.commit()
-        await self.session.refresh(config)
-        return config
-
-    async def delete_config(self, account_id: str, config_id: int) -> bool:
-        config = await self.get_config(account_id, config_id)
-        if config is None:
-            return False
-        await self.session.delete(config)
-        await self.session.commit()
-        return True
 
     # ─────────────────────────────────────────
     # 任务管理
@@ -147,22 +80,30 @@ class PositionEvalService:
     async def trigger_task(
         self, account_id: str, req: TriggerEvalTaskRequest
     ) -> PositionEvalTask:
-        """手动创建一个待执行任务"""
+        """从配置触发或手动触发持仓评估"""
         config_name: Optional[str] = None
         symbols = req.symbols
         eval_dimensions = req.eval_dimensions
         extra_params = req.extra_params
         scope = req.scope.value
 
-        # 若提供了 config_id，合并配置参数
         if req.config_id:
-            config = await self.get_config(account_id, req.config_id)
+            # 修改：使用统一的任务配置模型 TaskTriggerConfig
+            res = await self.session.execute(
+                select(TaskTriggerConfig).where(
+                    TaskTriggerConfig.id == req.config_id,
+                    TaskTriggerConfig.account_id == account_id
+                )
+            )
+            config = res.scalar_one_or_none()
             if config:
                 config_name = config.name
-                scope = config.scope
-                symbols = symbols or config.symbols
-                eval_dimensions = eval_dimensions or config.eval_dimensions
-                extra_params = extra_params or config.extra_params
+                params = config.params or {}
+                # 兼容原有字段
+                scope = params.get("scope", scope)
+                symbols = symbols or params.get("symbols", [])
+                eval_dimensions = eval_dimensions or params.get("eval_dimensions", [])
+                extra_params = extra_params or params.get("extra_params", {})
 
         task = PositionEvalTask(
             account_id=account_id,
@@ -264,8 +205,16 @@ class PositionEvalService:
         else:
             # 从 broker 拉取当前持仓
             try:
-                positions_raw = await broker.get_positions(account_id)
-                symbols = [p.symbol for p in positions_raw if p.symbol]
+                # 获取股票/ETF持仓
+                u_positions = await broker.list_underlying_positions(account_id)
+                symbols = [p.symbol for p in u_positions if p.symbol]
+                
+                # 如果有期权持仓也包含进来
+                o_positions = await broker.list_option_positions(account_id)
+                symbols.extend([p.contract.underlying for p in o_positions if p.contract.underlying])
+                
+                # 去重
+                symbols = list(set(symbols))
             except Exception:
                 symbols = []
 
