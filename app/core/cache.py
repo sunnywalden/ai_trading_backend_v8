@@ -29,7 +29,7 @@ class RedisCache:
                 return data
         return data
 
-    async def set(self, key: str, value: Any, expire: Union[int, timedelta] = None, is_json: bool = True) -> bool:
+    async def set(self, key: str, value: Any, expire: Union[int, timedelta, None] = None, is_json: bool = True) -> bool:
         if not redis_client:
             return False
         

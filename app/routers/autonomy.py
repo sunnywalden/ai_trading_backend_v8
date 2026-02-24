@@ -7,6 +7,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
 from app.core.config import settings
+from app.core.runtime_config import (
+    get_autonomy_level,
+    set_autonomy_level,
+    clear_autonomy_level_override,
+)
 from app.models.db import get_session
 from app.services.autonomous_engine import autonomous_engine
 
@@ -25,7 +30,7 @@ class RevokeRequest(BaseModel):
 async def get_autonomy_status(current_user: str = Depends(get_current_user)):
     """获取 AI 自主运行状态 (V10)"""
     return {
-        "level": settings.AI_AUTONOMY_LEVEL,
+        "level": await get_autonomy_level(),
         "paused": not autonomous_engine.is_running,
         "circuit_breaker_triggered": False,  # TODO: 从监控服务获取真实触发状态
         "daily_trades_today": 0,             # TODO: 实时统计
@@ -43,9 +48,8 @@ async def update_autonomy_level(
     valid = {"FULL", "SEMI", "ADVISORY"}
     if body.level not in valid:
         raise HTTPException(status_code=400, detail=f"Invalid level. Must be one of: {valid}")
-    # 注意：settings 在进程内修改不持久化到 .env，重启后复原
-    # 生产环境应写入数据库配置表
-    settings.AI_AUTONOMY_LEVEL = body.level
+    # 写入 Redis 持久化 + 更新进程内值；重启后仍生效
+    await set_autonomy_level(body.level)
     return {"success": True, "autonomy_level": body.level}
 
 
