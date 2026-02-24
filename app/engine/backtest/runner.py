@@ -181,11 +181,12 @@ class BacktestRunner:
 
         # 汇总各窗口均值
         avg = {}
-        for k in ["annualized_return", "sharpe", "sortino", "max_drawdown", "win_rate", "alpha"]:
+        for k in ["annualized_return", "total_return", "sharpe", "sortino", "max_drawdown", "win_rate", "alpha"]:
             vals = [r.get(k, 0) for r in results if r.get(k) is not None]
             avg[k] = round(float(np.mean(vals)), 4) if vals else 0.0
         avg["walk_forward"] = True
         avg["windows"] = len(results)
+        avg["windows_results"] = results  # V10: Include raw window results for report
         avg["graduation_eligible"] = self._check_graduation(avg)
         return avg
 
