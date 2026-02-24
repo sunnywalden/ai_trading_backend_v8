@@ -143,8 +143,8 @@ class CopilotService:
             # TODO: 调用 position_service.close_all
             pass
         elif intent["type"] == "pause_autonomy":
-            # TODO: 更新 settings.AI_AUTONOMY_LEVEL = "ADVISORY"
-            pass
+            from app.core.runtime_config import set_autonomy_level as _set_level
+            await _set_level("ADVISORY")
 
         # 标记已确认
         await db.execute(
@@ -174,10 +174,11 @@ class CopilotService:
 
     async def _build_context(self, account_id: str) -> dict:
         """构建账户上下文摘要（简化）"""
+        from app.core.runtime_config import get_autonomy_level as _get_level
         return {
             "account_id": account_id,
             "date": date.today().isoformat(),
-            "autonomy_level": settings.AI_AUTONOMY_LEVEL,
+            "autonomy_level": await _get_level(),
         }
 
     def _build_system_prompt(self, context: dict) -> str:

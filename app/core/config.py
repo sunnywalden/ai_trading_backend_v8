@@ -203,6 +203,11 @@ class Settings(BaseSettings):
     BACKTEST_COMMISSION_PCT: float = 0.001  # 模拟佣金 0.1%
     BACKTEST_SLIPPAGE_PCT: float = 0.0005   # 模拟滑点 0.05%
 
+    # 持仓监控 & 自动止损/止盈
+    POSITION_STOP_LOSS_PCT: float = 0.05    # 止损阈值：浮亏 >= 5% 触发 EXIT 信号
+    POSITION_TAKE_PROFIT_PCT: float = 0.15  # 止盈阈值：浮盈 >= 15% 触发 EXIT 信号
+    POSITION_MONITOR_INTERVAL_MINUTES: int = 15  # 持仓扫描间隔（分钟）
+
     # AI 周报定时（每周一 08:00 生成上周复盘）
     SCHEDULER_WEEKLY_REPORT_DAY: str = "mon"
     SCHEDULER_WEEKLY_REPORT_HOUR: int = 8
