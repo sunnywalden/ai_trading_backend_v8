@@ -1,7 +1,9 @@
 # 后端架构设计文档
 
 > **AI量化交易闭环系统** - Backend Design  
-> 版本：V9.0 | 更新日期：2026-02-13
+> 版本：V10.0 | 更新日期：2026-02-24
+> 
+> **V10 变更摘要**：AI 自主决策引擎（三级自主模式）、DataHub 多源路由、BacktestEngine（Walk-Forward）、PortfolioOptimizer（Markowitz+Kelly）、RiskGate 风险门、压力测试服务、TWAP/VWAP 执行算法、Trading Copilot、Paper Trading、期权分析中心（只读）、AI 周报服务、6 张新增 DB 表
 
 ---
 
@@ -14,92 +16,88 @@
 - **缓存**：Redis 7.0
 - **调度器**：APScheduler
 - **券商接口**：Tiger Trade API
-- **AI**：OpenAI GPT-4 + DeepSeek
+- **AI**：OpenAI（gpt-4o-mini / gpt-5.2）+ DeepSeek（deepseek-chat / deepseek-reasoner）
+- **数据源**：yfinance (主) + FRED (宏观) + Tiger (实时报价) — DataHub 多源路由
 
-### 1.2 项目结构
+### 1.2 AI 模型路由策略
+
+| 场景 | 轻量（默认） | 复杂推理 |
+|------|-------------|---------|
+| Copilot 对话 | deepseek-chat / gpt-4o-mini | deepseek-reasoner / gpt-5.2 |
+| 自主决策引擎 | — | deepseek-reasoner / gpt-5.2 |
+| 周报/深度分析 | — | deepseek-reasoner / gpt-5.2 |
+| 信号简单摘要 | deepseek-chat / gpt-4o-mini | — |
+
+路由逻辑：`AI_LIGHTWEIGHT_MODEL` / `AI_COMPLEX_MODEL` 从 config 读取；客户端统一使用 `BaseAIClient`。
+
+### 1.3 项目结构
 
 ```
-# 仓库（扁平化后）
 ├── app/
-│   ├── main.py                    # FastAPI 应用入口
+│   ├── main.py                       # FastAPI 应用入口（V10: 注册 24 个路由组）
 │   ├── core/
-│   │   ├── config.py             # 环境配置（Pydantic Settings）
-│   │   ├── security.py           # JWT + bcrypt
-│   │   └── dependencies.py       # 依赖注入
-│   │  
-│   ├── models/                   # SQLAlchemy 数据模型 (15+ 表)
-│   │   ├── db.py                 # 异步引擎 + SessionLocal
-│   │   ├── trading_signal.py     # 交易信号
-│   │   ├── trading_plan.py       # 交易计划
-│   │   ├── equity_snapshot.py    # 账户权益快照
-│   │   ├── trade_journal.py      # 交易日志
-│   │   ├── price_alert.py        # 价格告警
-│   │   ├── ai_evaluation_history.py  # AI 评估历史
-│   │   └── ...                   # 策略/持仓/行为评分等
+│   │   ├── config.py                 # 新增 12 个 V10 配置项
+│   │   ├── security.py               # JWT + bcrypt
+│   │   └── dependencies.py           # 依赖注入
 │   │
-│   ├── schemas/                  # Pydantic 响应模型
-│   │   ├── dashboard_v2.py       # Dashboard V2 数据结构
-│   │   ├── signals.py
-│   │   ├── trading_plan.py
-│   │   └── ...
+│   ├── data/
+│   │   └── hub.py                    # V10 新增：DataHub 多源路由
 │   │
-│   ├── services/                 # 业务逻辑层 (20+ 服务)
-│   │   ├── ai_trade_advisor_service.py  # AI 交易决策
-│   │   ├── signal_service.py     # 信号管理
-│   │   ├── trading_plan_service.py      # 计划管理
-│   │   ├── order_service.py      # 订单执行
-│   │   ├── dashboard_v2_service.py      # Dashboard V2
-│   │   ├── technical_analysis_service.py
-│   │   ├── fundamental_analysis_service.py
-│   │   ├── behavior_scoring_service.py
-│   │   ├── alert_service.py
-│   │   ├── equity_service.py
-│   │   ├── journal_service.py
-│   │   └── ...
+│   ├── models/                       # SQLAlchemy 数据模型 (21+ 表)
+│   │   ├── ...（原有 15 张表）
+│   │   ├── backtest_task.py          # V10 新增
+│   │   ├── portfolio_snapshot.py     # V10 新增
+│   │   ├── paper_account.py          # V10 新增
+│   │   ├── copilot_message.py        # V10 新增
+│   │   ├── algo_execution_task.py    # V10 新增
+│   │   └── autonomy_audit_log.py     # V10 新增
 │   │
-│   ├── engine/                   # 核心引擎
-│   │   ├── signal_engine.py      # 信号引擎
-│   │   ├── order_executor.py     # 订单执行引擎
-│   │   ├── performance_analyzer.py # 性能分析器
-│   │   ├── adaptive_optimizer.py # 自适应优化器
-│   │   ├── quant_trading_loop.py # 闭环协调器
-│   │   ├── auto_hedge_engine.py  # 自动对冲引擎（已有）
-│   │   └── alert_engine.py       # 价格告警引擎
+│   ├── schemas/                      # Pydantic 响应模型
+│   │   └── ...（原有 + 8 组新增）
 │   │
-│   ├── routers/                  # API 路由层 (16+ 端点组)
-│   │   ├── dashboard_v2.py       # GET /api/v1/dashboard/v2/{full,quick}
-│   │   ├── ai_advisor.py         # AI 决策相关
-│   │   ├── signals.py            # 信号管理
-│   │   ├── trading_plan.py       # 计划管理
-│   │   ├── strategies.py         # 策略库管理（新增）
-│   │   ├── positions.py          # 持仓评估
-│   │   ├── macro_risk.py         # 宏观风险
-│   │   ├── opportunities.py      # 潜在机会
-│   │   ├── alerts.py             # 价格告警
-│   │   ├── equity.py             # 资金曲线
-│   │   ├── journal.py            # 交易日志
-│   │   ├── orders.py             # 订单管理
-│   │   ├── websocket.py          # WebSocket 推送
-│   │   └── ...
+│   ├── services/                     # 业务逻辑层 (28+ 服务)
+│   │   ├── ...（原有 20 个服务）
+│   │   ├── risk_gate_service.py      # V10 新增：非绕过 VaR+压测门
+│   │   ├── autonomous_engine.py      # V10 新增：三级自主决策引擎
+│   │   ├── stress_test_service.py    # V10 新增
+│   │   ├── twap_vwap_service.py      # V10 新增：执行算法
+│   │   ├── copilot_service.py        # V10 新增：对话式接口
+│   │   ├── options_analysis_service.py # V10 新增（只读）
+│   │   ├── paper_trading_service.py  # V10 新增
+│   │   └── weekly_report_service.py  # V10 新增
 │   │
-│   ├── broker/                   # 券商接口封装
-│   │   ├── tiger_option_client.py
-│   │   └── mock_client.py        # 测试用
+│   ├── engine/                       # 核心引擎
+│   │   ├── signal_engine.py
+│   │   ├── order_executor.py
+│   │   ├── performance_analyzer.py
+│   │   ├── adaptive_optimizer.py
+│   │   ├── quant_trading_loop.py
+│   │   ├── auto_hedge_engine.py
+│   │   ├── alert_engine.py
+│   │   ├── backtest/                 # V10 新增
+│   │   │   ├── __init__.py
+│   │   │   └── runner.py             # 事件驱动回测 + Walk-Forward
+│   │   └── portfolio/               # V10 新增
+│   │       └── optimizer.py          # Markowitz + Kelly
 │   │
-│   ├── jobs/                     # 定时任务
-│   │   ├── data_refresh_jobs.py  # 技术指标刷新
-│   │   ├── signal_jobs.py        # 信号扫描
-│   │   ├── performance_jobs.py   # 性能评估
-│   │   └── equity_snapshot_job.py # 每日权益快照
+│   ├── routers/                      # API 路由层 (24 个端点组)
+│   │   ├── ...（原有 16 个路由）
+│   │   ├── autonomy.py               # V10 新增
+│   │   ├── copilot.py                # V10 新增
+│   │   ├── backtest.py               # V10 新增
+│   │   ├── portfolio.py              # V10 新增
+│   │   ├── stress_test.py            # V10 新增
+│   │   ├── paper_trading.py          # V10 新增
+│   │   ├── options_analysis.py       # V10 新增
+│   │   └── execution_algo.py         # V10 新增
 │   │
-│   └── utils/                    # 工具类
-│       ├── cache.py              # Redis 缓存装饰器
-│       ├── logger.py             # Loguru 日志
-│       └── ...
+│   ├── broker/
+│   ├── jobs/
+│   └── utils/
 │
-├── tests/                        # 单元测试 + 集成测试
+├── tests/
 ├── requirements.txt
-└── .env                          # 环境变量
+└── .env
 ```
 
 ---
@@ -335,6 +333,130 @@ CREATE TABLE audit_logs (
 ```
 
 **用途**：记录关键操作（订单/计划/风控调整），用于安全审计。
+
+### 2.2 V10 新增表
+
+#### G. backtest_tasks - 回测任务
+
+```sql
+CREATE TABLE backtest_tasks (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  account_id VARCHAR(64) NOT NULL,
+  strategy_name VARCHAR(128) NOT NULL,
+  symbols JSON NOT NULL COMMENT '["AAPL","NVDA"]',
+  start_date DATE NOT NULL,
+  end_date DATE NOT NULL,
+  initial_capital DECIMAL(20,2) NOT NULL DEFAULT 100000,
+  walk_forward BOOLEAN DEFAULT FALSE,
+  status VARCHAR(16) DEFAULT 'PENDING' COMMENT 'PENDING/RUNNING/DONE/FAILED',
+  result JSON COMMENT '{"annualized_return":0.18,"sharpe":1.42,"max_drawdown":-0.083,"win_rate":0.62}',
+  error_msg TEXT,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  completed_at DATETIME,
+  INDEX idx_account_status (account_id, status)
+);
+```
+
+#### H. portfolio_snapshots - 组合优化快照
+
+```sql
+CREATE TABLE portfolio_snapshots (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  account_id VARCHAR(64) NOT NULL,
+  method VARCHAR(32) NOT NULL COMMENT 'MARKOWITZ/RISK_PARITY/KELLY',
+  current_weights JSON NOT NULL,
+  target_weights JSON NOT NULL,
+  frontier_data JSON COMMENT '有效前沿散点数据',
+  expected_return DECIMAL(10,6),
+  expected_volatility DECIMAL(10,6),
+  sharpe_ratio DECIMAL(10,4),
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_account_time (account_id, created_at)
+);
+```
+
+#### I. paper_accounts - 模拟账户
+
+```sql
+CREATE TABLE paper_accounts (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  account_id VARCHAR(64) NOT NULL UNIQUE,
+  initial_capital DECIMAL(20,2) NOT NULL DEFAULT 100000,
+  current_equity DECIMAL(20,2) NOT NULL,
+  realized_pnl DECIMAL(20,2) DEFAULT 0,
+  unrealized_pnl DECIMAL(20,2) DEFAULT 0,
+  positions JSON COMMENT '当前模拟持仓',
+  trade_log JSON COMMENT '历史成交记录（最近 500 条）',
+  reset_at DATETIME,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+```
+
+#### J. copilot_messages - Copilot 对话记录
+
+```sql
+CREATE TABLE copilot_messages (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  account_id VARCHAR(64) NOT NULL,
+  session_id VARCHAR(64) NOT NULL,
+  role VARCHAR(8) NOT NULL COMMENT 'user/assistant',
+  content TEXT NOT NULL,
+  model_used VARCHAR(64),
+  action_intent JSON COMMENT '{"type":"modify_stop","params":{"symbol":"AAPL","stop":175}}',
+  action_confirmed BOOLEAN DEFAULT NULL,
+  tokens_used INT DEFAULT 0,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_account_session (account_id, session_id),
+  INDEX idx_created (created_at)
+);
+```
+
+#### K. algo_execution_tasks - 算法执行任务（TWAP/VWAP）
+
+```sql
+CREATE TABLE algo_execution_tasks (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  account_id VARCHAR(64) NOT NULL,
+  symbol VARCHAR(32) NOT NULL,
+  side VARCHAR(4) NOT NULL COMMENT 'BUY/SELL',
+  algo VARCHAR(8) NOT NULL COMMENT 'TWAP/VWAP/MKT',
+  total_qty DECIMAL(20,6) NOT NULL,
+  filled_qty DECIMAL(20,6) DEFAULT 0,
+  avg_price DECIMAL(20,6) DEFAULT 0,
+  slices INT DEFAULT 10,
+  interval_secs INT DEFAULT 60,
+  status VARCHAR(16) DEFAULT 'PENDING' COMMENT 'PENDING/RUNNING/DONE/CANCELLED',
+  slices_log JSON COMMENT '每片执行记录',
+  started_at DATETIME,
+  completed_at DATETIME,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_account_status (account_id, status)
+);
+```
+
+#### L. autonomy_audit_log - AI 自主审计日志
+
+```sql
+CREATE TABLE autonomy_audit_log (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  account_id VARCHAR(64) NOT NULL,
+  autonomy_level VARCHAR(16) NOT NULL COMMENT 'FULL/SEMI/ADVISORY',
+  decision_type VARCHAR(32) NOT NULL COMMENT 'BUY/SELL/HOLD/REBALANCE/REJECT',
+  symbol VARCHAR(32),
+  ai_reasoning TEXT COMMENT 'AI 决策推理',
+  confidence_score DECIMAL(5,2),
+  risk_gate_passed BOOLEAN NOT NULL,
+  risk_gate_detail JSON,
+  order_id VARCHAR(64) COMMENT '实际下单 order_id / paper_trade_id',
+  revoked_at DATETIME,
+  revoke_reason TEXT,
+  circuit_breaker_triggered BOOLEAN DEFAULT FALSE,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_account_time (account_id, created_at),
+  INDEX idx_decision_type (decision_type)
+);
+```
 
 ---
 
@@ -622,6 +744,134 @@ async def get_full_dashboard():
 sell_fly_score = 100 - (sell_fly_count / total_sells * 100)
 discipline_score = on_time_stop_loss_count / total_stop_loss * 100
 behavior_score = (discipline_score * 0.6 + sell_fly_score * 0.4)
+```
+
+---
+
+### 4.5 V10 新增服务设计
+
+#### RiskGateService — 非绕过风险门
+
+```python
+class RiskGateService:
+    """在任何自主决策下单前必须通过此门，无法绕过"""
+    
+    async def check(self, account_id: str, symbol: str, qty: float, side: str) -> RiskGateResult:
+        """
+        1. 计算执行后持仓权重 → 超过 MAX_SINGLE_POSITION_PCT 则拒绝
+        2. 运行 VaR@95% 估算 → 超过 MAX_VAR_PCT 则拒绝
+        3. 运行内置压力情景（GFC/COVID/2022）→ 超过 MAX_STRESS_LOSS_PCT 则拒绝
+        4. 检查当日已执行笔数 → 超过 MAX_DAILY_TRADES 则拒绝
+        5. 检查当日已实现亏损 → 超过 MAX_DAILY_LOSS_PCT 则触发熔断
+        """
+
+class RiskGateResult(BaseModel):
+    passed: bool
+    reason: Optional[str]          # 拒绝原因
+    circuit_breaker: bool = False   # 是否触发熔断
+    details: dict                   # VaR值、压测结果等
+```
+
+#### AutonomousEngine — AI 自主决策引擎
+
+```python
+class AutonomousEngine:
+    """三级自主模式：FULL / SEMI（默认）/ ADVISORY"""
+    
+    async def run_decision_cycle(self, account_id: str):
+        # 1. 拉取信号（来自已运行的 StrategyRun）
+        signals = await strategy_service.get_pending_signals(account_id)
+        
+        # 2. 调用 AI 复杂推理模型做决策
+        decision = await self._ai_decide(signals)
+        # decision = {"action":"BUY","symbol":"AAPL","qty":50,
+        #             "algo":"TWAP","confidence":0.82,"reasoning":"..."}
+        
+        # 3. RiskGate 不可绕过检查
+        gate = await risk_gate.check(account_id, decision.symbol, decision.qty, decision.action)
+        if not gate.passed:
+            await self._log_rejection(account_id, decision, gate)
+            return
+        
+        # 4. 按自主级别执行
+        level = settings.AI_AUTONOMY_LEVEL
+        if level == "FULL":
+            await self._auto_execute(account_id, decision)
+        elif level == "SEMI":
+            order_id = await self._auto_execute(account_id, decision)
+            # 30 分钟内可撤单
+            await self._schedule_revoke_window(account_id, order_id, minutes=30)
+        else:  # ADVISORY
+            await self._notify_suggestion(account_id, decision)
+        
+        # 5. 写 autonomy_audit_log
+        await self._audit(account_id, decision, gate, order_id)
+```
+
+#### BacktestRunner — 事件驱动回测 + Walk-Forward
+
+```python
+class BacktestRunner:
+    async def run(self, task: BacktestTask) -> dict:
+        """
+        事件驱动回测：
+        1. 拉取历史 OHLCV（DataHub）
+        2. 按 bar 驱动策略 signal 函数
+        3. 模拟撮合（滑点 0.05%，交易费 0.1%）
+        4. 若 walk_forward=True，滚动窗口 in-sample/out-of-sample 验证
+        5. 计算绩效指标：Sharpe / Sortino / MaxDrawdown / WinRate / Alpha
+        """
+
+    def _check_graduation(self, result: dict) -> bool:
+        """Paper→Live 毕业检查：Sharpe≥1.0 且 MaxDrawdown≤20% 且 WinRate≥50%"""
+        return (result["sharpe"] >= 1.0 and 
+                abs(result["max_drawdown"]) <= 0.20 and 
+                result["win_rate"] >= 0.50)
+```
+
+#### PortfolioOptimizer — 有效前沿优化
+
+```python
+class PortfolioOptimizer:
+    async def optimize(self, account_id: str, method: str = "MARKOWITZ") -> dict:
+        """
+        MARKOWITZ: scipy.optimize 最大化 Sharpe，输出权重+有效前沿散点
+        RISK_PARITY: 各资产等风险贡献
+        KELLY: Kelly fraction（半Kelly，max 25%）
+        返回：{target_weights, current_weights, frontier_points, expected_return, expected_vol}
+        """
+```
+
+#### TwapVwapService — 执行算法
+
+```python
+class TwapVwapService:
+    async def submit(self, task: AlgoTask) -> str:
+        """注册算法执行任务，返回 task_id"""
+    
+    async def run_twap_slice(self, task_id: str):
+        """TWAP：将总量均分为 N 片，每隔 interval_secs 执行一片"""
+    
+    async def run_vwap_slice(self, task_id: str, market_volume: float):
+        """VWAP：按实时成交量比例分配每片数量"""
+```
+
+#### CopilotService — 对话式 AI 助理
+
+```python
+class CopilotService:
+    async def chat(self, account_id: str, session_id: str, message: str) -> CopilotResponse:
+        """
+        1. 轻量查询 → deepseek-chat/gpt-4o-mini（历史、状态查询）
+        2. 复杂分析/操作意图 → deepseek-reasoner/gpt-5.2
+        3. 若检测到操作意图：返回 action_intent + 需要人工确认
+        """
+    
+    async def morning_brief(self, account_id: str) -> str:
+        """每日 08:15 生成盘前摘要（AI 复杂模型）"""
+    
+    async def confirm_action(self, account_id: str, action_id: str) -> bool:
+        """执行 Copilot 建议的操作（须人工确认）"""
 ```
 
 ---

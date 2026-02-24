@@ -169,6 +169,43 @@ class Settings(BaseSettings):
     # 告警检查间隔（分钟）
     SCHEDULER_ALERT_CHECK_MINUTES: int = 5
 
+    # ==================== V10: AI 自主闭环配置 ====================
+    # AI 自主级别：FULL（全自主）/ SEMI（半自主，默认）/ ADVISORY（仅建议）
+    AI_AUTONOMY_LEVEL: str = "SEMI"
+
+    # 允许交易的标的类型：STOCK / ALL（ALL 包含期权，谨慎开启）
+    ALLOWED_ASSET_TYPES: str = "STOCK"
+
+    # 风险门边界（不可绕过）
+    MAX_SINGLE_POSITION_PCT: float = 0.25   # 单标的最大仓位占比
+    MAX_VAR_PCT: float = 0.03               # 投资组合 VaR@95% 上限
+    MAX_STRESS_LOSS_PCT: float = 0.15       # 压力测试最大损失占比
+    MAX_DAILY_TRADES: int = 10              # 单日最大自主交易笔数
+
+    # 半自主模式：撤单窗口（分钟）
+    REVOKE_WINDOW_MINUTES: int = 30
+
+    # Paper Trading 配置
+    PAPER_INITIAL_CAPITAL: float = 100000.0
+    PAPER_AUTO_GRADUATE: bool = True        # 达标后是否自动建议升级 Live
+
+    # DataHub 数据源优先级
+    DATA_HUB_PRIMARY: str = "yfinance"      # yfinance / tiger
+    DATA_HUB_FALLBACK: str = "tiger"        # 主源失败时使用
+
+    # AI 模型路由（轻量 vs 复杂推理）
+    AI_LIGHTWEIGHT_MODEL: str = "deepseek-chat"     # 轻量查询/摘要
+    AI_COMPLEX_MODEL: str = "deepseek-reasoner"     # 深度推理/自主决策
+
+    # 回测配置
+    BACKTEST_MAX_CONCURRENT: int = 3        # 最大并发回测任务数
+    BACKTEST_COMMISSION_PCT: float = 0.001  # 模拟佣金 0.1%
+    BACKTEST_SLIPPAGE_PCT: float = 0.0005   # 模拟滑点 0.05%
+
+    # AI 周报定时（每周一 08:00 生成上周复盘）
+    SCHEDULER_WEEKLY_REPORT_DAY: str = "mon"
+    SCHEDULER_WEEKLY_REPORT_HOUR: int = 8
+
     model_config = SettingsConfigDict(
         env_file=str(ENV_FILE) if ENV_FILE else ".env",
         env_file_encoding="utf-8",
