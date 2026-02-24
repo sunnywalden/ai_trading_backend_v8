@@ -111,6 +111,9 @@ async def ensure_mysql_tables() -> None:
     import app.models.copilot_message  # noqa: F401
     import app.models.algo_execution_task  # noqa: F401
     import app.models.autonomy_audit_log  # noqa: F401
+    # 持仓评估任务
+    import app.models.position_eval_config  # noqa: F401
+    import app.models.position_eval_task    # noqa: F401
 
     # 使用 SQLAlchemy metadata.create_all 自动创建所有缺失的表
     async with engine.begin() as conn:
