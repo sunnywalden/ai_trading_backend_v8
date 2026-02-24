@@ -7,12 +7,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 from typing import Optional
 
 import pandas as pd
 
 from app.core.config import settings
+from app.broker.factory import make_option_broker_client
+from app.broker.tiger_option_client import TigerOptionClient
+from app.broker.dummy_option_client import DummyOptionClient
+try:
+    from tigeropen.common.consts import BarPeriod
+except ImportError:
+    BarPeriod = None
 
 logger = logging.getLogger(__name__)
 
@@ -117,20 +124,98 @@ class DataHub:
         self, symbol: str, start: date, end: date, interval: str
     ) -> pd.DataFrame:
         """Tiger API OHLCV — 需要有效 Tiger 账户配置"""
-        from app.broker.factory import make_option_broker_client  # 复用 broker factory
-
         client = make_option_broker_client()
-        # 若是 DummyClient，抛出异常让 fallback 处理
-        from app.broker.dummy_option_client import DummyOptionClient
 
-        if isinstance(client, DummyOptionClient):
+        if isinstance(client, DummyOptionClient) or not isinstance(client, TigerOptionClient):
             raise RuntimeError("Tiger real client not configured, skipping")
 
-        # Tiger SDK 调用（使用 tigeropen quote client）
-        raise NotImplementedError("Tiger OHLCV integration pending Tiger SDK setup")
+        if BarPeriod is None:
+            raise RuntimeError("Tiger SDK not installed")
+
+        # 映射 interval 到 Tiger BarPeriod
+        mapping = {
+            "1m": BarPeriod.ONE_MINUTE,
+            "3m": BarPeriod.THREE_MINUTES,
+            "5m": BarPeriod.FIVE_MINUTES,
+            "15m": BarPeriod.FIFTEEN_MINUTES,
+            "30m": BarPeriod.HALF_HOUR,
+            "1h": BarPeriod.ONE_HOUR,
+            "2h": BarPeriod.TWO_HOURS,
+            "4h": BarPeriod.FOUR_HOURS,
+            "1d": BarPeriod.DAY,
+            "1w": BarPeriod.WEEK,
+            "1mo": BarPeriod.MONTH,
+        }
+        period = mapping.get(interval, BarPeriod.DAY)
+
+        # 转换时间范围
+        begin_ms = int(datetime.combine(start, datetime.min.time()).timestamp() * 1000)
+        # End date + 1 day to ensure inclusion
+        end_ms = int(datetime.combine(end + timedelta(days=1), datetime.min.time()).timestamp() * 1000)
+
+        try:
+            # Tiger SDK 调用 (在线程池中运行)
+            bars_df = await client._run_in_executor(
+                client.quote_client.get_bars,
+                [symbol],
+                period=period,
+                begin_time=begin_ms,
+                end_time=end_ms
+            )
+
+            if bars_df is None or bars_df.empty:
+                raise ValueError(f"Tiger returned empty data for {symbol}")
+
+            df = bars_df.copy()
+            # 统一列名以匹配 get_ohlcv 的返回要求
+            df.columns = [c.lower() for c in df.columns]
+
+            if "time" in df.columns:
+                df.index = pd.to_datetime(df["time"], unit="ms").dt.date
+                df.drop(columns=["time"], inplace=True)
+            
+            # 如果是多 symbol 返回，过滤当前 symbol
+            if "symbol" in df.columns:
+                df = df[df["symbol"] == symbol.upper()].drop(columns=["symbol"], errors="ignore")
+
+            # 只保留需要的列并按日期排序
+            needed = ["open", "high", "low", "close", "volume"]
+            df = df[[c for c in needed if c in df.columns]]
+            df.sort_index(inplace=True)
+            return df
+        except Exception as e:
+            logger.error(f"Tiger _tiger_ohlcv error for {symbol}: {e}")
+            raise
 
     async def _tiger_quote(self, symbol: str) -> dict:
-        raise NotImplementedError("Tiger real-time quote integration pending")
+        client = make_option_broker_client()
+        if not isinstance(client, TigerOptionClient):
+            raise RuntimeError("Tiger client not configured")
+
+        try:
+            df = await client._run_in_executor(
+                client.quote_client.get_stock_briefs,
+                [symbol]
+            )
+            if df is None or df.empty:
+                 raise ValueError(f"Tiger quote empty for {symbol}")
+            
+            # 统一列名为小写
+            df.columns = [c.lower() for c in df.columns]
+            row = df.iloc[0]
+            
+            return {
+                "symbol": symbol,
+                "price": float(row.get("latest_price") or row.get("latestprice") or row.get("price") or 0.0),
+                "open": float(row.get("open") or 0.0),
+                "high": float(row.get("high") or row.get("day_high") or 0.0),
+                "low": float(row.get("low") or row.get("day_low") or 0.0),
+                "volume": int(row.get("volume") or 0),
+                "source": "tiger",
+            }
+        except Exception as e:
+            logger.error(f"Tiger _tiger_quote error for {symbol}: {e}")
+            raise
 
 
 # 全局单例

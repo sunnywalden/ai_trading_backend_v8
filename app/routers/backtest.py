@@ -84,14 +84,16 @@ async def list_tasks(
         {"aid": current_user, "lim": limit},
     )
     rows = result.fetchall()
+    import json
+    
     return {
         "tasks": [
             {
                 "id": r[0],
                 "strategy_type": r[1],  # V10 FE Alignment
-                "symbols": r[2],
+                "symbols": json.loads(r[2]) if isinstance(r[2], str) else r[2],
                 "status": r[3],
-                "result": r[4],
+                "result": json.loads(r[4]) if isinstance(r[4], str) else r[4],
                 "created_at": r[5].isoformat() if r[5] else None,
             }
             for r in rows
@@ -115,4 +117,19 @@ async def get_task_report(
     row = result.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Task not found")
-    return dict(row._mapping)
+    
+    import json
+    data = dict(row._mapping)
+    # V10: Ensure JSON fields are parsed for the frontend report view
+    if isinstance(data.get("result"), str):
+        try:
+            data["result"] = json.loads(data["result"])
+        except:
+            pass
+    if isinstance(data.get("symbols"), str):
+        try:
+            data["symbols"] = json.loads(data["symbols"])
+        except:
+            pass
+            
+    return data
