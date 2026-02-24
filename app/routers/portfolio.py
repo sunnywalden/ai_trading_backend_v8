@@ -27,54 +27,47 @@ async def get_latest_snapshot(
     current_user: str = Depends(get_current_user),
 ):
     """获取最新组合优化快照"""
-    from sqlalchemy import text
+    from sqlalchemy import select
+    from app.models.portfolio_snapshot import PortfolioSnapshot
 
     try:
-        result = await session.execute(
-            text(
-                "SELECT method, target_weights as weights, frontier_data as frontier, "
-                "expected_return, expected_volatility as volatility, sharpe_ratio as sharpe, created_at "
-                "FROM portfolio_snapshots WHERE account_id=:aid ORDER BY created_at DESC LIMIT 1"
-            ),
-            {"aid": current_user},
+        # 使用 ORM select 确保 JSON 类型被正确处理
+        stmt = (
+            select(PortfolioSnapshot)
+            .where(PortfolioSnapshot.account_id == current_user)
+            .order_by(PortfolioSnapshot.created_at.desc())
+            .limit(1)
         )
-        row = result.fetchone()
-        if not row:
-            return {}  # V10: Return empty object instead of null to avoid client-side or middleware issues
+        result = await session.execute(stmt)
+        snapshot = result.scalar_one_or_none()
         
+        if not snapshot:
+            return {}  # V10: Return empty object instead of null
+        
+        # 确保 JSON 字段是解解析后的对象
         import json
-        data = dict(row._mapping)
-        
-        # V10: Ensure JSON strings are parsed to dict/list for frontend
-        weights = data["weights"]
-        if isinstance(weights, str):
-            try:
-                weights = json.loads(weights)
-            except:
-                pass
-        
-        frontier = data["frontier"]
-        if isinstance(frontier, str):
-            try:
-                frontier = json.loads(frontier)
-            except:
-                pass
+        def ensure_obj(val):
+            if isinstance(val, str):
+                try:
+                    return json.loads(val)
+                except:
+                    return val
+            return val
 
         return {
-            "method": data["method"],
-            "weights": weights,
-            "frontier": frontier,
+            "method": snapshot.method,
+            "weights": ensure_obj(snapshot.target_weights),
+            "frontier": ensure_obj(snapshot.frontier_data),
             "metrics": {
-                "expected_return": float(data["expected_return"]) if data["expected_return"] else 0,
-                "volatility": float(data["volatility"]) if data["volatility"] else 0,
-                "sharpe": float(data["sharpe"]) if data["sharpe"] else 0,
+                "expected_return": float(snapshot.expected_return) if snapshot.expected_return else 0,
+                "volatility": float(snapshot.expected_volatility) if snapshot.expected_volatility else 0,
+                "sharpe": float(snapshot.sharpe_ratio) if snapshot.sharpe_ratio else 0,
             },
-            "created_at": data["created_at"].isoformat() if data["created_at"] else None
+            "created_at": snapshot.created_at.isoformat() if snapshot.created_at else None
         }
     except Exception as e:
         import logging
         logging.getLogger(__name__).error(f"Failed to fetch portfolio snapshot: {e}")
-        # If table missing or query fails, return empty instead of 404/500 to keep UI stable
         return {}
 
 
