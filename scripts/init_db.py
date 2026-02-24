@@ -31,6 +31,15 @@ from app.models.trade_journal import TradeJournal
 from app.models.trade_pnl_attribution import TradePnlAttribution
 from app.models.notification import NotificationLog
 from app.models.audit_log import AuditLog
+# V10: 新增模型注册
+from app.models.backtest_task import BacktestTask
+from app.models.portfolio_snapshot import PortfolioSnapshot
+from app.models.paper_account import PaperAccount
+from app.models.task_config import TaskConfig
+from app.models.algo_execution_task import AlgoExecutionTask
+from app.models.position_eval_task import PositionEvalTask
+from app.models.autonomy_audit_log import AutonomyAuditLog
+from app.models.copilot_message import CopilotMessage
 
 DEFAULT_BUILTIN_STRATEGIES = [
     {
