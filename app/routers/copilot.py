@@ -1,6 +1,6 @@
 """V10: Trading Copilot 路由"""
 import uuid
-from typing import Optional
+from typing import Optional, Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -50,7 +50,7 @@ async def get_history(
     from sqlalchemy import text
 
     query = "SELECT id, role, content, model_used, action_intent, created_at FROM copilot_messages WHERE account_id=:aid"
-    params = {"aid": current_user}
+    params: dict[str, Any] = {"aid": current_user}
     if session_id:
         query += " AND session_id=:sid"
         params["sid"] = session_id
@@ -76,9 +76,8 @@ async def get_history(
 
 @router.get("/morning-brief")
 async def morning_brief(current_user: str = Depends(get_current_user)):
-    """获取今日盘前摘要"""
-    brief = await copilot_service.morning_brief(current_user)
-    return {"brief": brief}
+    """获取今日盘前摘要 (V10 structured)"""
+    return await copilot_service.morning_brief(current_user)
 
 
 @router.post("/confirm/{action_id}")

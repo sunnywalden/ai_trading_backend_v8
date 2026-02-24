@@ -23,11 +23,24 @@ class AutonomousEngine:
       ADVISORY - AI 仅输出建议，不自动下单
     """
 
-    # ──────────────────────────────────────────
-    # 主决策循环（由 APScheduler 调用）
-    # ──────────────────────────────────────────
+    def __init__(self):
+        self.is_running = True  # 默认在调度器激活时允许运行
+
+    def pause(self):
+        self.is_running = False
+        logger.info("AutonomousEngine PAUSED")
+
+    def resume(self):
+        self.is_running = True
+        logger.info("AutonomousEngine RESUMED")
 
     async def run_decision_cycle(self, account_id: str, db: AsyncSession) -> list[dict]:
+        """执行一个自主决策周期"""
+        if not self.is_running:
+            logger.info("AutonomousEngine is paused, skipping cycle.")
+            return []
+
+        logger.info(f"Starting decision cycle for {account_id}, Level={settings.AI_AUTONOMY_LEVEL}")
         """
         1. 拉取待处理信号
         2. AI 推理决策
@@ -133,7 +146,14 @@ class AutonomousEngine:
                 import re
                 m = re.search(r"\{.*\}", decision, re.DOTALL)
                 if m:
-                    decision = json.loads(m.group())
+                    try:
+                        decision = json.loads(m.group())
+                    except Exception:
+                        pass
+            
+            if not isinstance(decision, dict):
+                return {"action": "HOLD", "symbol": signal.get("symbol", ""), "qty": 0, "confidence": 0.0, "reasoning": "Parse failed"}
+                
             return decision
         except Exception as e:
             logger.error(f"AI decide failed: {e}, using HOLD fallback")
@@ -194,15 +214,16 @@ class AutonomousEngine:
         try:
             from app.services.order_service import OrderService
 
-            order_svc = OrderService()
-            result = await order_svc.submit_order(
-                account_id=account_id,
-                symbol=decision["symbol"],
-                action=decision["action"],
-                qty=float(decision.get("qty", 0)),
-                algo=decision.get("algo", "MKT"),
-            )
-            return result.get("order_id")
+            order_svc = OrderService(db)
+            payload = {
+                "symbol": decision["symbol"],
+                "direction": decision["action"],
+                "quantity": float(decision.get("qty", 0)),
+                "order_type": decision.get("algo", "MARKET") if decision.get("algo") != "MKT" else "MARKET",
+                "strategy_tag": "Autonomous"
+            }
+            result = await order_svc.submit_order(account_id, payload)
+            return result.order_id
         except Exception as e:
             logger.error(f"Execute order failed: {e}")
             return None
@@ -214,7 +235,8 @@ class AutonomousEngine:
         revoke_key = f"revoke_window:{account_id}:{order_id}"
         expire_secs = settings.REVOKE_WINDOW_MINUTES * 60
         try:
-            await cache.set(revoke_key, "open", ex=expire_secs)
+            # V9/V10 cache.set uses 'expire' not 'ex' if using our wrapper
+            await cache.set(revoke_key, "open", expire=expire_secs)
             logger.info(f"[AutonomousEngine] Revoke window open for order {order_id} ({expire_secs}s)")
         except Exception:
             pass  # Redis 不可用时静默处理
@@ -284,28 +306,27 @@ class AutonomousEngine:
         # 取消订单（通过 broker）
         try:
             from app.services.order_service import OrderService
-            await OrderService().cancel_order(exec_id)
-        except Exception as e:
-            logger.warning(f"Cancel order {exec_id} failed: {e}")
-
-        # 更新审计日志
-        try:
+            order_svc = OrderService(db)
+            await order_svc.cancel_order(exec_id)
+            
+            # 更新审计日志
             await db.execute(
                 sql_text(
-                    "UPDATE autonomy_audit_log SET revoked_at=NOW(), revoke_reason=:reason WHERE order_id=:oid"
+                    "UPDATE autonomy_audit_log SET revoked_at=:now, revoke_reason=:reason WHERE order_id=:oid"
                 ),
-                {"reason": reason, "oid": exec_id},
+                {"now": datetime.now(timezone.utc), "reason": reason, "oid": exec_id}
             )
             await db.commit()
+            
+            try:
+                await cache.delete(revoke_key)
+            except Exception:
+                pass
+                
+            return {"success": True, "message": f"Order {exec_id} revoked successfully"}
         except Exception as e:
-            logger.warning(f"Update audit log failed: {e}")
-
-        try:
-            await cache.delete(revoke_key)
-        except Exception:
-            pass
-
-        return {"success": True, "order_id": exec_id, "revoke_reason": reason}
+            logger.error(f"Revoke failed: {e}")
+            return {"success": False, "reason": str(e)}
 
 
 # 全局单例

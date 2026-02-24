@@ -1,4 +1,5 @@
 """V10: 投资组合优化路由"""
+from datetime import datetime
 from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -16,12 +17,14 @@ class OptimizeRequest(BaseModel):
     symbols: List[str]
     method: str = "MARKOWITZ"  # MARKOWITZ / RISK_PARITY / KELLY
     lookback_days: int = 252
+    risk_free_rate: float = 0.04
     current_weights: Optional[Dict[str, float]] = None
 
 
 @router.post("/optimize")
 async def optimize_portfolio(
     body: OptimizeRequest,
+    session: AsyncSession = Depends(get_session),
     current_user: str = Depends(get_current_user),
 ):
     """运行组合优化并返回有效前沿 + 推荐权重"""
@@ -31,17 +34,47 @@ async def optimize_portfolio(
         raise HTTPException(status_code=400, detail="method 必须是 MARKOWITZ / RISK_PARITY / KELLY")
 
     try:
-        result = await portfolio_optimizer.optimize(
+        raw_result = await portfolio_optimizer.optimize(
             symbols=body.symbols,
             method=body.method,
             lookback_days=body.lookback_days,
             current_weights=body.current_weights,
+            risk_free_rate=body.risk_free_rate,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"优化失败: {e}")
 
-    # 持久化快照
-    # TODO: 保存到 portfolio_snapshots 表
+    # 统一命名格式以匹配前端
+    result = {
+        "method": raw_result["method"],
+        "weights": raw_result["target_weights"],
+        "metrics": {
+            "expected_return": raw_result["expected_return"],
+            "volatility": raw_result["expected_volatility"],
+            "sharpe": raw_result["sharpe_ratio"],
+        },
+        "frontier": raw_result["frontier_data"],
+        "created_at": datetime.now().isoformat()
+    }
+
+    # 持久化快照 (V10)
+    try:
+        from app.models.portfolio_snapshot import PortfolioSnapshot
+        snapshot = PortfolioSnapshot(
+            account_id=current_user,
+            method=body.method,
+            current_weights=body.current_weights or {},
+            target_weights=raw_result["target_weights"],
+            frontier_data=raw_result["frontier_data"],
+            expected_return=raw_result["expected_return"],
+            expected_volatility=raw_result["expected_volatility"],
+            sharpe_ratio=raw_result["sharpe_ratio"],
+        )
+        session.add(snapshot)
+        await session.commit()
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Failed to save portfolio snapshot: {e}")
 
     return result
 
@@ -56,11 +89,25 @@ async def get_latest_snapshot(
 
     result = await session.execute(
         text(
-            "SELECT * FROM portfolio_snapshots WHERE account_id=:aid ORDER BY created_at DESC LIMIT 1"
+            "SELECT method, target_weights as weights, frontier_data as frontier, "
+            "expected_return, expected_volatility as volatility, sharpe_ratio as sharpe, created_at "
+            "FROM portfolio_snapshots WHERE account_id=:aid ORDER BY created_at DESC LIMIT 1"
         ),
         {"aid": current_user},
     )
     row = result.fetchone()
     if not row:
-        raise HTTPException(status_code=404, detail="No portfolio snapshot found")
-    return dict(row._mapping)
+        return None  # 返回 null，前端 v-if="result" 会处理
+    
+    data = dict(row._mapping)
+    return {
+        "method": data["method"],
+        "weights": data["weights"],
+        "frontier": data["frontier"],
+        "metrics": {
+            "expected_return": float(data["expected_return"]) if data["expected_return"] else 0,
+            "volatility": float(data["volatility"]) if data["volatility"] else 0,
+            "sharpe": float(data["sharpe"]) if data["sharpe"] else 0,
+        },
+        "created_at": data["created_at"].isoformat() if data["created_at"] else None
+    }

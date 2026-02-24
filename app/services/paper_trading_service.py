@@ -60,9 +60,9 @@ class PaperTradingService:
 
         if side.upper() == "BUY":
             total_cost = price * qty + commission + slippage
-            if account.current_equity < total_cost:
+            if float(account.current_equity) < total_cost:
                 return {"success": False, "reason": "Insufficient cash"}
-            account.current_equity -= total_cost
+            account.current_equity = float(account.current_equity) - total_cost
             if symbol in positions:
                 old_qty = positions[symbol]["qty"]
                 old_avg = positions[symbol]["avg_price"]
@@ -77,14 +77,14 @@ class PaperTradingService:
                 return {"success": False, "reason": f"No position in {symbol}"}
             pos = positions[symbol]
             sell_qty = min(qty, pos["qty"])
-            proceeds = price * sell_qty - commission - slippage
             pnl = (price - pos["avg_price"]) * sell_qty - commission - slippage
-            account.current_equity += proceeds
-            account.realized_pnl = float(account.realized_pnl or 0) + pnl
+            proceeds = price * sell_qty - commission - slippage
+            account.current_equity = float(account.current_equity) + proceeds
+            account.realized_pnl = float(account.realized_pnl or 0.0) + pnl
             if pos["qty"] - sell_qty < 0.001:
                 del positions[symbol]
             else:
-                positions[symbol]["qty"] -= sell_qty
+                positions[symbol]["qty"] = float(positions[symbol]["qty"]) - sell_qty
 
         # 记录成交
         trade_entry = {
@@ -105,31 +105,73 @@ class PaperTradingService:
 
         return {
             "success": True,
+            "trade_id": str(datetime.now().timestamp()),
             "symbol": symbol,
             "side": side,
-            "qty": qty,
-            "price": price,
-            "pnl": round(pnl, 2),
-            "equity": round(float(account.current_equity), 2),
+            "quantity": qty,
+            "filled_price": price,
+            "commission": commission,
+            "slippage": slippage,
+            "net_pnl": round(pnl, 2),
+            "account_equity": round(float(account.current_equity), 2),
         }
 
     async def get_status(self, account_id: str, db: AsyncSession) -> dict:
-        """获取模拟账户状态"""
+        """获取模拟账户状态 (V10)"""
         account = await self.get_or_create_account(account_id, db)
-        positions = account.positions or {}
+        positions_raw = account.positions or {}
         trade_log = account.trade_log or []
 
-        total_return = (float(account.current_equity) - settings.PAPER_INITIAL_CAPITAL) / settings.PAPER_INITIAL_CAPITAL
+        # 转换为数组格式以便前端展示，并尝试获取实时报价
+        positions_list = []
+        total_market_value = 0
+        
+        from app.data.hub import data_hub
+        for symbol, data in positions_raw.items():
+            qty = data.get("qty", 0)
+            avg_price = data.get("avg_price", 0)
+            
+            # 尝试获取当前价格
+            current_price = avg_price
+            try:
+                quote = await data_hub.get_quote(symbol)
+                if quote and quote.get("price"):
+                    current_price = float(quote["price"])
+            except Exception:
+                pass
+                
+            mv = qty * current_price
+            total_market_value += mv
+            
+            unrealized_pnl = (current_price - avg_price) * qty
+            unrealized_pnl_pct = (current_price / avg_price - 1) if avg_price > 0 else 0
+            
+            positions_list.append({
+                "symbol": symbol,
+                "qty": qty,
+                "avg_cost": round(avg_price, 4),
+                "current_price": round(current_price, 4),
+                "market_value": round(mv, 2),
+                "unrealized_pnl": round(unrealized_pnl, 2),
+                "unrealized_pnl_pct": round(unrealized_pnl_pct, 4)
+            })
+
+        cash = float(account.current_equity)
+        equity = cash + total_market_value
+        initial = float(account.initial_capital)
+        total_pnl = equity - initial
+        total_pnl_pct = total_pnl / initial if initial > 0 else 0
 
         return {
             "account_id": account_id,
-            "initial_capital": settings.PAPER_INITIAL_CAPITAL,
-            "current_equity": round(float(account.current_equity), 2),
-            "realized_pnl": round(float(account.realized_pnl or 0), 2),
-            "total_return_pct": round(total_return, 4),
-            "positions": positions,
+            "initial_capital": initial,
+            "equity": round(equity, 2),
+            "cash": round(cash, 2),
+            "total_pnl": round(total_pnl, 2),
+            "total_pnl_pct": round(total_pnl_pct, 4),
+            "positions": positions_list,
             "trade_count": len(trade_log),
-            "recent_trades": trade_log[-10:],
+            "created_at": datetime.now(timezone.utc).isoformat()
         }
 
     async def check_graduation(

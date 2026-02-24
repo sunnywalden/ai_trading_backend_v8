@@ -116,9 +116,20 @@ class TwapVwapService:
         logger.info(f"[TwapVwap] MKT {side} {symbol} qty={qty}")
         try:
             from app.services.order_service import OrderService
-            result = await OrderService().submit_order(account_id, symbol, side, qty, "MKT")
-            self._tasks[task_id]["status"] = "DONE"
-            logger.info(f"[TwapVwap] MKT executed: {result}")
+            # V10: 需要传入 db/session 并构造 payload
+            # 这里简化逻辑，实际调用中应确保 db 可用，或者在 _execute_mkt 中获取
+            from app.models.db import SessionLocal
+            async with SessionLocal() as db:
+                order_svc = OrderService(db)
+                payload = {
+                    "symbol": symbol,
+                    "direction": side,
+                    "quantity": qty,
+                    "order_type": "MARKET"
+                }
+                result = await order_svc.submit_order(account_id, payload)
+                self._tasks[task_id]["status"] = "DONE"
+                logger.info(f"[TwapVwap] MKT executed: {result.order_id}")
         except Exception as e:
             self._tasks[task_id]["status"] = "FAILED"
             logger.error(f"[TwapVwap] MKT failed: {e}")
@@ -149,20 +160,27 @@ class TwapVwapService:
                 break
             try:
                 from app.services.order_service import OrderService
-                result = await OrderService().submit_order(
-                    account_id, symbol, side, slice_qty, "MKT"
-                )
-                filled_price = result.get("filled_price", 0.0)
-                filled_qty += slice_qty
-                log_entry = {
-                    "slice": i + 1,
-                    "qty": slice_qty,
-                    "price": filled_price,
-                    "filled_at": datetime.now(timezone.utc).isoformat(),
-                }
-                if task_id in self._tasks:
-                    self._tasks[task_id].setdefault("slices_log", []).append(log_entry)
-                logger.info(f"[TwapVwap] {algo} slice {i+1}/{slices} {side} {symbol} qty={slice_qty:.2f} @ {filled_price}")
+                from app.models.db import SessionLocal
+                async with SessionLocal() as db:
+                    order_svc = OrderService(db)
+                    payload = {
+                        "symbol": symbol,
+                        "direction": side,
+                        "quantity": slice_qty,
+                        "order_type": "MARKET"
+                    }
+                    result = await order_svc.submit_order(account_id, payload)
+                    filled_price = result.filled_price or 0.0
+                    filled_qty += slice_qty
+                    log_entry = {
+                        "slice": i + 1,
+                        "qty": slice_qty,
+                        "price": filled_price,
+                        "filled_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                    if task_id in self._tasks:
+                        self._tasks[task_id].setdefault("slices_log", []).append(log_entry)
+                    logger.info(f"[TwapVwap] {algo} slice {i+1}/{slices} {side} {symbol} qty={slice_qty:.2f} @ {filled_price}")
             except Exception as e:
                 logger.error(f"[TwapVwap] Slice {i+1} failed: {e}")
                 if task_id in self._tasks:

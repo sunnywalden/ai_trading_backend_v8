@@ -33,7 +33,7 @@ async def submit_algo_order(
             algo=req.algo.upper(),
             duration_minutes=req.duration_minutes,
             slices=req.slices,
-            source=req.source,
+            source=req.source or "manual",
         )
         return {"task_id": task_id, "status": "PENDING"}
     except ValueError as e:
