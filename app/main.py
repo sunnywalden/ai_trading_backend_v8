@@ -48,6 +48,7 @@ from app.routers import autonomy      # V10: AI自主中枢
 from app.routers import copilot       # V10: AI助手
 from app.routers import backtest      # V10: 回测引擎
 from app.routers import portfolio     # V10: 组合优化
+from app.routers import task_config   # V10: 统一任务配置管理
 from app.routers import stress_test   # V10: 压力测试
 from app.routers import paper_trading  # V10: 模拟盘
 from app.routers import options_analysis  # V10: 期权分析
@@ -150,6 +151,7 @@ app.include_router(trading_plan.router, prefix="/api/v1", tags=["交易计划"],
 app.include_router(hotspots.router, prefix="/api/v1", tags=["市场热点"], dependencies=[Depends(get_current_user)])
 app.include_router(strategy.router, prefix="/api/v1", tags=["策略管理"], dependencies=[Depends(get_current_user)])
 app.include_router(quant_loop.router, dependencies=[Depends(get_current_user)])  # NEW: 量化交易闭环
+app.include_router(task_config.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
 app.include_router(execution_center.router, dependencies=[Depends(get_current_user)])  # NEW: 执行中心（Layer 3）
 app.include_router(ai_advisor.router, dependencies=[Depends(get_current_user)])  # AI 交易决策
 app.include_router(performance.router, dependencies=[Depends(get_current_user)])  # NEW: Alpha/Beta性能分析指标

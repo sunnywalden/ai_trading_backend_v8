@@ -10,10 +10,6 @@ from app.core.auth import get_current_user
 from app.broker.factory import make_option_broker_client
 from app.services.position_eval_service import PositionEvalService
 from app.schemas.position_eval import (
-    PositionEvalConfigCreate,
-    PositionEvalConfigUpdate,
-    PositionEvalConfigView,
-    PositionEvalConfigListResponse,
     PositionEvalTaskView,
     PositionEvalTaskDetailView,
     PositionEvalTaskListResponse,
@@ -32,66 +28,7 @@ async def _get_account_id() -> str:
 
 
 # ═══════════════════════════════════════════════════════════
-# 配置管理
-# ═══════════════════════════════════════════════════════════
-
-@router.get("/configs", response_model=PositionEvalConfigListResponse, summary="获取评估配置列表")
-async def list_configs(
-    session: AsyncSession = Depends(get_session),
-    _current_user: str = Depends(get_current_user),
-):
-    account_id = await _get_account_id()
-    svc = PositionEvalService(session)
-    items = await svc.list_configs(account_id)
-    return PositionEvalConfigListResponse(
-        total=len(items),
-        items=[PositionEvalConfigView.model_validate(i) for i in items],
-    )
-
-
-@router.post("/configs", response_model=PositionEvalConfigView, summary="创建评估配置")
-async def create_config(
-    body: PositionEvalConfigCreate,
-    session: AsyncSession = Depends(get_session),
-    _current_user: str = Depends(get_current_user),
-):
-    account_id = await _get_account_id()
-    svc = PositionEvalService(session)
-    config = await svc.create_config(account_id, body)
-    return PositionEvalConfigView.model_validate(config)
-
-
-@router.put("/configs/{config_id}", response_model=PositionEvalConfigView, summary="更新评估配置")
-async def update_config(
-    config_id: int,
-    body: PositionEvalConfigUpdate,
-    session: AsyncSession = Depends(get_session),
-    _current_user: str = Depends(get_current_user),
-):
-    account_id = await _get_account_id()
-    svc = PositionEvalService(session)
-    config = await svc.update_config(account_id, config_id, body)
-    if config is None:
-        raise HTTPException(status_code=404, detail="配置不存在")
-    return PositionEvalConfigView.model_validate(config)
-
-
-@router.delete("/configs/{config_id}", summary="删除评估配置")
-async def delete_config(
-    config_id: int,
-    session: AsyncSession = Depends(get_session),
-    _current_user: str = Depends(get_current_user),
-):
-    account_id = await _get_account_id()
-    svc = PositionEvalService(session)
-    ok = await svc.delete_config(account_id, config_id)
-    if not ok:
-        raise HTTPException(status_code=404, detail="配置不存在")
-    return {"status": "ok", "message": "配置已删除"}
-
-
-# ═══════════════════════════════════════════════════════════
-# 待执行任务管理
+# 持仓评估任务执行管理 (配置由 TaskConfig 管理)
 # ═══════════════════════════════════════════════════════════
 
 @router.get("/tasks/pending", response_model=PositionEvalTaskListResponse, summary="获取待执行任务列表")
