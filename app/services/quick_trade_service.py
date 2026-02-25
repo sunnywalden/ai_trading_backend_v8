@@ -1,6 +1,6 @@
 """快捷交易服务 - 从策略结果到订单执行的桥梁"""
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any
 from decimal import Decimal
 
@@ -349,7 +349,7 @@ class QuickTradeService:
             risk_check_passed="PENDING",
             factor_scores=preview.get("signal_dimensions", {}),
             notes=f"{notes} | Order Mode: {order_mode}",
-            generated_at=datetime.utcnow()
+            generated_at=datetime.now(timezone.utc)
         )
         
         self.session.add(signal)

@@ -238,16 +238,29 @@ class OrderExecutor:
     ) -> Dict[str, Any]:
         """计算订单参数 (包含碎股/一手限制逻辑)"""
         
-        # 基于信号和账户权益计算实际交易数量
-        position_size_pct = signal.suggested_quantity or 0.10
-        position_value = account_equity * position_size_pct
+        # 1. 确定价格和订单类型
+        # 如果建议价格为空，认为是市价单
+        is_market_order = signal.suggested_price is None or signal.suggested_price <= 0
         
         # 获取当前市价
         current_price = signal.suggested_price or await self.market_provider.get_current_price(signal.symbol)
         if not current_price or current_price <= 0:
             current_price = 100.0  # 安全回退值
         
-        quantity = int(position_value / current_price)
+        # 2. 计算实际交易数量
+        # 💡 这里解决一个关键的歧义：suggested_quantity 是股份单位还是比例？
+        # 如果大于 1.0，认为是绝对股数（由 QuickTrade 发起）；如果小于 1.0，认为是账户占比（由量化策略发起）
+        quantity = 0
+        if signal.suggested_quantity and signal.suggested_quantity >= 1.0:
+            # 认为是绝对股数
+            quantity = int(signal.suggested_quantity)
+            print(f"[OrderExecutor] Using absolute quantity from signal: {quantity}")
+        else:
+            # 认为是账户占比 (如果为空则默认为 10%)
+            position_size_pct = signal.suggested_quantity if (signal.suggested_quantity and signal.suggested_quantity > 0) else 0.10
+            position_value = account_equity * position_size_pct
+            quantity = int(position_value / current_price)
+            print(f"[OrderExecutor] Calculated quantity from account ratio ({position_size_pct:.2%}): {quantity}")
         
         # --- 港股一手限制处理 ---
         if signal.symbol.endswith(".HK"):
@@ -261,18 +274,27 @@ class OrderExecutor:
                 if quantity < lot_size:
                     raise ValueError(f"港股数量不足一手: 预计{original_qty}股, 最小单位{lot_size}股, 调整后数量为0")
 
-        # 计算限价单价格(稍微好于市价)
-        if signal.direction == "LONG":
-            limit_price = current_price * 1.002  # 买入时略高于市价
+        # 3. 确定订单指令和价格
+        if is_market_order:
+            # 市价单：不传限价，类型为 MARKET
+            order_type = "MARKET"
+            limit_price = None
+            print(f"[OrderExecutor] Preparing MARKET order for {signal.symbol}")
         else:
-            limit_price = current_price * 0.998  # 卖出时略低于市价
+            # 限价单：优化价格策略 (买入时略高于市价，卖出时略低于市价，提高成交率)
+            order_type = "LIMIT"
+            if signal.direction == "LONG":
+                limit_price = current_price * 1.002  # 买入时略高于市价
+            else:
+                limit_price = current_price * 0.998  # 卖出时略低于市价
+            print(f"[OrderExecutor] Preparing LIMIT order for {signal.symbol} at {limit_price:.2f}")
         
         return {
             "symbol": signal.symbol,
             "direction": signal.direction,
             "quantity": max(1, quantity),  # 至少1股
             "price": limit_price,
-            "order_type": "LIMIT",
+            "order_type": order_type,
             "time_in_force": "DAY",
             "stop_loss": signal.stop_loss,
             "take_profit": signal.take_profit
