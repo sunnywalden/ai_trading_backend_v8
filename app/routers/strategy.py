@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 import asyncio
@@ -42,6 +43,7 @@ from app.schemas.quick_trade import (
 from app.services.quick_trade_service import QuickTradeService
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _ensure_permission(current_user: str, action: str) -> None:
@@ -205,12 +207,7 @@ async def update_strategy_params(
     strategy = await svc.update_strategy_params(strategy_id, payload.default_params)
     if not strategy:
         raise HTTPException(status_code=404, detail="Strategy not found")
-    return StrategyDetailResponse(strategy=_to_summary(strategy).model_copy(update={
-        "version": strategy.version,
-        "default_params": strategy.default_params or {},
-        "signal_sources": strategy.signal_sources or {},
-        "risk_profile": strategy.risk_profile or {},
-    }))
+    return StrategyDetailResponse(strategy=_to_detail(strategy))
 
 
 @router.post("/strategies/{strategy_id}/run", response_model=StrategyRunResponse)
@@ -396,6 +393,7 @@ async def execute_quick_trade(
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
+        logger.exception("Quick trade execution failed: %s", str(e))
         raise HTTPException(status_code=500, detail=f"执行失败: {str(e)}")
 
 
@@ -505,7 +503,7 @@ async def get_strategy_signals(
                 "strength": signal.strength,
                 "weight": signal.weight,
                 "risk_score": signal.risk_score,
-                "created_at": signal.created_at.isoformat() if signal.created_at else None,
+                "created_at": signal.created_at.isoformat() if signal.created_at is not None else None,
             }
             for signal in signals
         ]

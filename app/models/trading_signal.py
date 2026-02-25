@@ -104,6 +104,7 @@ class TradingSignal(Base):
     is_winner = Column(String(8), nullable=True)     # YES/NO - 是否盈利交易
     evaluation_score = Column(Float, nullable=True)  # 事后评分(0-100)
     evaluation_notes = Column(Text, nullable=True)
+    notes = Column(Text, nullable=True)              # 信号备注
     
     # 元数据
     extra_metadata = Column(JSON)                    # 额外信息(避免与SQLAlchemy保留字冲突)
