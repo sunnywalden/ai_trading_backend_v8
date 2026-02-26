@@ -8,6 +8,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Optional, List, Dict, Any
 import asyncio
+import logging
 
 from sqlalchemy import select, func, and_, desc
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -44,6 +45,9 @@ from app.schemas.dashboard_v2 import (
 from app.broker.factory import make_option_broker_client
 from app.services.option_exposure_service import OptionExposureService
 from app.services.account_service import AccountService
+
+
+logger = logging.getLogger(__name__)
 
 
 class DashboardV2Service:
@@ -152,7 +156,7 @@ class DashboardV2Service:
                 margin_available=acct_info.get("margin_available", 0.0),
             )
         except Exception as e:
-            print(f"获取账户概览失败: {e}")
+            logger.error(f"获取账户概览失败: {e}")
             return AccountOverview()
     
     async def _get_current_equity(self, account_id: str) -> float:
@@ -170,9 +174,9 @@ class DashboardV2Service:
         
         # 获取各个时间段的收益率
         daily_pnl, daily_return = await self._get_daily_pnl(account_id)
-        weekly_return = await self._calc_period_return(account_id, today - timedelta(days=7), today)
-        mtd_return = await self._calc_period_return(account_id, today.replace(day=1), today)
-        ytd_return = await self._calc_period_return(account_id, today.replace(month=1, day=1), today)
+        weekly_pnl, weekly_return = await self._calc_period_pnl_and_return(account_id, today - timedelta(days=7), today)
+        mtd_pnl, mtd_return = await self._calc_period_pnl_and_return(account_id, today.replace(day=1), today)
+        ytd_pnl, ytd_return = await self._calc_period_pnl_and_return(account_id, today.replace(month=1, day=1), today)
         
         # 计算趋势
         trend = TrendDirection.UP if daily_return > 0 else (
@@ -182,11 +186,11 @@ class DashboardV2Service:
         pnl = PnLMetrics(
             daily_pnl=daily_pnl,
             daily_return_pct=daily_return,
-            weekly_pnl=0.0,  # TODO: 计算周盈亏金额
+            weekly_pnl=weekly_pnl,
             weekly_return_pct=weekly_return,
-            mtd_pnl=0.0,
+            mtd_pnl=mtd_pnl,
             mtd_return_pct=mtd_return,
-            ytd_pnl=0.0,
+            ytd_pnl=ytd_pnl,
             ytd_return_pct=ytd_return,
             trend=trend,
         )
@@ -201,20 +205,31 @@ class DashboardV2Service:
         today = date.today()
         yesterday = today - timedelta(days=1)
         
-        today_snap = await self._get_snapshot(account_id, today)
+        # 优先使用实时权益对比昨日快照
+        curr_eq = await self._get_current_equity(account_id)
         yesterday_snap = await self._get_snapshot(account_id, yesterday)
         
-        if today_snap and yesterday_snap:
+        # 如果没有昨日快照，找最近一个早于今天的快照
+        if not yesterday_snap:
+            stmt = select(EquitySnapshot).where(
+                and_(
+                    EquitySnapshot.account_id == account_id,
+                    EquitySnapshot.snapshot_date < today
+                )
+            ).order_by(desc(EquitySnapshot.snapshot_date)).limit(1)
+            result = await self.session.execute(stmt)
+            yesterday_snap = result.scalar()
+
+        if curr_eq > 0 and yesterday_snap:
             prev_eq = float(yesterday_snap.total_equity)
-            curr_eq = float(today_snap.total_equity)
             if prev_eq > 0:
                 pnl = curr_eq - prev_eq
                 return pnl, (pnl / prev_eq * 100)
         
         return 0.0, 0.0
     
-    async def _calc_period_return(self, account_id: str, start: date, end: date) -> float:
-        """计算期间收益率"""
+    async def _calc_period_pnl_and_return(self, account_id: str, start: date, end: date) -> tuple[float, float]:
+        """计算期间盈亏金额和收益率"""
         stmt = select(EquitySnapshot).where(
             and_(
                 EquitySnapshot.account_id == account_id,
@@ -226,14 +241,15 @@ class DashboardV2Service:
         snaps = list(result.scalars().all())
         
         if len(snaps) < 2:
-            return 0.0
+            return 0.0, 0.0
         
         first_eq = float(snaps[0].total_equity)
         last_eq = float(snaps[-1].total_equity)
         if first_eq <= 0:
-            return 0.0
+            return 0.0, 0.0
         
-        return (last_eq - first_eq) / first_eq * 100
+        pnl = last_eq - first_eq
+        return pnl, (pnl / first_eq * 100)
     
     async def _get_snapshot(self, account_id: str, d: date) -> Optional[EquitySnapshot]:
         """获取快照"""
@@ -255,7 +271,7 @@ class DashboardV2Service:
                 all_attrs.append(PnLAttribution(
                     symbol=p.symbol,
                     contribution=float(p.unrealized_pnl),
-                    contribution_pct=0.0, # TODO: 计算贡献占比
+                    contribution_pct=float(p.unrealized_pnl_pct),
                     position_size=float(p.market_value),
                 ))
             
@@ -263,7 +279,7 @@ class DashboardV2Service:
                 all_attrs.append(PnLAttribution(
                     symbol=p.symbol,
                     contribution=float(p.unrealized_pnl or 0),
-                    contribution_pct=0.0,
+                    contribution_pct=float(p.unrealized_pnl_pct),
                     position_size=float(p.market_value or 0),
                 ))
                 
@@ -277,7 +293,7 @@ class DashboardV2Service:
             
             return performers, losers
         except Exception as e:
-            print(f"获取盈亏归因失败: {e}")
+            logger.error(f"获取盈亏归因失败: {e}")
             return [], []
     
     # ============ 风险相关 ============
@@ -324,7 +340,7 @@ class DashboardV2Service:
                 greeks=greeks,
             )
         except Exception as e:
-            print(f"获取风险指标失败: {e}")
+            logger.error(f"获取风险指标失败: {e}")
             return RiskMetrics()
     
     async def _assess_risk_level(self, account_id: str) -> RiskLevel:
@@ -351,9 +367,10 @@ class DashboardV2Service:
                 TradingSignal.account_id == account_id
             ).group_by(TradingSignal.status)
             result = await self.session.execute(stmt)
-            status_counts = dict(result.all())
+            rows = result.all()
+            status_counts: Dict[SignalStatus, int] = {row[0]: int(row[1]) for row in rows}
             
-            generated = sum(status_counts.get(s, 0) for s in [SignalStatus.GENERATED])
+            generated = status_counts.get(SignalStatus.GENERATED, 0)
             validated = status_counts.get(SignalStatus.VALIDATED, 0)
             executed = status_counts.get(SignalStatus.EXECUTED, 0)
             rejected = status_counts.get(SignalStatus.REJECTED, 0)
@@ -395,7 +412,7 @@ class DashboardV2Service:
             
             return pipeline, signal_summaries
         except Exception as e:
-            print(f"获取信号管道失败: {e}")
+            logger.error(f"获取信号管道失败: {e}")
             return SignalPipeline(), []
     
     async def _count_pending_signals(self, account_id: str) -> int:
@@ -476,9 +493,7 @@ class DashboardV2Service:
             # 按市值排序显示前10
             return sorted(results, key=lambda x: abs(x.market_value), reverse=True)
         except Exception as e:
-            print(f"获取持仓摘要失败: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"获取持仓摘要失败: {e}", exc_info=True)
             return []
     
     async def _calc_concentration_top5(self, positions: List[PositionSummary]) -> float:
