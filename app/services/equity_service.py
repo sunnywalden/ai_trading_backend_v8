@@ -32,7 +32,7 @@ class EquityService:
         # 获取账户权益
         broker = make_option_broker_client()
         try:
-            total_equity = float(await broker.get_equity())
+            total_equity = float(await broker.get_account_equity(account_id))
         except Exception:
             total_equity = 0.0
 

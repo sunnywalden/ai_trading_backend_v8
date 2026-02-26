@@ -17,7 +17,7 @@
 - **调度器**：APScheduler
 - **券商接口**：Tiger Trade API
 - **AI**：OpenAI（gpt-4o-mini / gpt-5.2）+ DeepSeek（deepseek-chat / deepseek-reasoner）
-- **数据源**：yfinance (主) + FRED (宏观) + Tiger (实时报价) — DataHub 多源路由
+- **数据源**：Tiger API（美股/港股/期权实时报价，首选）→ yfinance（美股降级）→ FRED（宏观）— DataHub 多源路由；港股与期权行情与美股使用同一 Tiger API 通道，无需 Futu 独立数据源
 
 ### 1.2 AI 模型路由策略
 

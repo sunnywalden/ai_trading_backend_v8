@@ -1,8 +1,10 @@
 # 产品需求文档 (PRD)
 
 > **AI量化交易闭环系统** - 个人美港股智能交易平台  
-> 版本：V10.0 | 更新日期：2026-02-24  
-> 变更摘要：**AI 自主闭环**升级——AI 默认自主完成建议→决策→交易→回测→优化完整流程，人工以审计、干预、配置角色参与；新增回测引擎、DataHub 多数据源、投资组合优化、压力测试、Trading Copilot、TWAP/VWAP、Paper Trading 账户隔离、AI 周报；**默认仅支持股票标的，期权等衍生品通过配置开启**
+> 版本：V10.1 | 更新日期：2026-02-26  
+> 变更摘要（V10.1）：**兑现承诺 + 打磨质量 + 扩展边界**——Tiger 真实下单接入（覆盖美股/港股/期权）、FULL 模式完整自主交易闭环、Copilot 操作指令执行落地、Dashboard 所有 TODO 指标真实化、AI 组合级决策升级（结构化 JSON 输出 + 批量组合决策）、ETF 标的池正式支持、港股支持（Tiger API 统一，无需 Futu）、Paper→Live 毕业自动化、Dashboard WebSocket 实时推送；**本版本明确不含 Telegram 通知，FULL 模式具备完全自主交易能力**
+
+> 历史版本：V10.0（2026-02-24）变更摘要见下方历史记录节
 
 ---
 
@@ -119,7 +121,7 @@ ALLOWED_ASSET_TYPES=STOCK,ETF,OPTION   # 开启期权（需谨慎）
 ### 3.2 核心模块
 
 #### A. 数据与研究层
-- **DataHub 多数据源聚合**：Tiger（实时）→ Polygon.io → yfinance → Redis 缓存，优先级路由
+- **DataHub 多数据源聚合**：Tiger（实时，覆盖美股/港股/期权）→ yfinance（美股降级）→ Redis 缓存，优先级路由；港股及期权行情与美股股票使用同一套 Tiger API 优先策略，无需独立数据源
 - **市场热点分析**：识别热门赛道和个股
 - **宏观风险评分**：地缘政治 + 经济指标综合判断
 - **技术面分析**：多指标技术分析（AI 自主触发）
@@ -409,9 +411,10 @@ MAX_DAILY_LOSS_PCT=0.03          # 单日亏损熔断线
 PAPER_INITIAL_CAPITAL=100000     # Paper 账户初始资金
 PAPER_AUTO_GRADUATE=true         # 是否自动升级符合条件的策略到 Live
 
-# 数据源
-DATA_HUB_PRIMARY=tiger           # tiger / polygon / yfinance
-DATA_HUB_FALLBACK=polygon,yfinance
+# 数据源（美股/港股/期权统一使用 Tiger API 优先）
+DATA_HUB_PRIMARY=tiger           # tiger / yfinance
+DATA_HUB_FALLBACK=yfinance        # Tiger 不可用时降级 yfinance（主要覆盖美股）
+# 港股/期权行情：Tiger API 为唯一正式来源，不引入 Futu API
 
 # AI 模型
 AI_LIGHTWEIGHT_MODEL=deepseek-chat    # 轻量决策
@@ -484,10 +487,23 @@ AI_COMPLEX_MODEL=deepseek-reasoner    # 复杂分析
 - **TWAP/VWAP 自动路由**（AI 按订单大小自动选择）
 - **期权分析中心**（只读信息工具，不执行）：IV曲面、P/C Ratio、异常成交
 
-### Phase 10: 标的扩展 🔜 V11 计划
-- ETF 轮动策略（`STOCK,ETF` 模式）
-- 期权执行开启（`STOCK,ETF,OPTION` 模式）
-- 港股全面支持（Futu API）
+### Phase 10: 标的扩展 � V10.1 当前
+- **ETF 正式支持**（`STOCK,ETF` 模式）：行业轮动 + CTA 商品策略真正运行
+- **港股 & 期权行情统一走 Tiger API**：港股（HK 市场）及期权行情数据优先通过老虎证券 API 获取，与美股股票保持一致的 DataHub 路由策略（Tiger → yfinance fallback），不引入 Futu API
+- **Tiger 真实下单（美股 + 港股 + 期权）**：TigerOrderExecutor 完整实现，支持 US / HK 双市场及期权下单，FULL 模式实盘可用
+- **FULL 模式完整自主闭环**：无需人工干预，AI 自主完成决策→下单→审计
+- **Copilot 执行落地**：止损修改 / TWAP 下单 / 清仓三类指令实际执行
+- **Dashboard 真实化**：VaR、宏观风险、执行指标、策略统计全部消除占位符
+- **AI 组合级决策**：批量信号统一组合视角决策 + JSON 结构化输出消除 regex
+- **Paper→Live 毕业自动化**：定时任务检测 + 自动升级
+- **Dashboard WebSocket**：实时增量推送，降低延迟至 5s
+
+### Phase 11: V11 计划 🔜
+- 期权执行开启（`STOCK,ETF,OPTION` 全模式）
+- 多账户支持
+- LLM Fine-tuning 个人交易风格
+- 实时 L2 订单簿分析
+- 移动端原生 App
 
 ---
 
