@@ -156,10 +156,13 @@ class ExecutionStats(BaseModel):
 # ============ AI洞察 ============
 class AIInsight(BaseModel):
     """AI洞察"""
+    insight_id: str
     insight_type: str  # opportunity, warning, suggestion, info
     priority: str  # high, medium, low
     title: str
     content: str
+    action_label: Optional[str] = None
+    action_link: Optional[str] = None
     action_items: List[str] = []
     related_symbol: Optional[str] = None
     created_at: datetime
