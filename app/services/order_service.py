@@ -72,17 +72,54 @@ class PaperOrderExecutor:
 
 
 class TigerOrderExecutor:
-    """Tiger OpenAPI 真实下单执行器"""
+    """Tiger OpenAPI 真实下单执行器（美股 + 港股 + 期权）"""
+
+    def __init__(self):
+        from app.broker.factory import get_tiger_client
+        self._client = get_tiger_client()
 
     async def submit_order(self, order: dict) -> dict:
-        # TODO: 接入 Tiger OpenAPI 下单
-        raise NotImplementedError("Tiger real order execution not yet implemented. Use PAPER mode.")
+        if self._client is None:
+            raise RuntimeError("Tiger client not configured; set TIGER_PRIVATE_KEY_PATH and TIGER_ID in .env")
+
+        account_id = order.get("account_id") or getattr(settings, "TIGER_ACCOUNT", "")
+        order_params = {
+            "symbol":     order["symbol"],
+            "direction":  order["direction"],
+            "quantity":   order["quantity"],
+            "price":      order.get("limit_price"),
+            "order_type": order.get("order_type", "LIMIT"),
+        }
+        result = await self._client.place_order(account_id, order_params)
+        if not result.get("success"):
+            raise RuntimeError(f"Tiger place_order failed: {result.get('message', 'unknown error')}")
+
+        return {
+            "order_id":        result.get("order_id", ""),
+            "symbol":          order["symbol"],
+            "direction":       order["direction"],
+            "quantity":        order["quantity"],
+            "order_type":      order.get("order_type", "LIMIT"),
+            "limit_price":     order.get("limit_price"),
+            "status":          "SUBMITTED",
+            "filled_quantity": 0,
+            "filled_price":    None,
+            "plan_id":         order.get("plan_id"),
+            "created_at":      datetime.utcnow(),
+            "updated_at":      datetime.utcnow(),
+        }
 
     async def cancel_order(self, order_id: str) -> bool:
-        raise NotImplementedError("Tiger order cancellation not yet implemented.")
+        if self._client is None:
+            return False
+        account_id = getattr(settings, "TIGER_ACCOUNT", "")
+        return await self._client.cancel_order(account_id, order_id)
 
     async def get_order_status(self, order_id: str) -> dict:
-        raise NotImplementedError("Tiger order status not yet implemented.")
+        if self._client is None:
+            return {"status": "NOT_FOUND"}
+        account_id = getattr(settings, "TIGER_ACCOUNT", "")
+        return await self._client.get_order_status(account_id, order_id)
 
 
 class OrderSafetyGuard:
@@ -143,7 +180,7 @@ class OrderService:
         # 安全检查
         broker = make_option_broker_client()
         try:
-            equity = float(await broker.get_equity())
+            equity = float(await broker.get_account_equity(account_id))
         except Exception:
             equity = getattr(settings, 'DEFAULT_RISK_BUDGET_USD', 20000.0)
 

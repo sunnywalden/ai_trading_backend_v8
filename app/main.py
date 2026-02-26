@@ -66,6 +66,7 @@ from app.jobs.scheduler import init_scheduler, start_scheduler, shutdown_schedul
 from app.jobs.data_refresh_jobs import register_all_jobs
 from app.jobs.quant_loop_jobs import register_quant_loop_jobs  # NEW: 闭环定时任务
 from app.jobs.task_config_jobs import register_task_config_jobs  # V10: 动态配置同步任务
+from app.jobs.paper_graduation_job import register_paper_graduation_job  # V10.1: Paper 毕业检查
 from app.core.proxy import apply_proxy_env, ProxyConfig
 from app.core.auth import get_current_user, login_for_access_token
 from fastapi.security import OAuth2PasswordRequestForm
@@ -104,6 +105,7 @@ async def lifespan(app: FastAPI):
         register_all_jobs(scheduler)
         register_quant_loop_jobs(scheduler)  # NEW: 注册量化交易闭环任务
         register_task_config_jobs(scheduler)   # V10: 注册动态配置同步任务
+        register_paper_graduation_job(scheduler)  # V10.1: Paper 毕业检查
         start_scheduler()
         logger.info("Scheduler started with periodic tasks")
     else:

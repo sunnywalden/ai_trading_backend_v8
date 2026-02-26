@@ -32,7 +32,7 @@ class DashboardService:
         # 1. 账户权益
         broker = make_option_broker_client()
         try:
-            equity = await broker.get_equity()
+            equity = await broker.get_account_equity(account_id)
         except Exception:
             equity = 0.0
 

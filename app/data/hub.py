@@ -13,7 +13,7 @@ from typing import Optional
 import pandas as pd
 
 from app.core.config import settings
-from app.broker.factory import make_option_broker_client
+from app.broker.factory import make_option_broker_client, is_hk_stock, normalize_hk_symbol
 from app.broker.tiger_option_client import TigerOptionClient
 from app.broker.dummy_option_client import DummyOptionClient
 try:
@@ -42,6 +42,12 @@ class DataHub:
         primary = settings.DATA_HUB_PRIMARY
         fallback = settings.DATA_HUB_FALLBACK
 
+        # 港股始终通过 Tiger API 获取，不走 yfinance fallback
+        if is_hk_stock(symbol):
+            normalized = normalize_hk_symbol(symbol)
+            logger.debug(f"DataHub: HK symbol detected ({symbol} -> {normalized}), force Tiger")
+            return await self._tiger_ohlcv(normalized, start, end, interval)
+
         try:
             return await self._fetch_ohlcv(primary, symbol, start, end, interval)
         except Exception as e:
@@ -56,6 +62,13 @@ class DataHub:
         """获取实时/延迟报价"""
         primary = settings.DATA_HUB_PRIMARY
         fallback = settings.DATA_HUB_FALLBACK
+
+        # 港股始终通过 Tiger API 获取实时报价
+        if is_hk_stock(symbol):
+            normalized = normalize_hk_symbol(symbol)
+            logger.debug(f"DataHub quote: HK symbol ({symbol} -> {normalized}), force Tiger")
+            return await self._tiger_quote(normalized)
+
         try:
             return await self._fetch_quote(primary, symbol)
         except Exception as e:

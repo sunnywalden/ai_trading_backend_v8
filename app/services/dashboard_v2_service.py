@@ -328,14 +328,27 @@ class DashboardV2Service:
             else:
                 risk_level = RiskLevel.LOW
             
-            # TODO: 计算VaR、最大回撤等指标
+            # 通过 VaRCalculator 获取实时风险指标
+            var_data: dict = {}
+            try:
+                from app.services.var_calculator import VaRCalculator
+                var_data = await VaRCalculator(self.session).calculate_var_cvar(account_id)
+            except Exception as _ve:
+                logger.debug(f"VaR calculation skipped: {_ve}")
+
+            var_1d   = abs(float(var_data.get("var_95", 0.0))) * 100  # 转为百分比
+            var_5d   = abs(float(var_data.get("var_99", 0.0))) * 100
+            max_dd   = abs(float(var_data.get("max_drawdown", 0.0))) * 100
+            sharpe   = float(var_data.get("sharpe_ratio", 0.0))
+            beta_val = float(var_data.get("beta", 0.0))
+
             return RiskMetrics(
                 risk_level=risk_level,
-                var_1d=0.0,
-                var_5d=0.0,
-                max_drawdown=0.0,
-                sharpe_ratio=0.0,
-                beta=0.0,
+                var_1d=var_1d,
+                var_5d=var_5d,
+                max_drawdown=max_dd,
+                sharpe_ratio=sharpe,
+                beta=beta_val,
                 concentration_risk=0.0,
                 greeks=greeks,
             )
@@ -352,9 +365,25 @@ class DashboardV2Service:
             return RiskLevel.LOW
     
     async def _get_macro_risks(self) -> List[MacroRiskAlert]:
-        """获取宏观风险告警"""
-        # TODO: 从宏观风险表读取
-        return []
+        """获取宏观风险告警（通过 MacroRiskScoringService 实时生成）"""
+        try:
+            from app.services.macro_risk_scoring_service import MacroRiskScoringService
+            alerts_raw = await MacroRiskScoringService().generate_risk_alerts()
+            now = datetime.utcnow()
+            return [
+                MacroRiskAlert(
+                    event_type=a.get("type", "UNKNOWN"),
+                    severity=a.get("level", "INFO"),
+                    title=a.get("type", "宏观风险").replace("_", " ").title(),
+                    description=a.get("message", ""),
+                    impact_score=float(a.get("score", 0.0)),
+                    timestamp=now,
+                )
+                for a in (alerts_raw or [])
+            ]
+        except Exception as e:
+            logger.warning(f"MacroRisk alerts failed: {e}")
+            return []
     
     # ============ 信号相关 ============
     async def _get_signal_pipeline(self, account_id: str) -> tuple[SignalPipeline, List[SignalSummary]]:
@@ -532,13 +561,49 @@ class DashboardV2Service:
         result = await self.session.execute(stmt)
         executed = result.scalar() or 0
         
-        # TODO: 计算取消数和滑点
+        # 今日取消数
+        stmt = select(func.count(TradingPlan.id)).where(
+            and_(
+                TradingPlan.account_id == account_id,
+                TradingPlan.plan_status == "CANCELLED",
+                func.date(TradingPlan.updated_at) == today,
+            )
+        )
+        result = await self.session.execute(stmt)
+        cancelled = result.scalar() or 0
+
+        total_closed = executed + cancelled
+        exec_rate = round(executed / total_closed * 100, 1) if total_closed > 0 else 0.0
+
+        # 平均滑点：从 TradePnlAttribution 估算（今日已平仓记录）
+        avg_slippage = 0.0
+        try:
+            from app.models.trade_pnl_attribution import TradePnlAttribution
+            slip_stmt = select(
+                func.avg(
+                    func.abs(
+                        (TradePnlAttribution.exit_price - TradePnlAttribution.entry_price)
+                        / TradePnlAttribution.entry_price
+                    ) * 100
+                )
+            ).where(
+                and_(
+                    TradePnlAttribution.account_id == account_id,
+                    func.date(TradePnlAttribution.trade_date) == today,
+                )
+            )
+            slip_result = await self.session.execute(slip_stmt)
+            raw = slip_result.scalar()
+            avg_slippage = round(float(raw), 4) if raw is not None else 0.0
+        except Exception as _se:
+            logger.debug(f"Slippage calc skipped: {_se}")
+
         return ExecutionStats(
             active_plans=active,
             executed_today=executed,
-            cancelled_today=0,
-            execution_rate=0.0,
-            avg_slippage=0.0,
+            cancelled_today=cancelled,
+            execution_rate=exec_rate,
+            avg_slippage=avg_slippage,
         )
     
     async def _get_active_plans(self, account_id: str) -> List[TradingPlanSummary]:
@@ -558,7 +623,7 @@ class DashboardV2Service:
                 symbol=p.symbol,
                 plan_type=p.plan_type or "UNKNOWN",
                 status=p.plan_status,
-                target_price=None,  # TODO: 从plan_details提取
+                target_price=float(p.take_profit) if p.take_profit else None,
                 quantity=0.0,
                 created_at=p.created_at,
                 expires_at=p.valid_until,
@@ -651,26 +716,151 @@ class DashboardV2Service:
     
     # ============ 策略相关 ============
     async def _get_strategy_performance(self, account_id: str) -> List[StrategyPerformance]:
-        """获取策略表现"""
-        # TODO: 从策略运行记录统计
-        return []
+        """从 strategy_runs + strategies 聚合策略表现"""
+        try:
+            from app.models.strategy import StrategyRun as SR, Strategy as Strat
+            from sqlalchemy import case, join
+            stmt = (
+                select(
+                    SR.strategy_id,
+                    Strat.name.label("strategy_name"),
+                    Strat.last_run_status,
+                    func.count(SR.id).label("total_runs"),
+                    func.avg(
+                        case((SR.status == "COMPLETED", 1), else_=0)
+                    ).label("success_rate"),
+                    func.max(SR.finished_at).label("last_run_at"),
+                )
+                .select_from(SR)
+                .outerjoin(Strat, Strat.id == SR.strategy_id)
+                .where(SR.account_id == account_id)
+                .group_by(SR.strategy_id, Strat.name, Strat.last_run_status)
+                .order_by(desc(func.max(SR.finished_at)))
+                .limit(10)
+            )
+            result = await self.session.execute(stmt)
+            rows = result.all()
+
+            return [
+                StrategyPerformance(
+                    strategy_id=str(row.strategy_id),
+                    strategy_name=row.strategy_name or str(row.strategy_id),
+                    total_runs=int(row.total_runs),
+                    win_rate=round(float(row.success_rate or 0) * 100, 1),
+                    avg_return=0.0,
+                    sharpe=0.0,
+                    last_run_at=row.last_run_at,
+                    status=row.last_run_status or "UNKNOWN",
+                )
+                for row in rows
+            ]
+        except Exception as e:
+            logger.warning(f"Strategy performance query failed: {e}")
+            return []
     
     # ============ 系统健康相关 ============
     async def _get_api_health(self) -> List[APIHealth]:
-        """获取API健康状态"""
-        # TODO: 从API监控表读取
-        return []
+        """运行时探针检测 Tiger SDK 和 yfinance 可用性"""
+        results: List[APIHealth] = []
+
+        # Tiger 探针
+        tiger_status = "degraded"
+        tiger_latency = 9999.0
+        try:
+            from app.broker.factory import get_tiger_client
+            import time
+            tc = get_tiger_client()
+            if tc is not None:
+                t0 = time.monotonic()
+                # 只做一个轻量级 quote_client 心跳探测
+                await asyncio.wait_for(
+                    asyncio.to_thread(lambda: tc.quote_client.get_symbols()),
+                    timeout=5.0,
+                )
+                tiger_latency = round((time.monotonic() - t0) * 1000, 1)
+                tiger_status = "healthy"
+            else:
+                tiger_status = "down"
+        except Exception:
+            tiger_status = "degraded"
+        results.append(APIHealth(
+            provider="Tiger OpenAPI",
+            status=tiger_status,
+            success_rate=1.0 if tiger_status == "healthy" else 0.0,
+            avg_latency_ms=tiger_latency if tiger_status == "healthy" else 0.0,
+            rate_limit_remaining=999,
+            rate_limit_reset_at=None,
+        ))
+
+        # yfinance 探针
+        yf_status = "degraded"
+        yf_latency = 9999.0
+        try:
+            import time, yfinance as yf
+            t0 = time.monotonic()
+            info = await asyncio.wait_for(
+                asyncio.to_thread(lambda: yf.Ticker("SPY").fast_info.last_price),
+                timeout=8.0,
+            )
+            yf_latency = round((time.monotonic() - t0) * 1000, 1)
+            yf_status = "healthy" if info else "degraded"
+        except Exception:
+            yf_status = "degraded"
+        results.append(APIHealth(
+            provider="yfinance",
+            status=yf_status,
+            success_rate=1.0 if yf_status == "healthy" else 0.0,
+            avg_latency_ms=yf_latency if yf_status == "healthy" else 0.0,
+            rate_limit_remaining=9999,
+            rate_limit_reset_at=None,
+        ))
+
+        return results
     
     async def _count_system_alerts(self) -> int:
-        """统计系统告警数"""
-        # TODO: 统计API异常、系统错误等
-        return 0
+        """统计过去 24 小时内 FAILED 的策略运行数作为系统告警数"""
+        try:
+            from app.models.strategy import StrategyRun as SR
+            cutoff = datetime.utcnow() - timedelta(hours=24)
+            stmt = select(func.count(SR.id)).where(
+                and_(SR.status == "FAILED", SR.started_at >= cutoff)
+            )
+            result = await self.session.execute(stmt)
+            return int(result.scalar() or 0)
+        except Exception as e:
+            logger.debug(f"count_system_alerts failed: {e}")
+            return 0
     
     # ============ 市场热点相关 ============
     async def _get_market_hotspots(self) -> List[MarketHotspot]:
-        """获取市场热点"""
-        # TODO: 从热点分析表读取
-        return []
+        """聚合近 7 天 TradingSignal 最活跃的标的作为市场热点"""
+        try:
+            cutoff = datetime.utcnow() - timedelta(days=7)
+            stmt = (
+                select(
+                    TradingSignal.symbol,
+                    func.count(TradingSignal.signal_id).label("cnt"),
+                )
+                .where(TradingSignal.created_at >= cutoff)
+                .group_by(TradingSignal.symbol)
+                .order_by(desc(func.count(TradingSignal.signal_id)))
+                .limit(5)
+            )
+            result = await self.session.execute(stmt)
+            rows = result.all()
+            return [
+                MarketHotspot(
+                    category="stock",
+                    topic=row.symbol,
+                    heat_score=float(row.cnt),
+                    related_symbols=[row.symbol],
+                    opportunities_count=int(row.cnt),
+                )
+                for row in rows
+            ]
+        except Exception as e:
+            logger.debug(f"market_hotspots query failed: {e}")
+            return []
     
     # ============ 待办事项相关 ============
     async def _get_todos(self, account_id: str) -> List[TodoItem]:

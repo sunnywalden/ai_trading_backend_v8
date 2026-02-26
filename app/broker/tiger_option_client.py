@@ -619,3 +619,39 @@ class TigerOptionClient(OptionBrokerClient):
         except Exception as e:
             logger.info(f" Error getting order status: {e}")
             return {"status": "ERROR", "message": str(e)}
+
+    async def cancel_order(self, account_id: str, order_id: str) -> bool:
+        """撤销指定订单。
+        
+        先拉取订单列表，找到对应 order_id 的 Order 对象，再调用
+        trade_client.cancel_order(order_obj)。
+        """
+        def _cancel():
+            from tigeropen.common.consts import Market  # noqa: F401
+            account = self.account or account_id
+            orders = self.trade_client.get_orders(account=account, limit=100)
+            target = None
+            for o in (orders or []):
+                if str(getattr(o, "id", "")) == str(order_id) or \
+                   str(getattr(o, "order_id", "")) == str(order_id):
+                    target = o
+                    break
+            if target is None:
+                logger.warning(f"cancel_order: order {order_id} not found in recent list")
+                return False
+            # 只有可撤状态才能撤
+            from tigeropen.trade.domain.order import OrderStatus as TS
+            status = getattr(target, "status", None)
+            cancellable = {TS.PENDING_NEW, TS.NEW, TS.PARTIALLY_FILLED}
+            if status not in cancellable:
+                logger.info(f"cancel_order: order {order_id} status={status} not cancellable")
+                return False
+            self.trade_client.cancel_order(target)
+            logger.info(f"cancel_order: sent cancel request for order {order_id}")
+            return True
+
+        try:
+            return await self._run_in_executor(_cancel)
+        except Exception as e:
+            logger.error(f"cancel_order error: {e}")
+            return False

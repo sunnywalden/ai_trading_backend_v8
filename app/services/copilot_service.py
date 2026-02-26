@@ -134,14 +134,53 @@ class CopilotService:
 
         # 根据意图类型执行
         if intent["type"] == "modify_stop":
-            # TODO: 调用 order_service.modify_stop_loss
-            pass
+            # 更新活跃计划的止损价
+            params = intent.get("params", {})
+            matched = params.get("matched", [])
+            symbol = matched[0] if matched else params.get("symbol")
+            price = float(matched[1]) if len(matched) > 1 else float(params.get("price", 0))
+            if symbol and price > 0:
+                await db.execute(
+                    text(
+                        "UPDATE trading_plan SET stop_loss=:p, updated_at=CURRENT_TIMESTAMP "
+                        "WHERE account_id=:a AND symbol=:s AND plan_status='ACTIVE'"
+                    ),
+                    {"p": price, "a": account_id, "s": symbol},
+                )
+                await db.commit()
+
         elif intent["type"] == "place_order":
-            # TODO: 调用 twap_vwap_service.submit
-            pass
+            # 通过 TWAP 下单
+            params = intent.get("params", {})
+            matched = params.get("matched", [])
+            symbol = matched[0] if matched else params.get("symbol")
+            quantity = float(matched[1]) if len(matched) > 1 else float(params.get("quantity", 100))
+            side = params.get("side", "BUY").upper()
+            if symbol:
+                from app.services.twap_vwap_service import TwapVwapService
+                await TwapVwapService().submit(
+                    symbol=symbol,
+                    side=side,
+                    quantity=quantity,
+                    algo="TWAP",
+                    duration_minutes=30,
+                    slices=6,
+                    source="copilot",
+                    account_id=account_id,
+                    db=db,
+                )
+
         elif intent["type"] == "close_all":
-            # TODO: 调用 position_service.close_all
-            pass
+            # 将账户所有活跃计划标记为已取消（不直接触发真实撤单，由 OrderService 异步处理）
+            await db.execute(
+                text(
+                    "UPDATE trading_plan SET plan_status='CANCELLED', updated_at=CURRENT_TIMESTAMP "
+                    "WHERE account_id=:a AND plan_status='ACTIVE'"
+                ),
+                {"a": account_id},
+            )
+            await db.commit()
+
         elif intent["type"] == "pause_autonomy":
             from app.core.runtime_config import set_autonomy_level as _set_level
             await _set_level("ADVISORY")

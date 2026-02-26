@@ -51,3 +51,33 @@ def get_tiger_client() -> TigerOptionClient | None:
             )
         return _tiger_instance
     return None
+
+
+# ---------- HK Symbol Helpers ----------
+
+def is_hk_stock(symbol: str) -> bool:
+    """判断是否为港股代码。
+    
+    规则：
+    - 以 ".HK" 结尾（不区分大小写），如 "0700.HK"
+    - 纯数字且长度 ≤ 5 位，如 "700"、"00700"
+    """
+    s = symbol.strip().upper()
+    if s.endswith(".HK"):
+        return True
+    core = s.split(".")[0]
+    return core.isdigit() and 1 <= len(core) <= 5
+
+
+def normalize_hk_symbol(symbol: str) -> str:
+    """将港股代码统一为 5 位零填充字符串（Tiger SDK 格式）。
+    
+    示例：
+      "700"      -> "00700"
+      "0700.HK"  -> "00700"
+      "00700"    -> "00700"
+    """
+    s = symbol.strip().upper()
+    if s.endswith(".HK"):
+        s = s[:-3]
+    return s.zfill(5)
