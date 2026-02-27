@@ -65,6 +65,19 @@ class DummyOptionClient(OptionBrokerClient):
         """返回模拟账户权益"""
         return 150000.0  # 15万美元模拟账户
 
+    async def get_stock_bars(self, symbol: str, start_date: str, end_date: str, period: str = "day") -> List[dict]:
+        """模拟获取K线数据"""
+        # 返回空列表，触发 BenchmarkService 的模拟逻辑
+        return []
+
+    async def get_stock_quote(self, symbol: str) -> dict:
+        """模拟获取实时行情"""
+        return {
+            "symbol": symbol,
+            "last_price": 450.0 if symbol == "SPY" else 100.0,
+            "timestamp": 0
+        }
+
     async def place_order(self, account_id: str, order_params: dict) -> dict:
         """模拟下单"""
         from uuid import uuid4

@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from tigeropen.tiger_open_config import get_client_config
 from tigeropen.trade.trade_client import TradeClient
 from tigeropen.quote.quote_client import QuoteClient
-from tigeropen.common.consts import SecurityType, Market, OrderStatus
+from tigeropen.common.consts import SecurityType, Market, OrderStatus, BarPeriod
 from tigeropen.trade.domain.order import Order
 
 from .option_client_base import OptionBrokerClient
@@ -422,6 +422,80 @@ class TigerOptionClient(OptionBrokerClient):
         # 如果获取失败，返回 None（由调用方决定默认值）
         logger.info(f" Returning None for equity")
         return None
+
+    async def get_stock_bars(self, symbol: str, start_date: str, end_date: str, period: str = "day") -> List[dict]:
+        """获取股票历史K线数据"""
+        try:
+            # 映射周期
+            mapping = {
+                "day": BarPeriod.DAY,
+                "week": BarPeriod.WEEK,
+                "month": BarPeriod.MONTH,
+            }
+            sdk_period = mapping.get(period.lower(), BarPeriod.DAY)
+            
+            # 转换日期为毫秒时间戳
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+            
+            begin_time = int(start_dt.timestamp() * 1000)
+            end_time = int(end_dt.timestamp() * 1000)
+            
+            logger.info(f" Fetching bars for {symbol}: {start_date} to {end_date} ({period})")
+            
+            # 调用 SDK
+            bars_df = await self._run_in_executor(
+                self.quote_client.get_bars,
+                [symbol],
+                period=sdk_period,
+                begin_time=begin_time,
+                end_time=end_time
+            )
+            
+            if bars_df is None or bars_df.empty:
+                logger.warning(f" No bars returned for {symbol}")
+                return []
+            
+            # 转换 DataFrame 为 List[dict]
+            # Tiger 返回的列名通常是大写的，如 'CLOSE', 'OPEN', 'TIME' 等
+            results = []
+            for _, row in bars_df.iterrows():
+                # 统一为小写键名，以符合 BenchmarkService 的预期
+                bar = {k.lower(): v for k, v in row.to_dict().items()}
+                results.append(bar)
+            
+            logger.info(f" Got {len(results)} bars for {symbol}")
+            return results
+            
+        except Exception as e:
+            logger.error(f" Error fetching stock bars for {symbol}: {e}")
+            return []
+
+    async def get_stock_quote(self, symbol: str) -> dict:
+        """获取股票实时行情"""
+        try:
+            logger.info(f" Fetching quote for {symbol}")
+            quotes = await self._run_in_executor(
+                self.quote_client.get_market_quotes,
+                [symbol]
+            )
+            
+            if quotes is not None and not quotes.empty:
+                row = quotes.iloc[0]
+                # 提取最新价，Tiger 可能返回 latest_price 或 last_price
+                last_price = row.get('latest_price') or row.get('last_price') or 0
+                return {
+                    "symbol": symbol,
+                    "last_price": float(last_price),
+                    "timestamp": datetime.now().timestamp()
+                }
+            
+            logger.warning(f" No quote returned for {symbol}")
+            return {"symbol": symbol, "last_price": 0}
+            
+        except Exception as e:
+            logger.error(f" Error fetching quote for {symbol}: {e}")
+            return {"symbol": symbol, "last_price": 0}
 
     async def place_order(self, account_id: str, order_params: dict) -> dict:
         """真实下单到老虎证券"""
