@@ -1,7 +1,11 @@
 # 后端架构设计文档
 
 > **AI量化交易闭环系统** - Backend Design  
-> 版本：V10.1 | 更新日期：2026-02-27
+> 版本：V10.2 | 更新日期：2026-02-28
+> 
+> **V10.2-M2~M8 变更摘要**：EventCalendar 事件日历（盈利/FOMC/CPI/NFP）、EarningsFence 盈利围栏（50%仓位上限）、PositionStateMachine 动态仓位生命周期（加仓/减仓/移动止损）、SignalFusionEngine 六维加权融合信号（tech 25%/fundamental 20%/macro 15%/vol 15%/opt 15%/sent 10%）、TradeAttributionEngine 三层归因（Alpha源/执行质量/仓位管理）、InsightService + ABTestEngine AI洞察进化（deepseek-reasoner 周报 + scipy t-test A/B实验）、CopilotPartnerService 深度研究引擎（多步 deep-research）、4张新增 DB 表、17个新增 API 端点、2个新增定时 Job。
+>
+> **V10.2-M1 变更摘要**：EventBus 异步事件总线（Topics.REGIME_CHANGED/SIGNAL_GENERATED）、MarketRegime 数据模型、RegimeClassifier（五维评分+6类体制+3日确认）、StrategyWeightAllocator（订阅 REGIME_CHANGED 更新 TaskConfig）、RiskGate VaR 体制自适应倍数、审计日志 regime_at_decision 列、/api/v1/regime 4 个端点、每日 08:00 体制分类 Job。
 > 
 > **V10.1 变更摘要**：Tiger 真实下单接入（美股/港股/期权）、SEMI/FULL 模式 Telegram 通知落地、Copilot 操作指令执行落地、Dashboard 仪表盘数据脱虚向实、AI 组合级决策 + 结构化 JSON 输出、Dashboard 2秒极速性能优化。
 > 
@@ -28,10 +32,10 @@
 
 | 场景 | 轻量（默认，极速响应） | 复杂推理（深度分析） |
 |------|-------------|---------|
-| Copilot 对话 | deepseek-chat / gpt-4o-mini | deepseek-reasoner / gpt-5.2 |
+| Copilot 对话 | deepseek-chat / gpt-5-mini | deepseek-reasoner / gpt-5.2 |
 | 自主决策引擎 | — | deepseek-reasoner / gpt-5.2 |
 | 周报/深度分析 | — | deepseek-reasoner / gpt-5.2 |
-| 信号简单摘要 | deepseek-chat / gpt-4o-mini | — |
+| 信号简单摘要 | deepseek-chat / gpt-5-mini | — |
 
 路由逻辑：`AI_LIGHTWEIGHT_MODEL` / `AI_COMPLEX_MODEL` 从 config 读取；客户端统一使用 `BaseAIClient`。
 
@@ -46,39 +50,53 @@
 
 ```
 ├── app/
-│   ├── main.py                       # FastAPI 应用入口（V10: 注册 24 个路由组）
+│   ├── main.py                        # FastAPI 应用入口（V10.2: 注册 25 个路由组）
 │   ├── core/
-│   │   ├── config.py                 # 新增 12 个 V10 配置项
-│   │   ├── security.py               # JWT + bcrypt
-│   │   └── dependencies.py           # 依赖注入
+│   │   ├── config.py                  # V10.2-M1: 新增 4 个 REGIME_* 配置项
+│   │   ├── event_bus.py               # V10.2-M1 新增：AsyncIO 异步事件总线
+│   │   ├── security.py                # JWT + bcrypt
+│   │   └── dependencies.py            # 依赖注入
 │   │
 │   ├── data/
-│   │   └── hub.py                    # V10 新增：DataHub 多源路由
+│   │   └── hub.py                     # V10 新增：DataHub 多源路由
 │   │
-│   ├── models/                       # SQLAlchemy 数据模型 (21+ 表)
+│   ├── models/                        # SQLAlchemy 数据模型 (26+ 表)
 │   │   ├── ...（原有 15 张表）
-│   │   ├── backtest_task.py          # V10 新增
-│   │   ├── portfolio_snapshot.py     # V10 新增
-│   │   ├── paper_account.py          # V10 新增
-│   │   ├── copilot_message.py        # V10 新增
-│   │   ├── algo_execution_task.py    # V10 新增
-│   │   └── autonomy_audit_log.py     # V10 新增
+│   │   ├── backtest_task.py           # V10 新增
+│   │   ├── portfolio_snapshot.py      # V10 新增
+│   │   ├── paper_account.py           # V10 新增
+│   │   ├── copilot_message.py         # V10 新增
+│   │   ├── algo_execution_task.py     # V10 新增
+│   │   ├── autonomy_audit_log.py      # V10 新增; V10.2-M1 新增 regime_at_decision 列
+│   │   ├── market_regime.py           # V10.2-M1 新增：市场体制历史表
+│   │   ├── event_calendar.py          # V10.2-M2 新增：事件日历表（盈利/FOMC/CPI 等）
+│   │   ├── trade_attribution.py       # V10.2-M5 新增：交易三层归因记录表
+│   │   └── ai_insight.py              # V10.2-M6 新增：AI洞察知识库 + A/B实验表
 │   │
-│   ├── schemas/                      # Pydantic 响应模型
-│   │   └── ...（原有 + 8 组新增）
+│   ├── schemas/                       # Pydantic 响应模型
+│   │   └── ...（原有 + 14 组新增，含 regime/events/positions_lifecycle/signals/attribution/insights）
 │   │
-│   ├── services/                     # 业务逻辑层 (28+ 服务)
+│   ├── services/                      # 业务逻辑层 (40+ 服务)
 │   │   ├── ...（原有 20 个服务）
-│   │   ├── risk_gate_service.py      # V10 新增：非绕过 VaR+压测门
-│   │   ├── autonomous_engine.py      # V10 新增：三级自主决策引擎
-│   │   ├── stress_test_service.py    # V10 新增
-│   │   ├── twap_vwap_service.py      # V10 新增：执行算法
-│   │   ├── copilot_service.py        # V10 新增：对话式接口
+│   │   ├── risk_gate_service.py       # V10 新增; V10.2-M1 新增 set_regime_var_multiplier()
+│   │   ├── autonomous_engine.py       # V10 新增; V10.2-M1 审计日志注入 regime_at_decision
+│   │   ├── regime_classifier.py       # V10.2-M1 新增：五维评分体制分类器
+│   │   ├── regime_strategy_allocator.py # V10.2-M1 新增：体制感知策略权重分配器
+│   │   ├── stress_test_service.py     # V10 新增
+│   │   ├── twap_vwap_service.py       # V10 新增：执行算法
+│   │   ├── copilot_service.py         # V10 新增：对话式接口
 │   │   ├── options_analysis_service.py # V10 新增（只读）
-│   │   ├── paper_trading_service.py  # V10 新增
-│   │   └── weekly_report_service.py  # V10 新增
+│   │   ├── paper_trading_service.py   # V10 新增
+│   │   ├── weekly_report_service.py   # V10 新增
+│   │   ├── event_calendar_service.py  # V10.2-M2 新增：yfinance 盈利 + 硬编码 FOMC/CPI/NFP 日历
+│   │   ├── earnings_fence_service.py  # V10.2-M2 新增：50% 仓位上限围栏逻辑
+│   │   ├── dynamic_position_service.py # V10.2-M3 新增：PositionStateMachine + ScaleIn/Out + TrailingStop
+│   │   ├── signal_fusion_engine.py    # V10.2-M4 新增：六维加权融合（含体制倍数）
+│   │   ├── trade_attribution_engine.py # V10.2-M5 新增：三层归因（Alpha源/执行/仓位管理）
+│   │   ├── insight_service.py         # V10.2-M6 新增：InsightService + WeeklyInsightGenerator + ABTestEngine
+│   │   └── copilot_partner_service.py # V10.2-M7 新增：ProactiveIntelligence + DeepResearchEngine
 │   │
-│   ├── engine/                       # 核心引擎
+│   ├── engine/                        # 核心引擎
 │   │   ├── signal_engine.py
 │   │   ├── order_executor.py
 │   │   ├── performance_analyzer.py
@@ -86,27 +104,41 @@
 │   │   ├── quant_trading_loop.py
 │   │   ├── auto_hedge_engine.py
 │   │   ├── alert_engine.py
-│   │   ├── backtest/                 # V10 新增
+│   │   ├── backtest/                  # V10 新增
 │   │   │   ├── __init__.py
-│   │   │   └── runner.py             # 事件驱动回测 + Walk-Forward
-│   │   └── portfolio/               # V10 新增
-│   │       └── optimizer.py          # Markowitz + Kelly
+│   │   │   └── runner.py              # 事件驱动回测 + Walk-Forward
+│   │   └── portfolio/                 # V10 新增
+│   │       └── optimizer.py           # Markowitz + Kelly
 │   │
-│   ├── routers/                      # API 路由层 (24 个端点组)
+│   ├── routers/                       # API 路由层 (30 个端点组)
 │   │   ├── ...（原有 16 个路由）
-│   │   ├── autonomy.py               # V10 新增
-│   │   ├── copilot.py                # V10 新增
-│   │   ├── backtest.py               # V10 新增
-│   │   ├── portfolio.py              # V10 新增
-│   │   ├── stress_test.py            # V10 新增
-│   │   ├── paper_trading.py          # V10 新增
-│   │   ├── options_analysis.py       # V10 新增
-│   │   └── execution_algo.py         # V10 新增
+│   │   ├── autonomy.py                # V10 新增
+│   │   ├── copilot.py                 # V10 新增; V10.2-M7 新增 POST /deep-research
+│   │   ├── backtest.py                # V10 新增
+│   │   ├── portfolio.py               # V10 新增
+│   │   ├── stress_test.py             # V10 新增
+│   │   ├── paper_trading.py           # V10 新增
+│   │   ├── options_analysis.py        # V10 新增
+│   │   ├── execution_algo.py          # V10 新增
+│   │   ├── regime.py                  # V10.2-M1 新增：/api/v1/regime 4 个端点
+│   │   ├── events.py                  # V10.2-M2 新增：/api/v1/events 5 个端点
+│   │   ├── position_lifecycle.py      # V10.2-M3 新增：/api/v1/positions 生命周期 3 个端点
+│   │   ├── signal_fusion.py           # V10.2-M4 新增：/api/v1/signals 2 个端点
+│   │   ├── attribution.py             # V10.2-M5 新增：/api/v1/attribution 2 个端点
+│   │   └── insights.py                # V10.2-M6 新增：/api/v1/insights 5 个端点
 │   │
 │   ├── broker/
 │   ├── jobs/
+│   │   ├── ...（原有 6 个 Job 文件）
+│   │   ├── regime_jobs.py             # V10.2-M1 新增：每日 08:00 体制分类 Job
+│   │   ├── event_jobs.py              # V10.2-M2 新增：每日 07:00 事件日历同步 Job
+│   │   └── insight_jobs.py            # V10.2-M6 新增：周日 22:00 ET 洞察生成 + 每日 08:00 A/B检验 Job
 │   └── utils/
 │
+├── scripts/
+│   └── migrations/
+│       ├── v10_2_m1_market_regimes.py  # V10.2-M1 DB 迁移脚本
+│       └── upgrade_to_v10_2_m2_m8.py  # V10.2-M2~M8 DB 迁移脚本（4张新表）
 ├── tests/
 ├── requirements.txt
 └── .env
@@ -408,7 +440,7 @@ CREATE TABLE paper_accounts (
 #### J. copilot_messages - Copilot 对话记录
 
 ```sql
-CREATE TABLE copilot_messages (
+CREATE TABLE copilot_messages (  -- role VARCHAR(16) fixed from VARCHAR(8)
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
   account_id VARCHAR(64) NOT NULL,
   session_id VARCHAR(64) NOT NULL,
@@ -469,6 +501,121 @@ CREATE TABLE autonomy_audit_log (
   INDEX idx_decision_type (decision_type)
 );
 ```
+
+---
+
+### 2.3 V10.2 新增表
+
+#### M. event_calendar_entries — 事件日历
+
+```sql
+CREATE TABLE event_calendar_entries (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  symbol VARCHAR(32) COMMENT '标的（FOMC/CPI/NFP 类事件为空）',
+  event_type VARCHAR(32) NOT NULL COMMENT 'EARNINGS/FOMC/CPI/NFP/OTHER',
+  event_date DATE NOT NULL,
+  risk_level VARCHAR(16) NOT NULL DEFAULT 'MEDIUM' COMMENT 'LOW/MEDIUM/HIGH/CRITICAL',
+  fence_active BOOLEAN DEFAULT FALSE COMMENT '围栏是否激活',
+  fence_overridden BOOLEAN DEFAULT FALSE COMMENT '是否被人工覆盖',
+  override_reason TEXT,
+  eps_estimate DECIMAL(10,4),
+  eps_actual DECIMAL(10,4),
+  revenue_estimate DECIMAL(20,2),
+  revenue_actual DECIMAL(20,2),
+  reaction_pct DECIMAL(10,4) COMMENT '盈利公布后24h价格反应%',
+  source VARCHAR(32) DEFAULT 'yfinance' COMMENT '数据来源',
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_symbol_date (symbol, event_date),
+  INDEX idx_event_date (event_date),
+  INDEX idx_risk (risk_level)
+);
+```
+
+**用途**：存储盈利/FOMC/CPI/NFP 等高影响力事件，用于盈利围栏逻辑判断。
+
+#### N. trade_attribution_entries — 交易归因记录
+
+```sql
+CREATE TABLE trade_attribution_entries (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  account_id VARCHAR(64) NOT NULL,
+  trade_id VARCHAR(64) NOT NULL COMMENT '关联 autonomy_audit_log 或 trade_journal',
+  symbol VARCHAR(32) NOT NULL,
+  direction VARCHAR(8) NOT NULL,
+  entry_price DECIMAL(20,6),
+  exit_price DECIMAL(20,6),
+  quantity DECIMAL(20,6),
+  realized_pnl DECIMAL(20,2),
+  -- Layer 1: Alpha 源归因
+  alpha_pnl DECIMAL(20,2) COMMENT 'Alpha来源贡献PnL',
+  alpha_source VARCHAR(64) COMMENT '信号来源策略/维度',
+  alpha_confidence DECIMAL(5,2),
+  -- Layer 2: 执行质量归因
+  exec_pnl DECIMAL(20,2) COMMENT '执行质量贡献PnL（滑点/时机）',
+  exec_quality_score DECIMAL(5,2) COMMENT '0-100',
+  exec_algo VARCHAR(16) COMMENT 'MKT/TWAP/VWAP',
+  slippage_bps DECIMAL(10,4),
+  -- Layer 3: 仓位管理归因
+  pos_mgmt_pnl DECIMAL(20,2) COMMENT '仓位管理贡献PnL',
+  stop_adjustment_count INT DEFAULT 0,
+  scale_in_count INT DEFAULT 0,
+  scale_out_count INT DEFAULT 0,
+  market_regime_at_entry VARCHAR(32),
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_account_time (account_id, created_at),
+  INDEX idx_symbol (symbol),
+  INDEX idx_alpha_source (alpha_source)
+);
+```
+
+**用途**：记录每笔已平仓交易的三层归因，驱动 AttributionPage 可视化分析。
+
+#### O. ai_insight_repository — AI 洞察知识库
+
+```sql
+CREATE TABLE ai_insight_repository (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  insight_type VARCHAR(32) NOT NULL COMMENT 'WEEKLY_SUMMARY/PATTERN/LESSON/RULE_CANDIDATE',
+  title VARCHAR(256) NOT NULL,
+  body TEXT NOT NULL,
+  confidence DECIMAL(5,2) DEFAULT 0.5 COMMENT '0-1，AI生成时写入，可人工调整',
+  active BOOLEAN DEFAULT TRUE COMMENT '是否激活（停用后不影响新决策）',
+  source_trades JSON COMMENT '关联的 trade_id 列表',
+  model_used VARCHAR(64),
+  generated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_type_active (insight_type, active),
+  INDEX idx_generated (generated_at)
+);
+```
+
+#### P. ab_experiments — A/B 实验
+
+```sql
+CREATE TABLE ab_experiments (
+  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+  name VARCHAR(128) NOT NULL UNIQUE,
+  description TEXT,
+  hypothesis TEXT,
+  control_params JSON NOT NULL COMMENT '对照组参数',
+  test_params JSON NOT NULL COMMENT '实验组参数',
+  target_metric VARCHAR(64) NOT NULL COMMENT '评估指标名称（如 sharpe/win_rate）',
+  status VARCHAR(16) DEFAULT 'RUNNING' COMMENT 'RUNNING/COMPLETED/PAUSED',
+  start_date DATE NOT NULL,
+  end_date DATE,
+  control_result JSON COMMENT '对照组统计结果',
+  test_result JSON COMMENT '实验组统计结果',
+  p_value DECIMAL(10,6) COMMENT 'scipy t-test p 值',
+  statistical_significance BOOLEAN COMMENT 'p < 0.05',
+  conclusion TEXT,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_status (status)
+);
+```
+
+**用途**：A/B 实验管理，自动运行 scipy t-test 确认结果显著性（p<0.05）。
 
 ---
 
@@ -922,6 +1069,132 @@ class CopilotService:
 
 ---
 
+### 4.6 V10.2-M2~M7 新增服务设计
+
+#### EventCalendarService — 事件日历同步
+
+```python
+class EventCalendarService:
+    """
+    每日 07:00 ET 同步：
+    - yfinance.Ticker.calendar → EARNINGS 事件（未来 14 天内活跃标的）
+    - 硬编码 FOMC/CPI/NFP 2025 全年日期（高影响力宏观事件）
+    写入 EventCalendarEntry，触发 EventBus.publish(Topic.EVENT_CALENDAR_UPDATED)
+    """
+    async def sync_earnings(self, symbols: List[str], lookahead_days: int = 14)
+    async def get_calendar(self, lookahead_days: int, symbol: Optional[str]) -> List[EventCalendarEntry]
+```
+
+#### EarningsFenceService — 盈利围栏
+
+```python
+class EarningsFenceService:
+    """
+    PREEARNING_DAYS=1（盈利前1天激活围栏，默认）
+    围栏激活时：新建仓/加仓数量上限 = 50% × 正常仓位
+    订阅 EventBus.Topic.EVENT_CALENDAR_UPDATED 自动刷新
+    """
+    async def get_fence_status(self, symbol: str) -> FenceStatus
+    async def get_all_active_fences(self) -> List[FenceStatus]
+    async def override_fence(self, event_id: int, active: bool, reason: str)
+```
+
+#### DynamicPositionService — 动态仓位生命周期
+
+```python
+class PositionStateMachine:
+    """
+    状态机：INITIAL → PARTIAL → FULL → REDUCING → CLOSED
+    三类引擎：
+    - ScaleInEngine：盈利回调 > 30% 波动率 * ATR 时触发加仓
+    - ScaleOutEngine：盈利超目标 1.5× 时分批减仓
+    - TrailingStopEngine：移动止损（Price - N*ATR），ATR=14日
+    """
+    async def evaluate(self, ctx: PositionContext) -> LifecycleDecision
+    async def get_scale_in_candidates(self, account_id: str) -> List[ScaleInCandidate]
+```
+
+#### SignalFusionEngine — 六维信号融合
+
+```python
+class SignalFusionEngine:
+    """
+    六维权重（基础）：
+    - tech: 0.25（技术面/趋势/动量）
+    - fundamental: 0.20（基本面/估值）
+    - macro: 0.15（宏观风险/利率）
+    - volatility: 0.15（波动率/VIX）
+    - options: 0.15（期权链信号）
+    - sentiment: 0.10（情绪/新闻）
+    
+    体制倍数：BULL_TREND tech×1.3 / CRISIS macro×1.5...
+    composite_score = Σ(dim_score * effective_weight)
+    """
+    async def fuse(self, req: FusedSignalRequest) -> FusedSignalResponse
+    async def get_sentiment_score(self, symbol: str) -> SentimentScoreResponse
+```
+
+#### TradeAttributionEngine — 三层交易归因
+
+```python
+class TradeAttributionEngine:
+    """
+    Layer 1 — Alpha 源归因：
+        alpha_pnl = total_pnl * alpha_contribution_ratio
+        contribution_ratio 由 signal_fusion 维度权重反推
+    Layer 2 — 执行质量归因：
+        exec_pnl = (actual_fill - theoretical_price) * qty
+        exec_quality_score = 100 * (1 - |slippage_bps| / 50)
+    Layer 3 — 仓位管理归因：
+        pos_mgmt_pnl = scale_in_gain + trailing_stop_savings
+    """
+    async def attribute_trade(self, trade_id: str) -> TradeAttributionEntry
+    async def get_attribution_summary(self, account_id: str, days: int) -> AttributionSummary
+```
+
+#### InsightService + ABTestEngine — AI 洞察进化
+
+```python
+class WeeklyInsightGenerator:
+    """
+    每周日 22:00 ET 使用 deepseek-reasoner 生成洞察：
+    1. 聚合过去7天 trade_attribution_entries
+    2. 识别 Alpha 源、执行模式、仓位管理规律
+    3. 生成 WEEKLY_SUMMARY + LESSON 类型洞察写入 ai_insight_repository
+    """
+
+class ABTestEngine:
+    """
+    每日 08:00 检验运行中实验：
+    使用 scipy.stats.ttest_ind 对 control/test 样本执行双样本 t-test
+    p < 0.05 → 自动更新 statistical_significance=True 并写入 conclusion
+    """
+    async def run_significance_check(self, experiment_id: int)
+```
+
+#### CopilotPartnerService — Copilot Partner & 深度研究
+
+```python
+class DeepResearchEngine:
+    """
+    多步深度研究（POST /api/v1/copilot/deep-research）：
+    Step 1: 市场情绪分析（deepseek-chat）
+    Step 2: 基本面深潜（deepseek-reasoner）
+    Step 3: 风险因素扫描（deepseek-chat）
+    Step 4: 综合评级与价格目标（deepseek-reasoner）
+    返回 DeepResearchReport{rating/price_target/body/sources}
+    """
+    async def research(self, symbol: str, query: Optional[str]) -> DeepResearchReport
+
+class ProactiveIntelligenceService:
+    """
+    主动推送：订阅 EventBus 所有 Topic，当重大事件触发时
+    通过 Telegram/Copilot 主动推送摘要（不等用户问）
+    """
+```
+
+---
+
 ## 5. 定时任务设计
 
 使用 APScheduler 实现周期性任务：
@@ -952,7 +1225,55 @@ scheduler.add_job(
     minute=30,
     id="daily_performance_evaluation"
 )
+
+# V10.2-M1: 每日体制分类
+scheduler.add_job(
+    regime_classification_job,
+    trigger="cron",
+    hour=8,
+    minute=0,
+    id="daily_regime_classification"
+)
+
+# V10.2-M2: 每日事件日历同步
+scheduler.add_job(
+    sync_event_calendar_job,
+    trigger="cron",
+    hour=7,
+    minute=0,
+    id="daily_event_calendar_sync"
+)
+
+# V10.2-M6: 每周日洞察生成（美东 22:00）
+scheduler.add_job(
+    generate_weekly_insights_job,
+    trigger="cron",
+    day_of_week="sun",
+    hour=22,
+    minute=0,
+    timezone="America/New_York",
+    id="weekly_insight_generation"
+)
+
+# V10.2-M6: 每日 A/B 实验检验
+scheduler.add_job(
+    run_ab_significance_check_job,
+    trigger="cron",
+    hour=8,
+    minute=30,
+    id="daily_ab_significance_check"
+)
 ```
+
+| Job ID | 触发时间 | 说明 | 版本 |
+|--------|---------|------|------|
+| `daily_equity_snapshot` | 每日 00:05 | 权益快照 | V10 |
+| `daily_performance_evaluation` | 每日 00:30 | 性能评估 | V10 |
+| `refresh_technical_indicators` | 每小时 | 技术指标刷新 | V10 |
+| `daily_regime_classification` | 每日 08:00 ET | 市场体制分类 | V10.2-M1 |
+| `daily_event_calendar_sync` | 每日 07:00 ET | 事件日历同步（yfinance 盈利 + FOMC/CPI/NFP） | V10.2-M2 |
+| `weekly_insight_generation` | 每周日 22:00 ET | AI 洞察生成（deepseek-reasoner） | V10.2-M6 |
+| `daily_ab_significance_check` | 每日 08:30 | A/B 实验 t-test 检验 | V10.2-M6 |
 
 ---
 

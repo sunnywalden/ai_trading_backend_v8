@@ -1,7 +1,7 @@
-"""V10: AI 自主决策审计日志模型"""
+"""V10: AI 自主决策审计日志模型（V10.2-M1: 新增体制感知列）"""
 from datetime import datetime
 from typing import Any, Dict, Optional
-from sqlalchemy import Column, BigInteger, String, Boolean, DateTime, DECIMAL, JSON, Text, text, Index
+from sqlalchemy import Column, BigInteger, String, Boolean, DateTime, DECIMAL, JSON, Text, Float, text, Index
 from sqlalchemy.orm import Mapped, mapped_column
 from app.models.db import Base
 
@@ -22,9 +22,18 @@ class AutonomyAuditLog(Base):
     revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     revoke_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     circuit_breaker_triggered: Mapped[bool] = mapped_column(Boolean, default=False)
+    # ── V10.2-M1 新增：体制感知列 ──────────────────────────────────────────────
+    regime_at_decision: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True, comment="V10.2: 决策时的市场体制，如 BULL_TREND"
+    )
+    regime_confidence: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True, comment="V10.2: 体制分类置信度 [0,1]"
+    )
+    # ────────────────────────────────────────────────────────────────────────────
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=text("CURRENT_TIMESTAMP"))
 
     __table_args__ = (
         Index("idx_autonomy_account_time", "account_id", "created_at"),
         Index("idx_autonomy_decision_type", "decision_type"),
+        Index("idx_autonomy_regime", "regime_at_decision"),  # V10.2: 支持按体制过滤审计日志
     )

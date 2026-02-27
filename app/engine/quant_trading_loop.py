@@ -341,13 +341,8 @@ class QuantTradingLoop:
     ) -> Dict[str, Any]:
         """获取闭环系统状态"""
         
-        # 🛡️ 每次获取状态时同步正在执行的订单状态
-        try:
-            sync_results = await self.order_executor.sync_executing_orders(account_id)
-            if sync_results.get("updates", 0) > 0:
-                print(f"[Loop] Sync completed: {sync_results['updates']} updates found.")
-        except Exception as e:
-            print(f"[Loop] Error during order sync: {e}")
+        # 🛡️ 移除同步阻塞的订单同步 logic，避免 API 超时
+        # 实际同步由后台 Job 或用户显式触发执行
             
         from app.models.trading_signal import TradingSignal, SignalStatus
         from sqlalchemy import select, func, and_

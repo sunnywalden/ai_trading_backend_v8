@@ -240,7 +240,7 @@ async def cleanup_old_data_job():
                         SymbolBehaviorStats.updated_at < cutoff_behavior
                     )
                 )
-                deleted_counts["behavior_stats"] = result.rowcount
+                deleted_counts["behavior_stats"] = result.rowcount  # type: ignore[attr-defined]
                 
                 # 清理风险档案数据
                 result = await session.execute(
@@ -248,7 +248,7 @@ async def cleanup_old_data_job():
                         SymbolRiskProfile.updated_at < cutoff_risk
                     )
                 )
-                deleted_counts["risk_profiles"] = result.rowcount
+                deleted_counts["risk_profiles"] = result.rowcount  # type: ignore[attr-defined]
                 
                 # 清理地缘政治事件（需要先添加对应的model）
                 # 由于GeopoliticalEvent model在service中定义，这里暂时跳过

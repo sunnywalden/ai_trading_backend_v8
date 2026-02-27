@@ -94,3 +94,24 @@ async def confirm_action(
     if not result["success"]:
         raise HTTPException(status_code=400, detail=result.get("reason", "Action failed"))
     return result
+
+
+class DeepResearchRequest(BaseModel):
+    symbol: str
+    query: Optional[str] = None
+
+
+@router.post("/deep-research")
+async def deep_research(
+    body: DeepResearchRequest,
+    session: AsyncSession = Depends(get_session),
+    current_user: str = Depends(get_current_user),
+):
+    """M7 深度研究: 6 数据源 + deepseek-reasoner 生成结构化研究报告"""
+    from app.services.copilot_partner_service import copilot_partner_service
+    report = await copilot_partner_service.deep_research_engine.research(
+        symbol=body.symbol.upper(),
+        query=body.query or f"Comprehensive analysis of {body.symbol}",
+        db=session,
+    )
+    return {"report": report}

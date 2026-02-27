@@ -1,4 +1,7 @@
-"""V10: RiskGateService — 非绕过风险门（在任何自主下单前必须通过）"""
+"""V10: RiskGateService — 非绕过风险门（在任何自主下单前必须通过）
+
+V10.2-M1 升级：支持体制感知 VaR 门限动态调整，通过 set_regime_var_multiplier() 注入体制倍数。
+"""
 from __future__ import annotations
 
 import logging
@@ -26,11 +29,17 @@ class RiskGateService:
     """
     非绕过风险检查：
     1. 单标的仓位占比  ≤ MAX_SINGLE_POSITION_PCT
-    2. 投资组合 VaR@95% ≤ MAX_VAR_PCT
+    2. 投资组合 VaR@95% ≤ MAX_VAR_PCT × regime_multiplier  ★ V10.2: 体制感知倒数
     3. 压力测试损失    ≤ MAX_STRESS_LOSS_PCT
     4. 当日已交易笔数  ≤ MAX_DAILY_TRADES
     5. 当日已实现亏损  → 触发 Circuit Breaker
     """
+
+    def __init__(self) -> None:
+        # V10.2-M1: 体制感知 VaR 倍数，默认 1.0（不优化）
+        # 由 StrategyWeightAllocator.on_regime_changed 当体制切换时更新
+        self._regime_var_multiplier: float = 1.0
+        self._current_regime: str = "UNKNOWN"
 
     async def check(
         self,
@@ -87,10 +96,14 @@ class RiskGateService:
         # ── 4. VaR@95% 估算（简化：正态分布假设）──
         var_pct = self._estimate_var(current_positions, current_equity)
         details["estimated_var_pct"] = round(var_pct, 4)
-        if var_pct > settings.MAX_VAR_PCT:
+        # V10.2-M1: 应用体制感知 VaR 倍数
+        effective_var_limit = settings.MAX_VAR_PCT * self._regime_var_multiplier
+        details["regime_var_multiplier"] = self._regime_var_multiplier
+        details["effective_var_limit"] = round(effective_var_limit, 4)
+        if var_pct > effective_var_limit:
             return RiskGateResult(
                 passed=False,
-                reason=f"VaR limit: {var_pct:.1%} > {settings.MAX_VAR_PCT:.1%}",
+                reason=f"VaR limit: {var_pct:.1%} > {effective_var_limit:.1%} (regime={self._current_regime}, ×{self._regime_var_multiplier:.2f})",
                 details=details,
             )
 
@@ -106,6 +119,44 @@ class RiskGateService:
 
         logger.info(f"[RiskGate] PASSED for {symbol} {side} qty={qty:.2f}. details={details}")
         return RiskGateResult(passed=True, details=details)
+
+    # ──────────────────────────────────────────
+    # V10.2-M1: 体制感知 VaR 倍数切换
+    # ──────────────────────────────────────────
+
+    def set_regime_var_multiplier(self, regime: str) -> None:
+        """
+        体制切换时由 StrategyWeightAllocator 调用。
+
+        从 settings.REGIME_VAR_MULTIPLIERS 读取对应体制的 VaR 倍数，
+        并实时更新 self._regime_var_multiplier。
+
+        Parameters
+        ----------
+        regime : str  如 "BULL_TREND"
+        """
+        multipliers: dict[str, float] = {}
+        try:
+            for item in settings.REGIME_VAR_MULTIPLIERS.split(","):
+                item = item.strip()
+                if ":" in item:
+                    r, m = item.split(":", 1)
+                    multipliers[r.strip()] = float(m.strip())
+        except Exception as exc:
+            logger.warning(f"[RiskGate] Failed to parse REGIME_VAR_MULTIPLIERS: {exc}")
+
+        new_multiplier = multipliers.get(regime.upper(), 1.0)
+        old_multiplier = self._regime_var_multiplier
+        self._regime_var_multiplier = new_multiplier
+        self._current_regime = regime
+        logger.info(
+            f"[RiskGate] VaR multiplier updated: ×{old_multiplier:.2f} → ×{new_multiplier:.2f} "
+            f"(regime={regime}, effective_var_limit={settings.MAX_VAR_PCT * new_multiplier:.2%})"
+        )
+
+    def get_regime_var_multiplier(self) -> float:
+        """  返回当前体制 VaR 倍数（供审计日志和给 Router 查询用）。"""
+        return self._regime_var_multiplier
 
     # ──────────────────────────────────────────
     # 内部估算函数

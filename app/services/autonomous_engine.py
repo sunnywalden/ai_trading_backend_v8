@@ -71,6 +71,23 @@ class AutonomousEngine:
         from app.core.runtime_config import get_autonomy_level as _get_level
         level = await _get_level()
         logger.info(f"Starting decision cycle for {account_id}, Level={level}")
+
+        # V10.2-M1: 获取当前市场体制上下文（用于审计日志 + 上册 AI 决策提示词）
+        regime_at_decision: Optional[str] = None
+        regime_confidence: Optional[float] = None
+        try:
+            from app.services.regime_strategy_allocator import fetch_current_regime_from_redis
+            regime_info = await fetch_current_regime_from_redis()
+            if regime_info.get("regime") not in (None, "UNKNOWN"):
+                regime_at_decision = regime_info["regime"]
+                regime_confidence   = regime_info.get("confidence")
+                logger.debug(
+                    f"[AutonomousEngine] Regime context: {regime_at_decision} "
+                    f"(confidence={regime_confidence:.2%})"
+                )
+        except Exception as _re:
+            logger.debug(f"[AutonomousEngine] Could not fetch regime info: {_re}")
+
         """
         1. 拉取待处理信号
         2. AI 推理决策
@@ -150,7 +167,11 @@ class AutonomousEngine:
                         await self._update_signal_status(db, signal["id"], _SS.FAILED)
 
             # 写审计日志
-            await self._write_audit_log(db, account_id, level, decision, gate, order_id, circuit_breaker)
+            await self._write_audit_log(
+                db, account_id, level, decision, gate, order_id, circuit_breaker,
+                regime_at_decision=regime_at_decision,  # V10.2-M1
+                regime_confidence=regime_confidence,      # V10.2-M1
+            )
 
             results.append({
                 "symbol": decision["symbol"],
@@ -449,6 +470,8 @@ class AutonomousEngine:
         gate: Any,
         order_id: Optional[str],
         circuit_breaker: bool,
+        regime_at_decision: Optional[str] = None,    # V10.2-M1
+        regime_confidence: Optional[float] = None,   # V10.2-M1
     ) -> None:
         from app.models.autonomy_audit_log import AutonomyAuditLog
 
@@ -463,6 +486,8 @@ class AutonomousEngine:
             risk_gate_detail=gate.details,
             order_id=order_id,
             circuit_breaker_triggered=circuit_breaker,
+            regime_at_decision=regime_at_decision,   # V10.2-M1
+            regime_confidence=regime_confidence,     # V10.2-M1
         )
         db.add(log)
 
