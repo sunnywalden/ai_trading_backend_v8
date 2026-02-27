@@ -1,8 +1,44 @@
 import json
 import pickle
+import math
 from typing import Any, Optional, Union
 from datetime import timedelta
 from app.models.db import redis_client
+
+
+def _sanitize_for_json(value: Any) -> Any:
+    """递归清洗 JSON 不兼容值（NaN/Inf/numpy 标量）。"""
+    if value is None:
+        return None
+
+    if isinstance(value, float):
+        return None if (math.isnan(value) or math.isinf(value)) else value
+
+    if isinstance(value, dict):
+        return {k: _sanitize_for_json(v) for k, v in value.items()}
+
+    if isinstance(value, list):
+        return [_sanitize_for_json(v) for v in value]
+
+    if isinstance(value, tuple):
+        return tuple(_sanitize_for_json(v) for v in value)
+
+    # numpy 标量兼容：float32/float64/int32/int64 等
+    module_name = type(value).__module__ or ""
+    if module_name == "numpy" or module_name.startswith("numpy."):
+        try:
+            py_value = value.item() if hasattr(value, "item") else value
+            if isinstance(py_value, float) and (math.isnan(py_value) or math.isinf(py_value)):
+                return None
+            return py_value
+        except Exception:
+            try:
+                f = float(value)
+                return None if (math.isnan(f) or math.isinf(f)) else f
+            except Exception:
+                return None
+
+    return value
 
 class RedisCache:
     """
@@ -24,7 +60,9 @@ class RedisCache:
         
         if is_json:
             try:
-                return json.loads(data)
+                # 兼容历史脏缓存（可能包含 NaN）
+                parsed = json.loads(data)
+                return _sanitize_for_json(parsed)
             except:
                 return data
         return data
@@ -34,7 +72,8 @@ class RedisCache:
             return False
         
         if is_json:
-            data = json.dumps(value)
+            clean_value = _sanitize_for_json(value)
+            data = json.dumps(clean_value, allow_nan=False)
         else:
             data = str(value)
             

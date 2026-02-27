@@ -276,7 +276,7 @@ class CopilotService:
             for s in signals:
                 context["top_signals"].append({
                     "symbol": s.symbol,
-                    "action": s.signal_type.value if hasattr(s.signal_type, 'value') else s.signal_type,
+                    "action": str(s.signal_type),
                     "confidence": s.confidence,
                     "reason": s.research_summary[:50] if s.research_summary else "六维指标共振"
                 })

@@ -540,8 +540,8 @@ async def get_strategy_signals(
                 "id": signal.id,
                 "symbol": signal.symbol,
                 "direction": signal.direction,
-                "strength": signal.strength,
-                "weight": signal.weight,
+                "strength": signal.signal_strength,
+                "confidence": signal.confidence,
                 "risk_score": signal.risk_score,
                 "created_at": signal.created_at.isoformat() if signal.created_at is not None else None,
             }

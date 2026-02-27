@@ -1,7 +1,7 @@
 # 后端架构设计文档
 
 > **AI量化交易闭环系统** - Backend Design  
-> 版本：V10.2 | 更新日期：2026-02-28
+> 版本：V10.3 | 更新日期：2026-03-15
 > 
 > **V10.2-M2~M8 变更摘要**：EventCalendar 事件日历（盈利/FOMC/CPI/NFP）、EarningsFence 盈利围栏（50%仓位上限）、PositionStateMachine 动态仓位生命周期（加仓/减仓/移动止损）、SignalFusionEngine 六维加权融合信号（tech 25%/fundamental 20%/macro 15%/vol 15%/opt 15%/sent 10%）、TradeAttributionEngine 三层归因（Alpha源/执行质量/仓位管理）、InsightService + ABTestEngine AI洞察进化（deepseek-reasoner 周报 + scipy t-test A/B实验）、CopilotPartnerService 深度研究引擎（多步 deep-research）、4张新增 DB 表、17个新增 API 端点、2个新增定时 Job。
 >
@@ -1471,3 +1471,150 @@ JWT_EXPIRE_DAYS=7
 - PRODUCT.md - 产品需求文档
 - FRONTEND_DESIGN.md - 前端设计文档
 - STRATEGY_LIBRARY_DESIGN.md - 策略库扩充设计文档（新增）
+
+---
+
+## §10. V10.3 交易可观测性（Trade Observability）
+
+> **V10.3 变更摘要**：新增交易生命周期中心（17 阶段 Pipeline Kanban + 双状态机面板 + 决策溯源抽屉）、智能订单簿（16 列高密度交易列表，3 分组视图）、态势感知条（全局 36px 粘性状态栏，WebSocket 实时推送）。新增约束：`trading_plan` 表扩充 10 个字段，新建 `fsm_transition_log` 表，3 个新增 Router/Service/Schema 模块，1 个 WebSocket 推送通道。
+
+### 10.1 架构变更概览
+
+```
+V10.3 新增模块
+───────────────────────────────────────────────────────────────────────
+  app/schemas/
+    lifecycle.py             ← Pipeline 聚合、FSM 状态、事件流、溯源 schema
+    order_book.py            ← 智能订单簿列表、过滤器、汇总 schema
+    situational_awareness.py ← 全局态势感知快照 schema
+
+  app/services/
+    lifecycle_service.py     ← 17 阶段分布聚合、FSM 计数、事件流查询、溯源链组装
+    order_book_service.py    ← 订单列表聚合（含 plan_tags 解包）、止损修改
+    situational_awareness_service.py  ← 6 数据块聚合（体制/VaR/围栏/执行/待确认/自主级别）
+
+  app/routers/
+    lifecycle.py             ← GET /api/v1/lifecycle/* (5 端点)
+    order_book.py            ← GET/PATCH /api/v1/order-book/* (4 端点)
+    websocket.py [修改]      ← 追加 WS /api/v1/ws/situational-awareness
+
+  scripts/migrations/
+    upgrade_to_v10_3.py      ← trading_plan 表新增 10 列 + fsm_transition_log 新表
+───────────────────────────────────────────────────────────────────────
+```
+
+### 10.2 数据模型变更
+
+#### trading_plan 表扩充列（ALTER TABLE）
+
+| 列名 | 类型 | 说明 |
+|------|------|------|
+| `direction` | VARCHAR(4) | 交易方向：BUY / SELL |
+| `confidence` | DECIMAL(5,2) | AI 综合置信度 0-100 |
+| `reasoning` | TEXT | AI 决策摘要（最多 500 字） |
+| `autonomy_action` | VARCHAR(20) | AUTO_EXECUTE / PENDING_CONFIRM |
+| `source` | VARCHAR(20) | AI_AUTONOMOUS / AI_ADVISORY / MANUAL |
+| `pipeline_stage` | SMALLINT | 当前所处 17 阶段（0-16） |
+| `stage_entered_at` | DATETIME | 进入当前阶段的时间戳 |
+| `stage_history` | JSON | `[{stage, entered_at, exited_at}]` |
+| `provenance_snapshot` | JSON | `{six_dim_scores, regime, risk_gate_results, exec_progress}` |
+| `position_fsm_state` | VARCHAR(20) | 关联持仓 FSM 最新状态 |
+
+#### 新建表 fsm_transition_log
+
+```sql
+CREATE TABLE fsm_transition_log (
+    id             INT AUTO_INCREMENT PRIMARY KEY,
+    plan_id        INT          NOT NULL,
+    fsm_type       VARCHAR(10)  NOT NULL,  -- PLAN / POSITION
+    from_state     VARCHAR(32),
+    to_state       VARCHAR(32)  NOT NULL,
+    engine         VARCHAR(32),            -- scale_in / scale_out / trailing / manual
+    qty_delta      DECIMAL(10,4),
+    trigger_reason TEXT,
+    occurred_at    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_fsm_plan_id (plan_id),
+    INDEX idx_fsm_occurred_at (occurred_at)
+)
+```
+
+### 10.3 API 端点
+
+#### Lifecycle Router（`/api/v1/lifecycle`）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/pipeline` | 17 阶段 Pipeline 任务分布 |
+| GET | `/plan-fsm` | Plan FSM 各状态计数 |
+| GET | `/position-fsm` | Position FSM 状态计数 + 引擎触发统计 |
+| GET | `/fsm-events` | FSM 转换事件流（分页，?page&size&fsm_type） |
+| GET | `/provenance/{plan_id}` | 单笔交易决策溯源链（5 卡片） |
+
+#### Order Book Router（`/api/v1/order-book`）
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/` | 全量订单视图（含过滤参数） |
+| GET | `/summary` | 聚合汇总（数量/PnL/平均 confidence） |
+| GET | `/{plan_id}/detail` | 单笔订单完整详情 |
+| PATCH | `/{plan_id}/stop-loss` | 修改止损价 |
+
+#### WebSocket 推送
+
+| 路径 | 推送触发条件 | Payload 示例 |
+|------|------------|-------------|
+| `/api/v1/ws/situational-awareness` | 任意以下状态变化：体制 / VaR / 围栏数 / 执行数 / 待确认数 / 自主级别 | `{"type":"sa_update","data":{...}}` |
+
+REST 轮询备用：`GET /api/v1/situational-awareness`（5 秒间隔）
+
+### 10.4 Pipeline 阶段定义
+
+| Stage | 名称 | 描述 | P50 基准 |
+|-------|------|------|---------|
+| 0 | regime_detect | 体制分类（RegimeClassifier） | ≤60s |
+| 1 | signal_fusion | 六维信号融合（SignalFusionEngine） | ≤30s |
+| 2 | strategy_match | 策略匹配（StrategyWeightAllocator） | ≤10s |
+| 3 | plan_generation | AI 计划生成 | ≤120s |
+| 4 | risk_gate | 风险门控（RiskGateService 5 项检查） | ≤5s |
+| 5 | autonomy_decision | 自主决策路由（FULL/SEMI/ADVISORY） | ≤5s |
+| 6 | human_review | 人工审核等待（SEMI 模式） | ≤300s |
+| 7 | order_placement | 下单（broker 层）| ≤10s |
+| 8 | algo_execution | 算法执行（TWAP/VWAP） | ≤3600s |
+| 9 | position_monitor | 持仓监控（PositionStateMachine） | 持续 |
+| 10 | scale_adjust | 加减仓调整（ScaleIn/Out/Trailing） | ≤60s |
+| 11 | exit_trigger | 离场触发（目标价/止损/过期） | ≤30s |
+| 12 | settlement | 订单结算 | ≤60s |
+| 13 | attribution | 归因分析（TradeAttributionEngine） | ≤120s |
+| 14 | insight_update | 经验库更新（InsightService） | ≤300s |
+| 15 | ab_experiment | A/B 实验登记 | ≤60s |
+| 16 | completed | 交易完成存档 | — |
+
+### 10.5 服务层职责划分
+
+```
+LifecycleService
+  ├── get_pipeline_distribution()     — 查 trading_plan 按 pipeline_stage 分组 COUNT
+  ├── get_plan_fsm_counts()           — 查 trading_plan 按 plan_status 分组
+  ├── get_position_fsm_counts()       — 查 trading_plan 按 position_fsm_state 分组
+  ├── get_fsm_events(page, size, fsm_type) — 查 fsm_transition_log 分页
+  └── get_provenance(plan_id)         — 组装 5 卡片溯源数据
+
+OrderBookService
+  ├── list_orders(filters)            — 聚合 trading_plan + plan_tags 解包 + 分组
+  ├── get_summary()                   — 数量/PnL/均 confidence
+  ├── get_order_detail(plan_id)       — 单笔完整详情（含 provenance_snapshot）
+  └── update_stop_loss(plan_id, price) — PATCH 止损，写 fsm_transition_log
+
+SituationalAwarenessService
+  ├── get_snapshot()                  — 聚合 6 数据块（一次 DB + Redis 查询）
+  └── _should_push(prev, cur)         — 变更检测，决定是否 WS 广播
+```
+
+### 10.6 性能策略
+
+| 场景 | 策略 |
+|------|------|
+| Pipeline 分布轮询 | Redis 缓存 5s，TTL 到期后惰性刷新 |
+| 态势感知快照 | Redis 缓存 3s + WS 推送减少轮询 |
+| FSM 事件流 | 分页 20条/页，`occurred_at DESC` 索引覆盖 |
+| 订单簿列表 | 复合 WHERE + LIMIT，最多返回 500 条 |

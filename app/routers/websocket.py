@@ -99,3 +99,83 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
         await manager.disconnect(user_id)
     except Exception:
         await manager.disconnect(user_id)
+
+
+# ── V10.3: 态势感知 WebSocket ─────────────────────────────────────────────────
+class _SAConnectionManager:
+    """态势感知专用 WebSocket 连接管理器（匿名广播，无需用户 ID）。"""
+
+    def __init__(self):
+        self._connections: list[WebSocket] = []
+        self._lock = asyncio.Lock()
+
+    async def connect(self, ws: WebSocket):
+        await ws.accept()
+        async with self._lock:
+            self._connections.append(ws)
+
+    async def disconnect(self, ws: WebSocket):
+        async with self._lock:
+            if ws in self._connections:
+                self._connections.remove(ws)
+
+    async def broadcast(self, payload: dict):
+        msg = json.dumps(payload, default=str)
+        dead: list[WebSocket] = []
+        for ws in list(self._connections):
+            try:
+                await ws.send_text(msg)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            await self.disconnect(ws)
+
+    @property
+    def active_count(self) -> int:
+        return len(self._connections)
+
+
+sa_manager = _SAConnectionManager()
+
+
+@router.websocket("/ws/situational-awareness")
+async def sa_websocket_endpoint(
+    websocket: WebSocket,
+    token: str = Query(...),
+    interval: int = Query(3, ge=2, le=30, description="推送间隔秒"),
+):
+    """V10.3 态势感知 WebSocket：每 interval 秒检测状态变化并推送。"""
+    user_id = _verify_ws_token(token)
+    if not user_id:
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+
+    await sa_manager.connect(websocket)
+    try:
+        from app.models.db import SessionLocal
+        from app.services.situational_awareness_service import situational_awareness_service
+        from app.schemas.situational_awareness import SituationalAwarenessSnapshot
+
+        prev_snapshot: Optional[SituationalAwarenessSnapshot] = None
+
+        while True:
+            try:
+                async with SessionLocal() as db:
+                    snapshot = await situational_awareness_service.get_snapshot(db)
+
+                if situational_awareness_service.has_changed(prev_snapshot, snapshot):
+                    await websocket.send_json({
+                        "type": "sa_update",
+                        "data": snapshot.model_dump(mode="json"),
+                    })
+                    prev_snapshot = snapshot
+
+            except Exception as exc:
+                await websocket.send_json({"type": "error", "message": str(exc)})
+
+            await asyncio.sleep(interval)
+
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await sa_manager.disconnect(websocket)

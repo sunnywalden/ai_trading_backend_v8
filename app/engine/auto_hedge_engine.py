@@ -84,8 +84,8 @@ class AutoHedgeEngine:
                 level="BLOCK",
                 message=check.reason or "",
                 symbol=plan.symbol,
-                trade_mode_before=eff_state.effective_trade_mode.value,
-                trade_mode_after=eff_state.effective_trade_mode.value,
+                trade_mode_before=str(eff_state.effective_trade_mode),
+                trade_mode_after=str(eff_state.effective_trade_mode),
                 extra_json={"plan": plan.meta},
             )
             return
@@ -98,17 +98,17 @@ class AutoHedgeEngine:
                 level="INFO",
                 message=f"Simulated hedge: {plan.reason}",
                 symbol=plan.symbol,
-                trade_mode_before=eff_state.effective_trade_mode.value,
-                trade_mode_after=eff_state.effective_trade_mode.value,
+                trade_mode_before=str(eff_state.effective_trade_mode),
+                trade_mode_after=str(eff_state.effective_trade_mode),
                 extra_json={"plan": plan.meta, "notional": notional},
             )
             return
 
         if plan.instrument == "STOCK":
             await self.order_executor.place_stock_order(
-                account_id, plan.symbol, plan.side, plan.quantity, plan.reason, OrderIntent.HEDGE.value
+                account_id, plan.symbol, plan.side, plan.quantity, plan.reason, str(OrderIntent.HEDGE)
             )
         else:
-            await self.order_executor.place_option_hedge_order(
-                account_id, plan.symbol, plan.side, plan.quantity, plan.meta, plan.reason, OrderIntent.HEDGE.value
+            await self.order_executor.place_option_order(
+                account_id, plan.symbol, plan.side, plan.quantity, plan.meta, plan.reason, str(OrderIntent.HEDGE)
             )
