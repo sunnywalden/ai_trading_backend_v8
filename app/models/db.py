@@ -144,6 +144,36 @@ async def ensure_mysql_schema_updates() -> None:
             "is_winner", 
             "ALTER TABLE trading_signals ADD COLUMN is_winner VARCHAR(8) NULL COMMENT 'YES/NO - 是否盈利交易'"
         ),
+        (
+            "trading_plan", 
+            "plan_type", 
+            "ALTER TABLE trading_plan ADD COLUMN plan_type VARCHAR(16) NOT NULL DEFAULT 'MANUAL' COMMENT 'V10.1: 计划类型'"
+        ),
+        (
+            "trading_plan",
+            "plan_status",
+            "ALTER TABLE trading_plan ADD COLUMN plan_status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE' COMMENT 'V10.1: 计划状态'"
+        ),
+        (
+            "trading_plan",
+            "plan_tags",
+            "ALTER TABLE trading_plan ADD COLUMN plan_tags JSON NULL COMMENT 'V10.1: 扩展标签'"
+        ),
+        (
+            "trading_plan",
+            "target_position",
+            "ALTER TABLE trading_plan ADD COLUMN target_position DECIMAL(10, 4) NOT NULL DEFAULT 0.0 COMMENT 'V10.1: 目标仓位'"
+        ),
+        (
+            "trading_plan",
+            "valid_from",
+            "ALTER TABLE trading_plan ADD COLUMN valid_from DATETIME NULL COMMENT 'V10.1: 有效期开始'"
+        ),
+        (
+            "trading_plan",
+            "valid_until",
+            "ALTER TABLE trading_plan ADD COLUMN valid_until DATETIME NULL COMMENT 'V10.1: 有效期截止'"
+        ),
     ]
 
     async with engine.begin() as conn:
