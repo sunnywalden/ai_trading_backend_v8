@@ -3,10 +3,12 @@
 
 信号生命周期: GENERATED → VALIDATED → EXECUTED → EVALUATED → ARCHIVED
 """
+from datetime import datetime
+from typing import Optional, List, Dict, Any
 from sqlalchemy import (
     Column, Integer, String, Float, DateTime, JSON, ForeignKey, Index, Text, Enum as SQLEnum
 )
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, Mapped, mapped_column
 from sqlalchemy.sql import func
 from enum import Enum
 
@@ -49,78 +51,78 @@ class TradingSignal(Base):
     """交易信号表 - 所有交易决策的源头"""
     __tablename__ = "trading_signals"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     
     # 信号基本信息
-    signal_id = Column(String(64), unique=True, nullable=False, index=True)  # UUID
-    signal_type = Column(SQLEnum(SignalType), nullable=False)
-    signal_source = Column(SQLEnum(SignalSource), nullable=False)
-    status = Column(SQLEnum(SignalStatus), nullable=False, default=SignalStatus.GENERATED)
+    signal_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)  # UUID
+    signal_type: Mapped[SignalType] = mapped_column(SQLEnum(SignalType), nullable=False)
+    signal_source: Mapped[SignalSource] = mapped_column(SQLEnum(SignalSource), nullable=False)
+    status: Mapped[SignalStatus] = mapped_column(SQLEnum(SignalStatus), nullable=False, default=SignalStatus.GENERATED)
     
     # 交易标的
-    symbol = Column(String(32), nullable=False, index=True)
-    direction = Column(String(8), nullable=False)  # LONG/SHORT
+    symbol: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    direction: Mapped[str] = mapped_column(String(8), nullable=False)  # LONG/SHORT
     
     # 信号强度与置信度
-    signal_strength = Column(Float, nullable=False)  # 0-100: 信号强度
-    confidence = Column(Float, nullable=False)       # 0-1: 置信度
-    expected_return = Column(Float)                  # 预期收益率
-    risk_score = Column(Float)                       # 风险评分
+    signal_strength: Mapped[float] = mapped_column(Float, nullable=False)  # 0-100: 信号强度
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)       # 0-1: 置信度
+    expected_return: Mapped[Optional[float]] = mapped_column(Float)                  # 预期收益率
+    risk_score: Mapped[Optional[float]] = mapped_column(Float)                       # 风险评分
     
     # 交易参数
-    suggested_quantity = Column(Float)               # 建议数量
-    suggested_price = Column(Float)                  # 建议价格
-    stop_loss = Column(Float)                        # 止损价
-    take_profit = Column(Float)                      # 止盈价
-    max_holding_days = Column(Integer)               # 最大持仓天数
+    suggested_quantity: Mapped[Optional[float]] = mapped_column(Float)               # 建议数量
+    suggested_price: Mapped[Optional[float]] = mapped_column(Float)                  # 建议价格
+    stop_loss: Mapped[Optional[float]] = mapped_column(Float)                        # 止损价
+    take_profit: Mapped[Optional[float]] = mapped_column(Float)                      # 止盈价
+    max_holding_days: Mapped[Optional[int]] = mapped_column(Integer)               # 最大持仓天数
     
     # 来源追溯
-    strategy_id = Column(String(36), ForeignKey("strategies.id", ondelete="SET NULL"), nullable=True)
-    strategy_run_id = Column(String(36), ForeignKey("strategy_runs.id", ondelete="SET NULL"), nullable=True)
-    research_id = Column(String(64), nullable=True)  # 研究报告ID
-    factor_scores = Column(JSON)                     # 因子得分详情
+    strategy_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("strategies.id", ondelete="SET NULL"), nullable=True)
+    strategy_run_id: Mapped[Optional[str]] = mapped_column(String(36), ForeignKey("strategy_runs.id", ondelete="SET NULL"), nullable=True)
+    research_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)  # 研究报告ID
+    factor_scores: Mapped[Optional[dict]] = mapped_column(JSON)                     # 因子得分详情
     
     # 用户与账户
-    account_id = Column(String(64), nullable=False, index=True)
-    user_id = Column(String(64), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
     
     # 验证与风控
-    risk_check_passed = Column(String(8))            # YES/NO/PENDING
-    risk_check_details = Column(JSON)                # 风控检查详情
-    validation_errors = Column(JSON)                 # 验证错误
+    risk_check_passed: Mapped[Optional[str]] = mapped_column(String(8))            # YES/NO/PENDING
+    risk_check_details: Mapped[Optional[dict]] = mapped_column(JSON)                # 风控检查详情
+    validation_errors: Mapped[Optional[dict]] = mapped_column(JSON)                 # 验证错误
     
     # 执行追踪
-    order_id = Column(String(64), nullable=True)     # 关联订单ID
-    executed_at = Column(DateTime, nullable=True)
-    executed_price = Column(Float, nullable=True)
-    executed_quantity = Column(Float, nullable=True)
-    execution_slippage = Column(Float, nullable=True) # 滑点
+    order_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)     # 关联订单ID
+    executed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    executed_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    executed_quantity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    execution_slippage: Mapped[Optional[float]] = mapped_column(Float, nullable=True) # 滑点
     
     # 评估结果
-    actual_return = Column(Float, nullable=True)     # 实际收益率
-    holding_days = Column(Integer, nullable=True)
-    pnl = Column(Float, nullable=True)               # 盈亏（绝对金额）
-    pnl_pct = Column(Float, nullable=True)           # 盈亏百分比
-    is_winner = Column(String(8), nullable=True)     # YES/NO - 是否盈利交易
-    evaluation_score = Column(Float, nullable=True)  # 事后评分(0-100)
-    evaluation_notes = Column(Text, nullable=True)
-    notes = Column(Text, nullable=True)              # 信号备注
+    actual_return: Mapped[Optional[float]] = mapped_column(Float, nullable=True)     # 实际收益率
+    holding_days: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    pnl: Mapped[Optional[float]] = mapped_column(Float, nullable=True)               # 盈亏（绝对金额）
+    pnl_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)           # 盈亏百分比
+    is_winner: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)     # YES/NO - 是否盈利交易
+    evaluation_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # 事后评分(0-100)
+    evaluation_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)              # 信号备注
     
     # 元数据
-    extra_metadata = Column(JSON)                    # 额外信息(避免与SQLAlchemy保留字冲突)
-    tags = Column(JSON)                              # 标签
-    priority = Column(Integer, default=50)           # 优先级(1-100)
+    extra_metadata: Mapped[Optional[dict]] = mapped_column(JSON)                    # 额外信息(避免与SQLAlchemy保留字冲突)
+    tags: Mapped[Optional[dict]] = mapped_column(JSON)                              # 标签
+    priority: Mapped[int] = mapped_column(Integer, default=50)           # 优先级(1-100)
     
     # 时间戳
-    generated_at = Column(DateTime, nullable=False, server_default=func.now())
-    validated_at = Column(DateTime, nullable=True)
-    expired_at = Column(DateTime, nullable=True)     # 信号过期时间
-    created_at = Column(DateTime, nullable=False, server_default=func.now())
-    updated_at = Column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
+    generated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    validated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    expired_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)     # 信号过期时间
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
     
     # 关系
-    strategy = relationship("Strategy", lazy="selectin")
-    strategy_run = relationship("StrategyRun", lazy="selectin")
+    strategy: Mapped[Optional["Strategy"]] = relationship("Strategy", lazy="selectin")
+    strategy_run: Mapped[Optional["StrategyRun"]] = relationship("StrategyRun", lazy="selectin")
     
     __table_args__ = (
         Index("ix_signals_status_priority", "status", "priority"),

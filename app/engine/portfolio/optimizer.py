@@ -42,25 +42,48 @@ class PortfolioOptimizer:
 
         # 拉取历史收益率
         returns = await self._fetch_returns(symbols, start, end)
-        if returns.empty or returns.shape[1] < 2:
+        if returns.empty or returns.shape[1] < 1:
             raise ValueError("Insufficient return data for optimization")
 
-        current_weights = current_weights or {sym: 0.0 for sym in symbols}
+        # 核心修复：只使用成功拉取数据的标的
+        valid_symbols = returns.columns.tolist()
+        logger.info(f"PortfolioOptimizer: original={len(symbols)}, valid={len(valid_symbols)}")
+
+        # 过滤当前权重
+        filtered_current_weights = {
+            sym: current_weights.get(sym, 0.0) for sym in valid_symbols
+        } if current_weights else {sym: 0.0 for sym in valid_symbols}
 
         if method == "MARKOWITZ":
-            return await asyncio.to_thread(
-                self._markowitz, returns, symbols, current_weights, risk_free_rate
+            opt_result = await asyncio.to_thread(
+                self._markowitz, returns, valid_symbols, filtered_current_weights, risk_free_rate
             )
         elif method == "RISK_PARITY":
-            return await asyncio.to_thread(
-                self._risk_parity, returns, symbols, current_weights, risk_free_rate
+            opt_result = await asyncio.to_thread(
+                self._risk_parity, returns, valid_symbols, filtered_current_weights, risk_free_rate
             )
         elif method == "KELLY":
-            return await asyncio.to_thread(
-                self._kelly, returns, symbols, current_weights, risk_free_rate
+            opt_result = await asyncio.to_thread(
+                self._kelly, returns, valid_symbols, filtered_current_weights, risk_free_rate
             )
         else:
             raise ValueError(f"Unknown optimization method: {method}")
+
+        # 核心：补全被跳过的标的（权重设为 0）
+        final_weights = opt_result["target_weights"]
+        for sym in symbols:
+            if sym not in final_weights:
+                final_weights[sym] = 0.0
+        
+        # 补全当前权重
+        final_current_weights = opt_result["current_weights"]
+        for sym in symbols:
+             if sym not in final_current_weights:
+                 final_current_weights[sym] = current_weights.get(sym, 0.0) if current_weights else 0.0
+        
+        opt_result["target_weights"] = final_weights
+        opt_result["current_weights"] = final_current_weights
+        return opt_result
 
     # ──────────────────────────────────────────
     # Markowitz 均值方差优化

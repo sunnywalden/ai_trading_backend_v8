@@ -111,6 +111,7 @@ async def ensure_mysql_tables() -> None:
     import app.models.copilot_message  # noqa: F401
     import app.models.algo_execution_task  # noqa: F401
     import app.models.autonomy_audit_log  # noqa: F401
+    import app.models.etf_watchlist      # V10.1: ETF自选池
     # 持仓评估任务
     import app.models.task_config as task_cfg  # noqa: F401
     import app.models.position_eval_task    # noqa: F401

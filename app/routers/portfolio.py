@@ -71,6 +71,54 @@ async def get_latest_snapshot(
         return {}
 
 
+@router.get("/history")
+async def get_snapshot_history(
+    limit: int = 10,
+    session: AsyncSession = Depends(get_session),
+    current_user: str = Depends(get_current_user),
+):
+    """获取组合优化历史快照列表"""
+    from sqlalchemy import select
+    from app.models.portfolio_snapshot import PortfolioSnapshot
+    import json
+
+    def ensure_obj(val):
+        if isinstance(val, str):
+            try:
+                return json.loads(val)
+            except Exception:
+                return val
+        return val
+
+    try:
+        stmt = (
+            select(PortfolioSnapshot)
+            .where(PortfolioSnapshot.account_id == current_user)
+            .order_by(PortfolioSnapshot.created_at.desc())
+            .limit(min(limit, 50))
+        )
+        result = await session.execute(stmt)
+        snapshots = result.scalars().all()
+        return [
+            {
+                "id": s.id,
+                "method": s.method,
+                "weights": ensure_obj(s.target_weights),
+                "metrics": {
+                    "expected_return": float(s.expected_return) if s.expected_return else 0,
+                    "volatility": float(s.expected_volatility) if s.expected_volatility else 0,
+                    "sharpe": float(s.sharpe_ratio) if s.sharpe_ratio else 0,
+                },
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+            }
+            for s in snapshots
+        ]
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Failed to fetch portfolio history: {e}")
+        return []
+
+
 @router.post("/optimize")
 async def optimize_portfolio(
     body: OptimizeRequest,
