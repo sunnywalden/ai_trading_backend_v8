@@ -227,6 +227,7 @@ class MultiStepIntentEngine:
                             "You decompose user trading queries into data fetch steps. "
                             "Return JSON array of steps, each: {step_id, action, symbol, params}. "
                             "Actions: FETCH_PRICE, FETCH_EARNINGS, CHECK_IV, GET_SIGNALS, GET_REGIME, GET_NEWS. "
+                            "IMPORTANT: Only support US and HK stocks. Ignore any requests for A-shares (stock symbols ending in .SZ or .SH). "
                             "Return ONLY valid JSON array."
                         ),
                     },
@@ -386,6 +387,14 @@ class DeepResearchEngine:
         db: Optional[object] = None,
     ) -> DeepResearchReport:
         """执行深度研究，返回完整报告。"""
+        # ── 权限/范围检查 ──────────────────────────────────────────────────────────
+        if symbol.upper().endswith(".SZ") or symbol.upper().endswith(".SH"):
+            return DeepResearchReport(
+                symbol=symbol, query=query, rating="HOLD", confidence=0.0,
+                price_target=None, report_body="抱歉，当前系统仅支持【美股】和【港股】深度研究，不支持 A 股标的。",
+                key_risks=[], key_catalysts=[], position_recommendation={}, data_sources=[],
+            )
+
         # ── 收集数据 ───────────────────────────────────────────────────────────
         data = await self._gather_data(symbol, db)
 

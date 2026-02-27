@@ -123,17 +123,21 @@ class APIMonitoringService:
         hour_key = now.strftime("%Y-%m-%d-%H")
         minute_key = now.strftime("%Y-%m-%d-%H-%M")
         
-        # 记录日/时/分钟级别的调用次数
-        await self._increment_counter(provider, "day", date_key)
-        await self._increment_counter(provider, "hour", hour_key)
-        await self._increment_counter(provider, "minute", minute_key)
+        # 构造各时间级别的 key 对应关系
+        time_levels = [
+            ("day", date_key),
+            ("hour", hour_key),
+            ("minute", minute_key)
+        ]
+        
+        # 记录各级别统计（包含总数和状态）
+        status = "success" if success else "error"
+        for tr_type, tr_key in time_levels:
+            await self._increment_counter(provider, tr_type, tr_key)
+            await self._increment_counter(provider, f"{tr_type}:{status}", tr_key)
         
         # 记录端点级别统计
         await self._increment_endpoint_counter(provider, endpoint, date_key)
-        
-        # 记录成功/失败次数
-        status = "success" if success else "error"
-        await self._increment_counter(provider, f"status:{status}", date_key)
         
         # 记录响应时间（用于性能监控）
         if response_time_ms is not None:
@@ -200,13 +204,27 @@ class APIMonitoringService:
         else:  # minute
             key_suffix = now.strftime("%Y-%m-%d-%H-%M")
         
-        # 获取调用次数
+        # 获取调用次数和状态统计
+        # 优先使用新的 {time_range}:{status} 格式，兼容旧的 status:{status} 格式（仅限 day）
         total_calls = await self._get_counter(provider, time_range, key_suffix) or 0
-        success_calls = await self._get_counter(provider, f"status:success", now.strftime("%Y-%m-%d")) or 0
-        error_calls = await self._get_counter(provider, f"status:error", now.strftime("%Y-%m-%d")) or 0
+        
+        success_calls = await self._get_counter(provider, f"{time_range}:success", key_suffix)
+        error_calls = await self._get_counter(provider, f"{time_range}:error", key_suffix)
+        
+        # 兼容性回退
+        if time_range == "day" and success_calls is None and error_calls is None:
+            success_calls = await self._get_counter(provider, "status:success", key_suffix)
+            error_calls = await self._get_counter(provider, "status:error", key_suffix)
+            
+        success_calls = success_calls or 0
+        error_calls = error_calls or 0
+        
+        # 确保数据一致性：如果总调用数大于成功+失败之和，说明部分状态记录已过期或未记录，将差额归为失败
+        if total_calls > (success_calls + error_calls):
+            error_calls = total_calls - success_calls
         
         # 获取限制信息
-        limit_info = self.rate_limits.get(provider.value, {})
+        limit_info = self.rate_limits.get(provider, {})
         limit_key = f"requests_per_{time_range}"
         rate_limit = limit_info.get(limit_key)
         
@@ -327,7 +345,7 @@ class APIMonitoringService:
     
     def get_rate_limit_info(self, provider: APIProvider) -> Dict[str, Any]:
         """获取API的Rate Limit策略信息"""
-        return self.rate_limits.get(provider.value, {})
+        return self.rate_limits.get(provider, {})
     
     # ========== 私有方法 ==========
     
@@ -335,10 +353,10 @@ class APIMonitoringService:
         """增加计数器"""
         redis_key = f"api_monitor:{provider.value}:{counter_type}:{key_suffix}"
         
-        # 根据时间范围设置过期时间
-        if counter_type == "day":
+        # 根据时间范围设置过期时间 (包含状态统计)
+        if "day" in counter_type or counter_type.startswith("status:"):
             expire = 86400 * 7  # 保留7天
-        elif counter_type == "hour":
+        elif "hour" in counter_type:
             expire = 3600 * 48  # 保留48小时
         else:  # minute
             expire = 3600       # 保留1小时
@@ -444,7 +462,7 @@ class APIMonitoringService:
         """获取所有API的Rate Limit策略摘要"""
         summary = {}
         for provider, limits in self.rate_limits.items():
-            summary[provider] = {
+            summary[provider.value] = {
                 "daily_limit": limits.get("requests_per_day"),
                 "hourly_limit": limits.get("requests_per_hour"),
                 "description": limits.get("description"),
