@@ -399,7 +399,7 @@ class PositionScoringService:
         force_refresh: bool = False
     ) -> Dict[str, PositionScore]:
         """
-        批量获取持仓评分
+        批量获取持仓评分 (并行优化版)
         
         Args:
             symbols: 股票代码列表
@@ -408,27 +408,34 @@ class PositionScoringService:
         Returns:
             {symbol: PositionScore} 字典
         """
+        import asyncio
         results = {}
         
-        for symbol in symbols:
+        async def fetch_score(symbol: str):
             try:
                 # 先尝试从缓存获取
                 if not force_refresh:
                     cached = await self._get_cached_score(symbol)
                     if cached:
-                        results[symbol] = cached
-                        continue
+                        return symbol, cached
                 
                 # 计算评分
                 score = await self.calculate_position_score(
                     symbol,
                     force_refresh=force_refresh
                 )
-                if score:
-                    results[symbol] = score
-                        
+                return symbol, score
             except Exception as e:
                 print(f"Error calculating score for {symbol}: {e}")
+                return symbol, None
+
+        # 并行执行所有评分任务
+        tasks = [fetch_score(s) for s in symbols]
+        completed = await asyncio.gather(*tasks)
+        
+        for symbol, score in completed:
+            if score:
+                results[symbol] = score
         
         return results
 

@@ -9,7 +9,8 @@
 """
 
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional
+from types import SimpleNamespace
+from typing import Any, Dict, Optional
 import yfinance as yf
 import time
 import asyncio
@@ -37,7 +38,7 @@ class FundamentalAnalysisService:
         self, 
         symbol: str, 
         force_refresh: bool = False
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Optional[SimpleNamespace]:
         """
         获取基本面数据（带缓存）
         
@@ -125,7 +126,7 @@ class FundamentalAnalysisService:
         growth_score: Optional[float] = None,
         health_score: Optional[float] = None,
         overall_score: Optional[float] = None
-    ) -> Dict[str, Any]:
+    ) -> SimpleNamespace:
         """将ORM对象转换为包含评分的字典"""
         # 如果没有提供评分，重新计算
         if valuation_score is None:
@@ -148,7 +149,6 @@ class FundamentalAnalysisService:
             overall_score = (valuation_score + profitability_score + growth_score + health_score) / 4.0
         
         # 创建结果字典（使用命名空间对象模拟ORM对象属性访问）
-        from types import SimpleNamespace
         from datetime import datetime
         result = SimpleNamespace(
             symbol=data.symbol,

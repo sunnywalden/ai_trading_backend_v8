@@ -117,200 +117,76 @@ async def get_positions_assessment(
         if budget_base <= 0:
             budget_base = 20000.0
         
-        # 构建响应
+        # 构建基础持仓评估数据
         position_assessments = []
-        total_score = 0.0
-        total_market_value = 0.0
-        total_pnl = 0.0
-        high_risk_count = 0
-        buy_count = 0
         
-        # 遍历所有标的
-        for symbol in symbols:
+        async def process_single_symbol(symbol):
             score_data = scores.get(symbol)
-            
-            # 查找该标的的股票持仓
             stock_position = next((p for p in stock_positions if p.symbol == symbol), None)
-            
-            # 查找该标的的期权持仓
             symbol_options = option_by_underlying.get(symbol, [])
             
-            # 计算股票部分
-            stock_quantity = 0
-            stock_avg_cost = 0.0
-            stock_last_price = 0.0
-            stock_market_value = 0.0
-            stock_pnl = 0.0
+            stock_quantity = stock_position.quantity if stock_position else 0
+            stock_avg_cost = stock_position.avg_price if stock_position and stock_position.avg_price else 0.0
+            stock_last_price = stock_position.last_price if stock_position and stock_position.last_price else stock_avg_cost
+            stock_market_value = stock_quantity * stock_last_price
+            stock_pnl = (stock_last_price - stock_avg_cost) * stock_quantity if stock_avg_cost > 0 else 0.0
             
-            if stock_position:
-                stock_quantity = stock_position.quantity
-                stock_avg_cost = stock_position.avg_price if stock_position.avg_price else 0.0
-                stock_last_price = stock_position.last_price if stock_position.last_price else stock_avg_cost
-                stock_market_value = stock_quantity * stock_last_price
-                stock_pnl = (stock_last_price - stock_avg_cost) * stock_quantity if stock_avg_cost > 0 else 0.0
-            
-            # 计算期权部分
             option_market_value = 0.0
             option_pnl = 0.0
             option_details = []
+            for opt_pos in symbol_options:
+                mkt_val = abs(opt_pos.quantity) * opt_pos.last_price * opt_pos.contract.multiplier
+                pnl = (opt_pos.last_price - opt_pos.avg_price) * opt_pos.quantity * opt_pos.contract.multiplier
+                option_market_value += mkt_val
+                option_pnl += pnl
+                option_details.append({
+                    "contract_symbol": opt_pos.contract.broker_symbol,
+                    "right": opt_pos.contract.right,
+                    "strike": opt_pos.contract.strike,
+                    "expiry": opt_pos.contract.expiry.isoformat(),
+                    "quantity": opt_pos.quantity,
+                    "avg_price": opt_pos.avg_price,
+                    "last_price": opt_pos.last_price,
+                    "multiplier": opt_pos.contract.multiplier,
+                    "unrealized_pnl": round(pnl, 2)
+                })
             
-            if symbol_options:
-                for opt_pos in symbol_options:
-                    contract = opt_pos.contract
-                    quantity = opt_pos.quantity
-                    avg_price = opt_pos.avg_price
-                    last_price = opt_pos.last_price
-                    underlying_price = opt_pos.underlying_price
-                    
-                    # 计算期权市值和盈亏
-                    # 市值 = 当前权利金价格 * 数量 * 乘数
-                    # 盈亏 = (当前价格 - 成本价格) * 数量 * 乘数
-                    # 如果 quantity 为负（卖出开仓），公式依旧适用：(last - avg) * (-qty) * mult
-                    mkt_val = abs(quantity) * last_price * contract.multiplier
-                    pnl = (last_price - avg_price) * quantity * contract.multiplier
-                    
-                    option_market_value += mkt_val
-                    option_pnl += pnl
-                    
-                    # 记录期权详情
-                    option_details.append({
-                        "contract_symbol": contract.broker_symbol,
-                        "right": contract.right,
-                        "strike": contract.strike,
-                        "expiry": contract.expiry.isoformat(),
-                        "quantity": quantity,
-                        "avg_price": avg_price,
-                        "last_price": last_price,
-                        "multiplier": contract.multiplier,
-                        "unrealized_pnl": round(pnl, 2)
-                    })
+            current_price = stock_last_price if stock_last_price > 0 else (symbol_options[0].underlying_price if symbol_options else 0)
+            if current_price <= 0: return None
             
-            # 获取当前价格（优先使用股票价格，否则使用期权的标的价格）
-            if stock_last_price > 0:
-                current_price = stock_last_price
-            elif symbol_options and len(symbol_options) > 0:
-                current_price = symbol_options[0].underlying_price
-            else:
-                print(f"[PositionAssessment] Skipping {symbol}: no price available")
-                continue
-            
-            # 计算综合市值和盈亏
             total_symbol_market_value = stock_market_value + option_market_value
             total_symbol_pnl = stock_pnl + option_pnl
             
-            # 如果有股票持仓，计算盈亏百分比
-            if stock_avg_cost > 0 and stock_quantity > 0:
-                unrealized_pnl_percent = ((current_price - stock_avg_cost) / stock_avg_cost * 100)
-            else:
-                unrealized_pnl_percent = 0.0
-            
-            # 获取趋势快照：优先获取今日快照
-            snapshot = await technical_service.get_latest_trend_snapshot(
-                symbol,
-                account_id=account_id,
-                timeframe="1D",
-                only_today=True
-            )
-            
-            # 如果没有今日快照，且触发了强制刷新，则尝试生成
+            # 并行优化：获取趋势快照
+            snapshot = await technical_service.get_latest_trend_snapshot(symbol, account_id=account_id, timeframe="1D", only_today=True)
             if not snapshot and force_refresh:
                 try:
-                    await technical_service.get_technical_analysis(
-                        symbol,
-                        timeframe="1D",
-                        use_cache=False,
-                        account_id=account_id
-                    )
-                    # 重新获取快照
-                    snapshot = await technical_service.get_latest_trend_snapshot(
-                        symbol,
-                        account_id=account_id,
-                        timeframe="1D",
-                        only_today=True
-                    )
-                except Exception as e:
-                    print(f"[PositionAssessment] Error generating snapshot for {symbol}: {e}")
-                    # 记录错误，后续会自动尝试获取历史数据作为兜底
-            
-            # 关键优化：如果依然没有今日快照（生成失败或未开启强制刷新），则回退到历史最近的一次记录作为“降级展示”
+                    await technical_service.get_technical_analysis(symbol, timeframe="1D", use_cache=False, account_id=account_id)
+                    snapshot = await technical_service.get_latest_trend_snapshot(symbol, account_id=account_id, timeframe="1D", only_today=True)
+                except: pass
             if not snapshot:
-                snapshot = await technical_service.get_latest_trend_snapshot(
-                    symbol,
-                    account_id=account_id,
-                    timeframe="1D",
-                    only_today=False
-                )
-                if snapshot:
-                    print(f"[PositionAssessment] Found historical snapshot for {symbol}, using as fallback.")
+                snapshot = await technical_service.get_latest_trend_snapshot(symbol, account_id=account_id, timeframe="1D", only_today=False)
             
-            # 处理最终依然为空的情况
-            if not snapshot:
-                # 保底逻辑（保持原有行为）
-                error_desc = "数据尚未生成"
-                ai_summary = f"{symbol} 快照尚未生成，可稍后重试或调用 /api/v1/positions/refresh。"
-                
-                snapshot = type('obj', (object,), {
-                    'to_dict': lambda self: {
-                        "symbol": symbol,
-                        "timeframe": "1D",
-                        "trend_direction": "INSUFFICIENT_DATA",
-                        "trend_strength": 0,
-                        "trend_description": error_desc,
-                        "rsi_value": None,
-                        "rsi_status": "INSUFFICIENT_DATA",
-                        "macd_status": "INSUFFICIENT_DATA",
-                        "macd_signal": None,
-                        "bollinger_position": "INSUFFICIENT_DATA",
-                        "volume_ratio": None,
-                        "support_levels": [],
-                        "resistance_levels": [],
-                        "ai_summary": ai_summary,
-                        "timestamp": datetime.now().isoformat()
-                    }
-                })()
-            
-            trend_snapshot = snapshot.to_dict() if snapshot else None
+            trend_snapshot = snapshot.to_dict() if snapshot else {
+                "symbol": symbol, "timeframe": "1D", "trend_direction": "INSUFFICIENT_DATA",
+                "trend_strength": 0, "trend_description": "数据尚未生成", "ai_summary": "快照生成中...", "timestamp": datetime.now().isoformat()
+            }
 
-            # 对于港股，优先使用股票名称
-            display_symbol = symbol
-            if stock_position and stock_position.market == "HK" and stock_position.name:
-                display_symbol = stock_position.name
-            
-            # 构建持仓评估数据（即使没有评分也显示基本信息）
-            # 计划偏离度
-            plan_deviation = None
+            display_symbol = (stock_position.name if stock_position and stock_position.market == "HK" and stock_position.name else symbol)
             plan = plan_map.get(symbol)
-            if plan and plan.entry_price:
-                try:
-                    plan_deviation = min(abs(current_price - float(plan.entry_price)) / float(plan.entry_price) * 100, 100)
-                except Exception:
-                    plan_deviation = None
-
-            # 风险预算占用率（近似：使用市值/预算）
+            plan_deviation = min(abs(current_price - float(plan.entry_price)) / float(plan.entry_price) * 100, 100) if plan and plan.entry_price else None
             budget_utilization = round(min(total_symbol_market_value / max(budget_base, 1e-6), 1.0), 4)
 
-            # 获取行业属性（从 score_data 中提取，用于前端显示）
-            sector = getattr(score_data, 'sector', "Unknown") or "Unknown"
-            industry = getattr(score_data, 'industry', "Unknown") or "Unknown"
-            beta = getattr(score_data, 'beta', 1.0) or 1.0
-
-            assessment = {
-                "symbol": display_symbol,
-                "ticker": symbol,  # 始终保存原始代码
-                "quantity": stock_quantity,
-                "avg_cost": stock_avg_cost,
-                "current_price": current_price,
-                "market_value": round(total_symbol_market_value, 2),
-                "unrealized_pnl": round(total_symbol_pnl, 2),
-                "unrealized_pnl_percent": round(unrealized_pnl_percent, 2),
-                "budget_utilization": budget_utilization,
-                "plan_deviation": plan_deviation,
-                "sector": sector,
-                "industry": industry,
-                "beta": beta,
-                # 评分数据（使用默认值如果不可用）
-                "overall_score": score_data.overall_score if score_data else 50,
-                "technical_score": score_data.technical_score if score_data else 50,
+            score_val = score_data.overall_score if score_data else 50
+            return {
+                "symbol": display_symbol, "ticker": symbol, "quantity": stock_quantity, "avg_cost": stock_avg_cost, "current_price": current_price,
+                "market_value": round(total_symbol_market_value, 2), "unrealized_pnl": round(total_symbol_pnl, 2),
+                "unrealized_pnl_percent": round(((current_price - stock_avg_cost) / stock_avg_cost * 100) if stock_avg_cost > 0 else 0.0, 2),
+                "budget_utilization": budget_utilization, "plan_deviation": plan_deviation,
+                "sector": getattr(score_data, 'sector', "Unknown") or "Unknown",
+                "industry": getattr(score_data, 'industry', "Unknown") or "Unknown",
+                "beta": getattr(score_data, 'beta', 1.0) or 1.0,
+                "overall_score": score_val, "technical_score": score_data.technical_score if score_data else 50,
                 "fundamental_score": score_data.fundamental_score if score_data else 50,
                 "sentiment_score": score_data.sentiment_score if score_data else 50,
                 "risk_level": score_data.risk_level if score_data else "MEDIUM",
@@ -318,30 +194,20 @@ async def get_positions_assessment(
                 "target_position": score_data.target_position if score_data else 0.5,
                 "stop_loss": score_data.stop_loss if score_data else current_price * 0.9,
                 "take_profit": score_data.take_profit if score_data else current_price * 1.1,
-                "trend_snapshot": trend_snapshot
+                "trend_snapshot": trend_snapshot,
+                "option_positions": option_details if option_details else None
             }
-            
-            # 如果有期权持仓，添加期权详情
-            if option_details:
-                assessment["option_positions"] = option_details
-            
-            position_assessments.append(assessment)
-            
-            # 累加总计数据
-            total_market_value += total_symbol_market_value
-            total_pnl += total_symbol_pnl
-            
-            # 统计数据
-            score_value = score_data.overall_score if score_data else 50
-            total_score += score_value
-            
-            risk = score_data.risk_level if score_data else "MEDIUM"
-            if risk in ["HIGH", "EXTREME"]:
-                high_risk_count += 1
-                
-            rec = score_data.recommendation if score_data else "HOLD"
-            if rec in ["BUY", "STRONG_BUY"]:
-                buy_count += 1
+
+        # 执行并行处理
+        tasks = [process_single_symbol(s) for s in symbols]
+        processed_results = await asyncio.gather(*tasks)
+        position_assessments = [r for r in processed_results if r]
+
+        total_market_value = sum(p["market_value"] for p in position_assessments)
+        total_pnl = sum(p["unrealized_pnl"] for p in position_assessments)
+        high_risk_count = sum(1 for p in position_assessments if p["risk_level"] in ["HIGH", "EXTREME"])
+        buy_count = sum(1 for p in position_assessments if p["recommendation"] in ["BUY", "STRONG_BUY"])
+        total_score = sum(p["overall_score"] for p in position_assessments)
 
         # 新增：组合维度指标计算
         portfolio_weighted_score = 0.0
@@ -412,10 +278,10 @@ async def get_positions_assessment(
             ai_recommendations=ai_recommendations
         )
 
-        # 写入缓存（30秒）
+        # 写入缓存（延长至10分钟，避免高频复杂计算）
         try:
             payload = response.model_dump() if hasattr(response, "model_dump") else response.dict()
-            await cache.set(cache_key, payload, expire=30)
+            await cache.set(cache_key, payload, expire=600)
         except Exception:
             pass
 
@@ -793,10 +659,14 @@ async def get_macro_risk_overview(
         )
         
         # 处理异常结果
-        if isinstance(alerts, Exception):
+        if isinstance(alerts, (Exception, BaseException)):
             alerts = []
-        if isinstance(recent_events, Exception):
+        if isinstance(recent_events, (Exception, BaseException)):
             recent_events = []
+        
+        # 确保是列表类型，以支持切片
+        final_alerts = alerts if isinstance(alerts, list) else []
+        final_events = recent_events if isinstance(recent_events, list) else []
         
         # 3. 构建基础响应数据
         response_data = {
@@ -829,7 +699,7 @@ async def get_macro_risk_overview(
                     "description": "市场情绪风险评估"
                 }
             },
-            "alerts": alerts,
+            "alerts": final_alerts,
             "key_concerns": risk_score.key_concerns,
             "recommendations": risk_score.recommendations,
             "ai_analysis": risk_score.risk_summary,  # 默认使用风险摘要
@@ -841,36 +711,49 @@ async def get_macro_risk_overview(
                     "severity": event.severity,
                     "impact_score": event.market_impact_score
                 }
-                for event in recent_events[:5] if hasattr(event, 'title')
+                for event in final_events[:5] if hasattr(event, 'title')
             ]
         }
         
-        # 4. 异步生成AI分析（带超时控制）
+        # 4. 尝试从独立缓存获取已完成的 AI 分析（非阻塞）
+        ai_cache_key = "macro_ai_analysis"
         try:
-            async def generate_ai_with_timeout():
+            cached_ai = await cache.get(ai_cache_key)
+            if cached_ai:
+                response_data["ai_analysis"] = cached_ai
+        except Exception:
+            pass
+
+        # 5. 如果无 AI 缓存，启动后台异步任务生成（不阻塞当前响应）
+        async def _background_ai_task(data_snapshot: dict, events_snapshot: list) -> None:
+            """后台生成 AI 分析，完成后写入缓存供下次请求使用"""
+            try:
                 ai_service = AIAnalysisService()
                 macro_dict = {
-                    "overall_risk": response_data["overall_risk"],
-                    "risk_breakdown": response_data["risk_breakdown"],
-                    "alerts": alerts,
-                    "recent_events": recent_events[:5]
+                    "overall_risk": data_snapshot["overall_risk"],
+                    "risk_breakdown": data_snapshot["risk_breakdown"],
+                    "alerts": data_snapshot["alerts"],
+                    "recent_events": events_snapshot[:5]
                 }
-                return await ai_service.generate_macro_analysis(macro_dict)
-            
-            # 15秒超时限制
-            ai_analysis = await asyncio.wait_for(
-                generate_ai_with_timeout(),
-                timeout=15.0
-            )
-            if ai_analysis:
-                response_data["ai_analysis"] = ai_analysis
-                
-        except asyncio.TimeoutError:
-            # AI分析超时，保持默认值
-            pass
-        except Exception:
-            # AI分析失败，保持默认值
-            pass
+                result = await asyncio.wait_for(
+                    ai_service.generate_macro_analysis(macro_dict),
+                    timeout=30.0
+                )
+                if result:
+                    await cache.set(ai_cache_key, result, expire=3600)  # AI 分析缓存 1 小时
+                    # 同时更新宏观概览主缓存中的 AI 字段
+                    try:
+                        main_cached = await cache.get(cache_key)
+                        if main_cached and isinstance(main_cached, dict):
+                            main_cached["ai_analysis"] = result
+                            await cache.set(cache_key, main_cached, expire=86400)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        if not (await cache.get(ai_cache_key)):
+            asyncio.create_task(_background_ai_task(response_data.copy(), list(final_events)))
         
         # 5. 添加性能监控数据
         response_time = int((time.time() - start_time) * 1000)
@@ -882,9 +765,9 @@ async def get_macro_risk_overview(
             "data_freshness": (datetime.now() - risk_score.timestamp).total_seconds() / 3600  # 小时
         }
         
-        # 写入缓存（120秒）
+        # 写入缓存（24小时，宏观风险数据通常不需要高频变动）
         try:
-            await cache.set(cache_key, response_data, expire=120)
+            await cache.set(cache_key, response_data, expire=86400)  # 24小时
         except Exception:
             pass
 
@@ -952,7 +835,7 @@ async def get_geopolitical_events(
         
         # 按市场影响筛选
         if min_impact > 0:
-            events = [e for e in events if e.market_impact_score >= min_impact]
+            events = [e for e in events if int(getattr(e, 'market_impact_score', 0) or 0) >= min_impact]
         
         # 计算地缘政治风险评分
         risk_assessment = await geo_service.calculate_geopolitical_risk_score(days)

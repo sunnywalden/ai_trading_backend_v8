@@ -11,6 +11,7 @@ from typing import Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.cache import cache
 
 logger = logging.getLogger(__name__)
 
@@ -73,8 +74,16 @@ class CopilotService:
         }
         return response
 
-    async def morning_brief(self, account_id: str) -> dict:
-        """每日 08:15 生成盘前摘要 (V10 structured)"""
+    async def morning_brief(self, account_id: str, force_refresh: bool = False) -> dict:
+        """每日生成盘前摘要 (V10 structured) - 已优化性能"""
+        today_str = date.today().isoformat()
+        cache_key = f"morning_brief:{account_id}:{today_str}"
+
+        if not force_refresh:
+            cached = await cache.get(cache_key)
+            if cached:
+                return cached
+
         context = await self._build_context(account_id)
         prompt = f"""你是专业量化交易 AI，请基于以下信息生成今日盘前交易摘要。
 
@@ -93,28 +102,36 @@ class CopilotService:
 仅输出 JSON。"""
 
         messages = [{"role": "user", "content": prompt}]
-        raw_response, _, _ = await self._call_ai(messages, "complex")
+        # 优化：优先使用 lightweight 模型提速，除非是 force_refresh 且明确需要复杂分析
+        model_type = "complex" if force_refresh else "lightweight"
+        raw_response, _, _ = await self._call_ai(messages, model_type)
         
+        result = None
         try:
             # 简单提取 JSON
             match = re.search(r"(\{.*\})", raw_response, re.DOTALL)
             if match:
-                return json.loads(match.group(1))
-            return {
-                "date": datetime.now().strftime("%Y-%m-%d"),
-                "summary": raw_response[:200] + "...",
-                "market_outlook": "AI 正在分析中...",
-                "top_signals": [],
-                "risk_alerts": []
-            }
+                result = json.loads(match.group(1))
+            else:
+                result = {
+                    "date": datetime.now().strftime("%Y-%m-%d"),
+                    "summary": raw_response[:200] + "...",
+                    "market_outlook": "AI 正在分析中...",
+                    "top_signals": [],
+                    "risk_alerts": []
+                }
         except Exception:
-            return {
+            result = {
                 "date": datetime.now().strftime("%Y-%m-%d"),
                 "summary": "解析摘要失败",
                 "market_outlook": raw_response,
                 "top_signals": [],
                 "risk_alerts": []
             }
+
+        # 缓存结果，有效期 4 小时
+        await cache.set(cache_key, result, expire=3600 * 4)
+        return result
 
     async def confirm_action(
         self, account_id: str, action_id: str, db: AsyncSession

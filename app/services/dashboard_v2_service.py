@@ -10,7 +10,7 @@ from typing import Optional, List, Dict, Any
 import asyncio
 import logging
 
-from sqlalchemy import select, func, and_, desc
+from sqlalchemy import select, func, and_, desc, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -72,7 +72,7 @@ class DashboardV2Service:
         api_health = await self._get_api_health()
         hotspots = await self._get_market_hotspots()
         todos = await self._get_todos(account_id)
-        trend = await self._get_performance_trend(account_id, days=30)
+        trend = await self._get_performance_trend(account_id, days=7)
         
         # 计算衍生指标
         signal_notifications = len([s for s in pending_signals if s.confidence > 0.8])
@@ -734,44 +734,196 @@ class DashboardV2Service:
     
     # ============ 策略相关 ============
     async def _get_strategy_performance(self, account_id: str) -> List[StrategyPerformance]:
-        """从 strategy_runs + strategies 聚合策略表现"""
+        """
+        聚合策略绩效，优先级：
+        1. signal_performance 表（已预聚合：dimension_type='strategy'）
+        2. TradingSignal.actual_return 实时聚合（信号已评估）
+        3. strategy_run_assets + 实时持仓未实现收益（未平仓时的近似值）
+        4. 仅有 strategy_runs 元数据时指标显示为 0
+        """
         try:
-            from app.models.strategy import StrategyRun as SR, Strategy as Strat
-            from sqlalchemy import case, join
-            stmt = (
+            from app.models.strategy import StrategyRun as SR, Strategy as Strat, StrategyRunAsset as SRA
+            from app.models.trading_signal import TradingSignal as TS, SignalPerformance as SP
+
+            # ── 步骤 1：strategy 维度的预聚合结果（最新一条） ─────────────────
+            sp_stmt = (
                 select(
-                    SR.strategy_id,
+                    SP.dimension_value.label("strategy_id"),
+                    SP.win_rate,
+                    SP.avg_return,
+                    SP.sharpe_ratio,
+                    SP.total_signals,
+                    SP.last_calculated_at,
+                )
+                .where(SP.dimension_type == "strategy")
+                .order_by(SP.last_calculated_at.desc())
+            )
+            sp_result = await self.session.execute(sp_stmt)
+            # strategy_id -> 最新一条预聚合记录
+            sp_map: dict = {}
+            for row in sp_result.all():
+                sid = str(row.strategy_id)
+                if sid not in sp_map:
+                    sp_map[sid] = row
+
+            # ── 步骤 2：若 signal_performance 无数据，从 TradingSignal 实时聚合 ──
+            if not sp_map:
+                sig_stmt = (
+                    select(
+                        TS.strategy_id,
+                        func.count(TS.id).label("total"),
+                        func.avg(
+                            case(
+                                (and_(TS.actual_return.isnot(None), TS.actual_return > 0), 1),
+                                (and_(TS.actual_return.isnot(None), TS.actual_return <= 0), 0),
+                                else_=None,
+                            )
+                        ).label("win_rate"),
+                        func.avg(TS.actual_return).label("avg_return"),
+                        func.stddev(TS.actual_return).label("return_std"),
+                    )
+                    .where(
+                        TS.account_id == account_id,
+                        TS.strategy_id.isnot(None),
+                        TS.actual_return.isnot(None),
+                    )
+                    .group_by(TS.strategy_id)
+                )
+                sig_result = await self.session.execute(sig_stmt)
+                for row in sig_result.all():
+                    if row.strategy_id:
+                        sp_map[str(row.strategy_id)] = row  # type: ignore[assignment]
+
+            # ── 步骤 3（fallback）：sp_map 仍为空时，从实时持仓 + strategy_run_assets 估算 ──
+            # 使用最近一次 strategy_run 推荐的标的，配合 broker 实时 unrealized_pnl_pct
+            if not sp_map:
+                try:
+                    # 获取每个策略最近一次 run_id 及其推荐标的的加权 return
+                    pos_stmt = (
+                        select(
+                            SR.strategy_id,
+                            SRA.symbol,
+                            SRA.weight,
+                        )
+                        .select_from(SR)
+                        .join(SRA, SRA.strategy_run_id == SR.id)
+                        .where(
+                            SR.account_id == account_id,
+                            SR.status == "COMPLETED",
+                        )
+                        .order_by(SR.strategy_id, desc(SR.finished_at))
+                    )
+                    pos_result = await self.session.execute(pos_stmt)
+                    # strategy_id -> {symbol -> weight}
+                    strat_assets: dict = {}
+                    for row in pos_result.all():
+                        sid = str(row.strategy_id)
+                        if sid not in strat_assets:
+                            strat_assets[sid] = {}
+                        strat_assets[sid][row.symbol] = float(row.weight or 1.0)
+
+                    if strat_assets:
+                        # 获取 broker 实时持仓的未实现收益率
+                        live_pos = await self.broker.list_underlying_positions(account_id)
+                        pnl_map_live: dict[str, float] = {
+                            p.symbol: float(p.unrealized_pnl_pct)
+                            for p in live_pos
+                        }
+                        for sid, assets in strat_assets.items():
+                            matched = {sym: pnl_map_live[sym] for sym in assets if sym in pnl_map_live}
+                            if not matched:
+                                continue
+                            total_weight = sum(assets[sym] for sym in matched)
+                            if total_weight <= 0:
+                                avg_ret = sum(matched.values()) / len(matched)
+                            else:
+                                avg_ret = sum(matched[sym] * assets[sym] for sym in matched) / total_weight
+                            # unrealized_pnl_pct 通常已是百分比，转为小数
+                            avg_ret_dec = avg_ret / 100.0
+                            win_rate = sum(1 for v in matched.values() if v > 0) / len(matched)
+                            sp_map[sid] = type("_Row", (), {  # type: ignore[assignment]
+                                "win_rate": win_rate,
+                                "avg_return": avg_ret_dec,
+                                "return_std": None,
+                                "total": len(assets),
+                            })()
+                except Exception as _fe:
+                    logger.debug(f"Broker-position fallback for strategy perf skipped: {_fe}")
+            meta_stmt = (
+                select(
+                    Strat.id.label("strategy_id"),
                     Strat.name.label("strategy_name"),
                     Strat.last_run_status,
                     func.count(SR.id).label("total_runs"),
-                    func.avg(
-                        case((SR.status == "COMPLETED", 1), else_=0)
-                    ).label("success_rate"),
                     func.max(SR.finished_at).label("last_run_at"),
                 )
-                .select_from(SR)
-                .outerjoin(Strat, Strat.id == SR.strategy_id)
-                .where(SR.account_id == account_id)
-                .group_by(SR.strategy_id, Strat.name, Strat.last_run_status)
+                .select_from(Strat)
+                .outerjoin(SR, and_(SR.strategy_id == Strat.id, SR.account_id == account_id))
+                .group_by(Strat.id, Strat.name, Strat.last_run_status)
                 .order_by(desc(func.max(SR.finished_at)))
                 .limit(10)
             )
-            result = await self.session.execute(stmt)
-            rows = result.all()
+            meta_result = await self.session.execute(meta_stmt)
+            meta_rows = meta_result.all()
 
-            return [
-                StrategyPerformance(
-                    strategy_id=str(row.strategy_id),
-                    strategy_name=str(row.strategy_name or row.strategy_id),
-                    total_runs=int(row.total_runs),
-                    win_rate=float(row.success_rate or 0),
-                    avg_return=0.0,
-                    sharpe=0.0,
-                    last_run_at=row.last_run_at,
-                    status=str(row.last_run_status or "UNKNOWN"),
+            results: List[StrategyPerformance] = []
+            seen_ids: set = set()
+            for row in meta_rows:
+                sid = str(row.strategy_id)
+                seen_ids.add(sid)
+                perf = sp_map.get(sid)
+                if perf:
+                    win_rate = float(getattr(perf, "win_rate", None) or 0)
+                    avg_return = float(getattr(perf, "avg_return", None) or 0)
+                    # signal_performance 有 sharpe_ratio；实时聚合行只有 return_std
+                    if hasattr(perf, "sharpe_ratio"):
+                        sharpe = float(perf.sharpe_ratio or 0)
+                    else:
+                        std = float(getattr(perf, "return_std", None) or 0)
+                        sharpe = round(avg_return / std, 2) if std > 1e-9 else 0.0
+                else:
+                    win_rate = avg_return = sharpe = 0.0
+                results.append(
+                    StrategyPerformance(
+                        strategy_id=sid,
+                        strategy_name=str(row.strategy_name or sid),
+                        total_runs=int(row.total_runs or 0),
+                        win_rate=win_rate,
+                        avg_return=avg_return,
+                        sharpe=sharpe,
+                        last_run_at=row.last_run_at,
+                        status=str(row.last_run_status or "UNKNOWN"),
+                    )
                 )
-                for row in rows
-            ]
+
+            # ── 步骤 4：补充仅有绩效记录但不在 strategies 表的条目 ────────────
+            for sid, perf in sp_map.items():
+                if sid in seen_ids:
+                    continue
+                win_rate = float(getattr(perf, "win_rate", None) or 0)
+                avg_return = float(getattr(perf, "avg_return", None) or 0)
+                if hasattr(perf, "sharpe_ratio"):
+                    sharpe = float(perf.sharpe_ratio or 0)
+                else:
+                    std = float(getattr(perf, "return_std", None) or 0)
+                    sharpe = round(avg_return / std, 2) if std > 1e-9 else 0.0
+                total = int(getattr(perf, "total_signals", None) or getattr(perf, "total", None) or 0)
+                results.append(
+                    StrategyPerformance(
+                        strategy_id=sid,
+                        strategy_name=sid,
+                        total_runs=total,
+                        win_rate=win_rate,
+                        avg_return=avg_return,
+                        sharpe=sharpe,
+                        last_run_at=None,
+                        status="UNKNOWN",
+                    )
+                )
+
+            # 按 avg_return 降序，取前 5
+            results.sort(key=lambda x: x.avg_return, reverse=True)
+            return results[:5]
         except Exception as e:
             logger.warning(f"Strategy performance query failed: {e}")
             return []

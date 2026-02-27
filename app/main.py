@@ -20,7 +20,7 @@ from app.engine.auto_hedge_engine import AutoHedgeEngine
 from app.services.risk_config_service import RiskConfigService
 from app.services.symbol_risk_profile_service import SymbolRiskProfileService
 from app.services.trading_plan_service import TradingPlanService
-from app.providers.market_data_provider import MarketDataProvider
+from app.providers.market_data_provider import MarketDataProvider, market_data_provider
 from app.services.option_exposure_service import OptionExposureService
 from app.schemas.ai_state import AiStateView, LimitsView, SymbolBehaviorView, ExposureView
 from app.broker.factory import make_option_broker_client
@@ -279,7 +279,7 @@ async def get_ai_state(
     plan_map = await plan_service.get_active_plans_by_symbols(account_id, symbols)
     plan_deviation_map = {}
     if plan_map:
-        market_provider = MarketDataProvider()
+        market_provider = market_data_provider  # 复用全局单例，避免重复创建 Tiger 客户端
 
         async def _price(sym: str):
             try:

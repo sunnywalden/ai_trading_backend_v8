@@ -7,7 +7,7 @@ from .models import OptionPosition, UnderlyingPosition
 class DummyOptionClient(OptionBrokerClient):
     """模拟实现：返回示例持仓数据，适用于未配置 Tiger API 的场景"""
 
-    async def list_underlying_positions(self, account_id: str) -> List[UnderlyingPosition]:
+    async def list_underlying_positions(self, account_id: str, force_refresh: bool = False) -> List[UnderlyingPosition]:
         """返回模拟的股票持仓数据"""
         # 返回一些典型的科技股持仓，便于演示和测试
         return [
@@ -53,7 +53,7 @@ class DummyOptionClient(OptionBrokerClient):
             )
         ]
 
-    async def list_option_positions(self, account_id: str) -> List[OptionPosition]:
+    async def list_option_positions(self, account_id: str, force_refresh: bool = False) -> List[OptionPosition]:
         """返回空的期权持仓列表（演示环境不涉及期权）"""
         return []
 
@@ -61,7 +61,7 @@ class DummyOptionClient(OptionBrokerClient):
         """返回配置的账户ID或默认ID"""
         return settings.TIGER_ACCOUNT or "DEMO_ACCOUNT"
 
-    async def get_account_equity(self, account_id: str) -> float:
+    async def get_account_equity(self, account_id: str, force_refresh: bool = False) -> float:
         """返回模拟账户权益"""
         return 150000.0  # 15万美元模拟账户
 

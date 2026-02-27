@@ -75,8 +75,9 @@ class BenchmarkService:
                 period="day"
             )
             
-            if not bars or len(bars) < days:
-                print(f"警告: {symbol}历史数据不足, 返回模拟数据")
+            if not bars or len(bars) < max(int(days * 0.6), 5):
+                # days 是日历天数，交易日约为 days * 0.7；低于 60% 才算不足
+                print(f"警告: {symbol}历史数据不足(获取到{len(bars) if bars else 0}条), 返回模拟数据")
                 return self._generate_mock_returns(days)
             
             # 计算日收益率
