@@ -115,6 +115,7 @@ async def ensure_mysql_tables() -> None:
     # 持仓评估任务
     import app.models.task_config as task_cfg  # noqa: F401
     import app.models.position_eval_task    # noqa: F401
+    import app.models.fsm_transition_log    # V10.3: FSM事件日志
 
     # 使用 SQLAlchemy metadata.create_all 自动创建所有缺失的表
     async with engine.begin() as conn:
@@ -174,6 +175,17 @@ async def ensure_mysql_schema_updates() -> None:
             "valid_until",
             "ALTER TABLE trading_plan ADD COLUMN valid_until DATETIME NULL COMMENT 'V10.1: 有效期截止'"
         ),
+        # V10.3: 交易可观测性字段
+        ("trading_plan", "direction",          "ALTER TABLE trading_plan ADD COLUMN direction VARCHAR(4) NULL COMMENT 'V10.3: BUY/SELL'"),
+        ("trading_plan", "confidence",         "ALTER TABLE trading_plan ADD COLUMN confidence DECIMAL(5,2) NULL COMMENT 'V10.3: AI置信度'"),
+        ("trading_plan", "reasoning",          "ALTER TABLE trading_plan ADD COLUMN reasoning TEXT NULL COMMENT 'V10.3: AI决策摘要'"),
+        ("trading_plan", "autonomy_action",    "ALTER TABLE trading_plan ADD COLUMN autonomy_action VARCHAR(20) NULL COMMENT 'V10.3: AUTO_EXECUTE/PENDING_CONFIRM'"),
+        ("trading_plan", "source",             "ALTER TABLE trading_plan ADD COLUMN source VARCHAR(20) NULL COMMENT 'V10.3: AI_AUTONOMOUS/AI_ADVISORY/MANUAL'"),
+        ("trading_plan", "pipeline_stage",     "ALTER TABLE trading_plan ADD COLUMN pipeline_stage SMALLINT NULL COMMENT 'V10.3: Pipeline阶段0-16'"),
+        ("trading_plan", "stage_entered_at",   "ALTER TABLE trading_plan ADD COLUMN stage_entered_at DATETIME NULL COMMENT 'V10.3: 进入当前阶段时间'"),
+        ("trading_plan", "stage_history",      "ALTER TABLE trading_plan ADD COLUMN stage_history JSON NULL COMMENT 'V10.3: 阶段历史'"),
+        ("trading_plan", "provenance_snapshot","ALTER TABLE trading_plan ADD COLUMN provenance_snapshot JSON NULL COMMENT 'V10.3: 决策溯源快照'"),
+        ("trading_plan", "position_fsm_state", "ALTER TABLE trading_plan ADD COLUMN position_fsm_state VARCHAR(20) NULL COMMENT 'V10.3: 持仓FSM状态'"),
     ]
 
     async with engine.begin() as conn:

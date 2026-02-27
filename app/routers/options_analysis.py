@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from app.core.auth import get_current_user
 from app.core.cache import cache
 from app.core.config import settings
-from app.services.options_analysis_service import options_analysis_service
+from app.services.options_analysis_service import options_analysis_service, _deep_clean
 
 router = APIRouter(prefix="/options-analysis", tags=["V10-OptionsAnalysis"])
 
@@ -21,10 +21,14 @@ async def get_options_summary(
     # 尝试读取缓存
     cached = await cache.get(cache_key)
     if cached:
-        return cached
+        cleaned = _deep_clean(cached)
+        if cleaned != cached:
+            await cache.set(cache_key, cleaned, expire=settings.OPTIONS_ANALYSIS_CACHE_EXPIRE_HOURS * 3600)
+        return cleaned
 
     try:
         result = await options_analysis_service.get_summary(symbol)
+        result = _deep_clean(result)
         # 写入缓存
         await cache.set(cache_key, result, expire=settings.OPTIONS_ANALYSIS_CACHE_EXPIRE_HOURS * 3600)
         return result
@@ -43,10 +47,14 @@ async def get_iv_surface(
     
     cached = await cache.get(cache_key)
     if cached:
-        return cached
+        cleaned = _deep_clean(cached)
+        if cleaned != cached:
+            await cache.set(cache_key, cleaned, expire=settings.OPTIONS_ANALYSIS_CACHE_EXPIRE_HOURS * 3600)
+        return cleaned
 
     try:
         result = await options_analysis_service.get_iv_surface(symbol)
+        result = _deep_clean(result)
         await cache.set(cache_key, result, expire=settings.OPTIONS_ANALYSIS_CACHE_EXPIRE_HOURS * 3600)
         return result
     except Exception as e:
@@ -65,10 +73,14 @@ async def get_iv_rank(
     
     cached = await cache.get(cache_key)
     if cached:
-        return cached
+        cleaned = _deep_clean(cached)
+        if cleaned != cached:
+            await cache.set(cache_key, cleaned, expire=settings.OPTIONS_ANALYSIS_CACHE_EXPIRE_HOURS * 3600)
+        return cleaned
 
     try:
         result = await options_analysis_service.get_iv_rank(symbol, lookback_days)
+        result = _deep_clean(result)
         await cache.set(cache_key, result, expire=settings.OPTIONS_ANALYSIS_CACHE_EXPIRE_HOURS * 3600)
         return result
     except Exception as e:
@@ -86,11 +98,14 @@ async def get_unusual_activity(
     
     cached = await cache.get(cache_key)
     if cached:
-        return cached
+        cleaned = _deep_clean(cached)
+        if cleaned != cached:
+            await cache.set(cache_key, cleaned, expire=settings.OPTIONS_ANALYSIS_CACHE_EXPIRE_HOURS * 3600)
+        return cleaned
 
     try:
         unusual = await options_analysis_service.get_unusual_activity(symbol)
-        result = {"symbol": symbol, "unusual": unusual}
+        result = _deep_clean({"symbol": symbol, "unusual": unusual})
         await cache.set(cache_key, result, expire=settings.OPTIONS_ANALYSIS_CACHE_EXPIRE_HOURS * 3600)
         return result
     except Exception as e:

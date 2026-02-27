@@ -466,7 +466,7 @@ class DashboardV2Service:
                 SignalSummary(
                     signal_id=str(s.signal_id),
                     symbol=str(s.symbol),
-                    signal_type=str(s.signal_type.value if hasattr(s.signal_type, "value") else s.signal_type),
+                    signal_type=str(s.signal_type),
                     direction=str(s.direction),
                     confidence=float(s.confidence) if s.confidence is not None else 0.0,
                     expected_return=float(s.expected_return) if s.expected_return is not None else 0.0,

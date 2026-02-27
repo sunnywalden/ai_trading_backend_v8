@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.strategy import Strategy, StrategyRun
-from app.models.trading_signal import TradingSignal
+from app.models.trading_signal import TradingSignal, SignalType, SignalSource
 from app.engine.strategies.bollinger_bands import BollingerBandsMeanReversion
 from app.engine.strategies.pairs_trading import PairsTrading
 from app.engine.strategies.breakout_momentum import BreakoutMomentum
@@ -100,17 +100,19 @@ class StrategyEngine:
             signal_count = 0
             for signal_data in signals:
                 signal = TradingSignal(
-                    id=str(uuid4()),
+                    signal_id=str(uuid4()),
+                    signal_type=SignalType.ENTRY,
+                    signal_source=SignalSource.STRATEGY,
                     strategy_id=strategy.id,
                     strategy_run_id=run.id,
                     symbol=signal_data["symbol"],
                     direction=signal_data["direction"],
-                    strength=signal_data.get("strength", 50),
-                    weight=signal_data.get("weight", 1.0),
+                    signal_strength=signal_data.get("strength", 50),
+                    confidence=signal_data.get("weight", 0.7),
                     risk_score=signal_data.get("risk_score", 50),
-                    target_price=signal_data.get("target_price"),
+                    suggested_price=signal_data.get("target_price"),
                     stop_loss=signal_data.get("stop_loss"),
-                    metadata=signal_data.get("metadata", {}),
+                    extra_metadata=signal_data.get("metadata", {}),
                     user_id=user_id,
                     account_id=account_id,
                     created_at=datetime.utcnow(),

@@ -1,7 +1,6 @@
 from fastapi import FastAPI, Depends, Body, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import ORJSONResponse
 from fastapi.staticfiles import StaticFiles
 from typing import Optional, AsyncGenerator, Callable
 from app.i18n import get_translator
@@ -63,6 +62,9 @@ from app.routers import position_lifecycle  # V10.2-M3: 动态仓位
 from app.routers import signal_fusion    # V10.2-M4: 六维信号融合
 from app.routers import attribution     # V10.2-M5: 交易归因
 from app.routers import insights        # V10.2-M6: AI 洞察
+
+from app.routers import lifecycle       # V10.3: 交易生命周期中心
+from app.routers import order_book      # V10.3: 智能订单簿
 # V9 routers
 from app.routers import dashboard as v9_dashboard
 from app.routers import dashboard_v2  # V10: 全新Dashboard
@@ -254,7 +256,7 @@ async def lifespan(app: FastAPI):
         print(f"⚠ Failed to dispose engine gracefully: {e}")
 
 
-app = FastAPI(title=settings.APP_NAME, lifespan=lifespan, default_response_class=ORJSONResponse)
+app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
 
 # 配置CORS中间件
 app.add_middleware(
@@ -311,6 +313,8 @@ app.include_router(position_lifecycle.router, dependencies=[Depends(get_current_
 app.include_router(signal_fusion.router, dependencies=[Depends(get_current_user)])        # M4: 信号融合
 app.include_router(attribution.router, dependencies=[Depends(get_current_user)])          # M5: 交易归因
 app.include_router(insights.router, dependencies=[Depends(get_current_user)])             # M6: AI 洞察
+app.include_router(lifecycle.router, dependencies=[Depends(get_current_user)])            # V10.3: 交易生命周期中心
+app.include_router(order_book.router, dependencies=[Depends(get_current_user)])           # V10.3: 智能订单簿
 
 
 @app.get("/health")
@@ -355,7 +359,7 @@ async def get_ai_state(
     
     risk = RiskConfigService(session)
     eff = await risk.get_effective_state(account_id, window_days)
-    print(f"[GET /ai/state] Trade mode: {eff.effective_trade_mode.value}")
+    print(f"[GET /ai/state] Trade mode: {str(eff.effective_trade_mode)}")
 
     # Greeks 敞口
     expo_svc = OptionExposureService(session, broker_client)
@@ -470,7 +474,7 @@ async def get_ai_state(
         symbol_views[sym] = bv
 
     ai_state = AiStateView(
-        trade_mode=eff.effective_trade_mode.value,
+        trade_mode=str(eff.effective_trade_mode),
         limits=limits_view,
         exposure=exposure_view,
         symbols=symbol_views,

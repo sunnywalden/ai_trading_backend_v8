@@ -493,14 +493,16 @@ class AITradeAdvisorService:
             symbol=symbol,
             signal_type=SignalType.ENTRY,
             direction=direction,
-            action="BUY" if direction == "LONG" else "SELL",
-            price=Decimal(str(price)) if price else None,
-            quantity=quantity,
-            stop_loss=Decimal(str(stop_loss)) if stop_loss else None,
-            take_profit=Decimal(str(take_profit)) if take_profit else None,
+            suggested_price=float(price) if price else None,
+            suggested_quantity=float(quantity) if quantity else 1.0,
+            stop_loss=float(stop_loss) if stop_loss else None,
+            take_profit=float(take_profit) if take_profit else None,
+            signal_strength=decision.get("confidence", 50),
             confidence=decision.get("confidence", 50) / 100.0,
-            source=SignalSource.STRATEGY_SCREEN,
-            status=SignalStatus.PENDING,
+            signal_source=SignalSource.AI_ADVICE,
+            status=SignalStatus.GENERATED,
+            account_id=settings.TIGER_ACCOUNT,
+            user_id="system",
             notes=f"AI决策: {decision.get('reasoning', '')}",
             created_at=datetime.now(timezone.utc),
         )
@@ -509,7 +511,8 @@ class AITradeAdvisorService:
 
         try:
             executor = OrderExecutor(self.session)
-            result = await executor._execute_single_signal(signal)
+            account_equity = await self._safe_get_equity(account_id or settings.TIGER_ACCOUNT)
+            result = await executor._execute_single_signal(signal, account_equity=account_equity)
             return {
                 "status": "executed",
                 "symbol": symbol,
@@ -708,6 +711,18 @@ class AITradeAdvisorService:
             logger.error(f"保存评估历史失败: {e}")
             await self.session.rollback()
 
+    @staticmethod
+    def _col_float(val: Any) -> Optional[float]:
+        """安全转换 SQLAlchemy Column 值为 float（兼容 Decimal/None/NaN）"""
+        if val is None:
+            return None
+        try:
+            import math
+            f = float(val)  # type: ignore[arg-type]
+            return None if math.isnan(f) or math.isinf(f) else f
+        except (TypeError, ValueError):
+            return None
+
     async def get_evaluation_history(
         self,
         account_id: str,
@@ -716,32 +731,33 @@ class AITradeAdvisorService:
     ) -> List[Dict[str, Any]]:
         """获取评估历史记录"""
         from sqlalchemy import select, desc
-        
+
         query = select(AIEvaluationHistory).where(
             AIEvaluationHistory.account_id == account_id
         )
-        
+
         if symbol:
             query = query.where(AIEvaluationHistory.symbol == symbol)
-        
+
         query = query.order_by(desc(AIEvaluationHistory.created_at)).limit(limit)
-        
+
         result = await self.session.execute(query)
         records = result.scalars().all()
-        
+
         history_list = []
+        cf = self._col_float
         for record in records:
             history_list.append({
                 "id": record.id,
-                "symbol": record.symbol,
-                "current_price": float(record.current_price) if record.current_price else None,
+                "symbol": record.symbol,  # type: ignore[union-attr]
+                "current_price": cf(record.current_price),
                 "direction": record.direction,
                 "confidence": record.confidence,
                 "action": record.action,
-                "entry_price": float(record.entry_price) if record.entry_price else None,
-                "stop_loss": float(record.stop_loss) if record.stop_loss else None,
-                "take_profit": float(record.take_profit) if record.take_profit else None,
-                "position_pct": float(record.position_pct) if record.position_pct else None,
+                "entry_price": cf(record.entry_price),
+                "stop_loss": cf(record.stop_loss),
+                "take_profit": cf(record.take_profit),
+                "position_pct": cf(record.position_pct),
                 "risk_level": record.risk_level,
                 "reasoning": record.reasoning,
                 "key_factors": record.key_factors,
@@ -750,9 +766,9 @@ class AITradeAdvisorService:
                 "catalysts": record.catalysts,
                 "holding_period": record.holding_period,
                 "dimensions": record.dimensions,
-                "created_at": record.created_at.isoformat() if record.created_at else None,
+                "created_at": record.created_at.isoformat() if record.created_at is not None else None,  # type: ignore[union-attr]
             })
-        
+
         return history_list
 
     async def delete_evaluation_record(self, record_id: int, account_id: str) -> bool:

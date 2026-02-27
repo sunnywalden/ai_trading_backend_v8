@@ -146,7 +146,7 @@ class AiAdviceService:
             symbol_views[sym] = bv
 
         return AiStateView(
-            trade_mode=eff.effective_trade_mode.value,
+            trade_mode=str(eff.effective_trade_mode),
             limits=limits_view,
             exposure=exposure_view,
             symbols=symbol_views,
