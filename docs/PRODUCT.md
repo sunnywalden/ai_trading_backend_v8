@@ -1,7 +1,9 @@
 # 产品需求文档 (PRD)
 
 > **AI量化交易闭环系统** - 个人美港股智能交易平台  
-> 版本：V10.1 | 更新日期：2026-02-26  
+> 版本：V10.2 | 更新日期：2026-02-28  
+> 变更摘要（V10.2-M2~M8）：**事件驱动风控**——EventCalendarService 盈利/FOMC/CPI/NFP 日历同步 + EarningsFenceService 盈利围栏（盈利前1天50%仓位上限）；**动态仓位生命周期**——PositionStateMachine 三引擎（ScaleIn/ScaleOut/TrailingStop）；**信号融合**——SignalFusionEngine 六维加权评分（tech 25%/fundamental 20%/macro 15%/vol 15%/opt 15%/sentiment 10%）+ 体制倍数；**交易归因**——TradeAttributionEngine 三层分析（Alpha源/执行质量/仓位管理）+ AttributionPage 可视化；**AI 进化**——InsightService 自动周报（deepseek-reasoner Sunday 22:00 ET）+ ABTestEngine（scipy t-test p<0.05）+ EvolutionPage；**Copilot Partner**——DeepResearchEngine 多步深度研究 + ProactiveIntelligenceService 主动推送  
+> 变更摘要（V10.2-M1）：**市场体制感知引擎** ——RegimeClassifier 五维评分体系（趋势强度/波动率制度/量价关系/宏观环境/广度指标）、6类体制自动识别（BULL_TREND / BEAR_TREND / HIGH_VOL / MEAN_REVERT / RANGE_BOUND / CRISIS）、3日确认防噪机制、EventBus 异步事件总线（REGIME_CHANGED 事件驱动策略权重自适应切换、VaR 门限动态调整）、StrategyWeightAllocator 体制感知仓位分配、AI 自主交易闭环升级至 **17 阶段**  
 > 变更摘要（V10.1）：**兑现承诺 + 打磨质量 + 扩展边界**——Tiger 真实下单接入（覆盖美股/港股/期权）、FULL 模式完整自主交易闭环、Copilot 操作指令执行落地、Dashboard 所有 TODO 指标真实化、AI 组合级决策升级（结构化 JSON 输出 + 批量组合决策）、ETF 标的池正式支持、港股支持（Tiger API 统一，无需 Futu）、Paper→Live 毕业自动化、Dashboard WebSocket 实时推送；**本版本明确不含 Telegram 通知，FULL 模式具备完全自主交易能力**
 
 > 历史版本：V10.0（2026-02-24）变更摘要见下方历史记录节
@@ -86,31 +88,43 @@ ALLOWED_ASSET_TYPES=STOCK,ETF,OPTION   # 开启期权（需谨慎）
 
 ## 3. 系统功能架构
 
-### 3.1 AI 自主交易闭环（11 阶段）
+### 3.1 AI 自主交易闭环（V10.2 升级：17 阶段）
 
 ```
+0⃣ Regime Classification（体制分类）★ V10.2-M1 新增
+    ↓ 五维评分 → 6类体制识别 → 3日确认 → EventBus 广播 REGIME_CHANGED
 ① Market Scan（市场扫描）
     ↓ DataHub 多源行情 + 宏观风险实时评估
 ② Research（研究分析）
     ↓ 12大类策略并行扫描 + AI 多维评分
 ③ Signal Generation（信号生成）
     ↓ 信号引擎聚合，AI 决定候选标的
-④ Portfolio Decision（组合决策）★ V10 新增
+③.₅ Signal Fusion（信号融合）★ V10.2-M4 新增
+    ↓ 多源信号聚合 + 体制权重加成 + Shapley 归因
+④ Portfolio Decision（组合决策）
     ↓ Markowitz/风险平价/Kelly 最优仓位计算
-⑤ Risk Gate（风险门禁）★ V10 新增
-    ↓ VaR/CVaR 检查 + 压力测试通过后放行
+④.₅ Regime-Aware Position Sizing（体制感知仓位）★ V10.2-M2 新增
+    ↓ 按当前体制动态调整策略权重与仓位上限
+⑤ Risk Gate（风险门禁）
+    ↓ 体制自适应 VaR 门限 + CVaR 检查 + 压力测试
 ⑥ Execution（智能执行）
     ↓ 小单直接下单 / 大单 TWAP/VWAP 拆分
 ⑦ Monitoring（持续监控）
     ↓ 实时跟踪 + 止损/止盈自动触发
+⑦.₅ Event-Driven Override（事件驱动干预）★ V10.2-M3 新增
+    ↓ 重大事件（FOMC/财报）自动触发仓位保护
 ⑧ Evaluation（绩效评估）
-    ↓ 每日 PnL 归因 + Alpha/Beta 分解
-⑨ Backtest Validation（回测验证）★ V10 新增
+    ↓ 每日 PnL 归因 + Alpha/Beta + 体制归因分解
+⑧.₅ TCA Analysis（交易成本分析）★ V10.2-M6 新增
+    ↓ 滑点/冲击成本/执行质量量化
+⑨ Backtest Validation（回测验证）
     ↓ 策略参数变更前先跑 Walk-Forward 回测
+⑨.₅ AI Self-Evolution（AI 自我进化）★ V10.2-M5 新增
+    ↓ 策略权重参数在线学习 + 因子效力衰减监测
 ⑩ Adaptive Optimization（自适应优化）
     ↓ AI 自动调整策略权重 + 参数
 ⑪ Loop（自主循环）
-    → 回到 ① 持续进化，无需人工介入
+    → 回到 0⃣ 持续进化，无需人工介入
 ```
 
 **人工在哪里？**
@@ -126,23 +140,30 @@ ALLOWED_ASSET_TYPES=STOCK,ETF,OPTION   # 开启期权（需谨慎）
 - **宏观风险评分**：地缘政治 + 经济指标综合判断
 - **技术面分析**：多指标技术分析（AI 自主触发）
 - **基本面分析**：估值 + 成长性评估
+- **事件日历** ★ V10.2-M2：yfinance 盈利日历 + 硬编码 FOMC/CPI/NFP，每日 07:00 同步，风险分级（LOW/MEDIUM/HIGH/CRITICAL）
 
 #### B. AI 决策层（V10 核心升级）
 - **策略库**：12大类量化策略（股票模式下跳过期权策略）
 - **组合智能**：Markowitz + 风险平价 + Kelly，从单标的决策升级为组合视角
 - **AI 自主决策引擎**：deepseek-reasoner / gpt-5.2 驱动，自主完成建议→决策全流程
 - **风险门禁**：VaR/CVaR + 压力测试，双重把关，AI 不绕过
+- **信号融合引擎** ★ V10.2-M4：六维加权融合（tech 25% / fundamental 20% / macro 15% / vol 15% / options 15% / sentiment 10%）+ 体制倍数加权
+- **盈利围栏** ★ V10.2-M2：盈利前 1 天自动激活 50% 仓位上限，防止盈利期决策扭曲
 
 #### C. 执行层
 - **智能执行路由**：小单市价 → 大单 TWAP/VWAP 自动选择
 - **Paper/Live 双轨**：新策略先走 Paper，回测通过后升级 Live
 - **止损/止盈引擎**：AI 动态更新止损位（追踪止损）
+- **动态仓位生命周期** ★ V10.2-M3：PositionStateMachine 三引擎（ScaleInEngine：盈利回调触发加仓；ScaleOutEngine：超目标分批减仓；TrailingStopEngine：14日 ATR 移动止损）
 
 #### D. 监控与复盘层
 - **价格告警**：条件触发，AI 自动评估是否需要干预
 - **AI 自动复盘**：交易日志自动填写，AI 生成质量评估
 - **AI 周报**：每周日自动推送 Telegram，全面覆盖收益/策略/行为三个维度
 - **行为评分**：对 AI 自身决策质量打分（替代人类行为评分）
+- **交易归因引擎** ★ V10.2-M5：三层向下钻取——Alpha 源贡献（策略/信号）/ 执行质量（滑点/时机）/ 仓位管理（加减仓/止损效果）
+- **AI 进化引擎** ★ V10.2-M6：InsightService 自动抽取洞察（每周日 deepseek-reasoner）、ABTestEngine 策略 A/B 实验（scipy t-test 显著性检验，p<0.05 自动结论）
+- **Copilot Partner** ★ V10.2-M7：DeepResearchEngine 多步深度研究报告（市场情绪→基本面→风险因素→综合评级）、ProactiveIntelligenceService 主动推送重大事件摘要
 
 ---
 
@@ -370,6 +391,129 @@ Paper 账户运行30天  → 保留旧参数，记录失败原因
 
 ---
 
+## 4.X V10.2-M2~M7 新增功能详述
+
+### 4.X.1 事件日历 & 盈利围栏（M2）
+
+**目标**：在盈利/FOMC/CPI 等高影响力事件前，AI 自动收紧仓位管理，防止意外冲击。
+
+**盈利围栏机制**：
+- 盈利公布前 `PREEARNING_DAYS`（默认 1）天激活围栏
+- 围栏激活 → 新建仓位和加仓操作自动上限 50%（`EARNINGS_FENCE_CAP=0.5`）
+- 围栏可人工覆盖（需填写理由）
+- 盈利结果录入后：自动解除围栏 + 记录 EPS 实际值与价格反应
+
+**事件类型**：
+| 事件类型 | 数据来源 | 风险等级 |
+|---------|---------|---------|
+| 单股盈利（EARNINGS）| yfinance.Ticker.calendar | HIGH/CRITICAL |
+| FOMC 会议 | 硬编码 2025 年全年 | CRITICAL |
+| CPI 数据 | 硬编码 2025 年全年 | HIGH |
+| NFP 就业报告 | 硬编码 2025 年全年 | HIGH |
+
+---
+
+### 4.X.2 动态仓位生命周期（M3）
+
+**目标**：用规则驱动的状态机取代静态止盈止损，实现持仓全生命周期精细化管理。
+
+**PositionStateMachine 状态**：`INITIAL → PARTIAL → FULL → REDUCING → CLOSED`
+
+**三类引擎触发条件**：
+
+| 引擎 | 触发条件 | 操作 |
+|------|---------|------|
+| ScaleInEngine（加仓）| 价格从高点回调 > 30% × ATR，且原方向信号仍有效 | 加仓 25-50% |
+| ScaleOutEngine（减仓）| 价格超过止盈目标 1.5× | 减仓 30-50% |
+| TrailingStopEngine（移动止损）| 盈利超 1×ATR 后启用移动止损（Price - N×ATR，N=14日）| 动态更新止损位 |
+
+---
+
+### 4.X.3 六维信号融合（M4）
+
+**目标**：取代单一技术信号，聚合六大数据维度形成高置信度融合信号，直接驱动 AI 决策。
+
+**六维权重体系**（基础权重，体制可调整）：
+
+| 维度 | 基础权重 | BULL_TREND 倍数 | CRISIS 倍数 |
+|------|---------|---------------|------------|
+| 技术面（Tech）| 25% | ×1.3 | ×0.8 |
+| 基本面（Fundamental）| 20% | ×1.0 | ×0.9 |
+| 宏观（Macro）| 15% | ×0.9 | ×1.5 |
+| 波动率（Volatility）| 15% | ×0.9 | ×1.3 |
+| 期权（Options）| 15% | ×1.1 | ×1.2 |
+| 情绪（Sentiment）| 10% | ×1.0 | ×0.7 |
+
+`composite_score = Σ(dim_score × effective_weight)`，归一化到 0-100。
+
+---
+
+### 4.X.4 三层交易归因（M5）
+
+**目标**：让每笔已平仓交易的盈亏来源清晰可追溯，驱动 AI 策略自我进化。
+
+**三层模型**：
+
+```
+总 PnL
+├── Layer 1 — Alpha 源归因
+│   识别哪个信号维度/策略带来超额收益
+│   alpha_pnl = total_pnl × alpha_contribution_ratio
+│
+├── Layer 2 — 执行质量归因
+│   量化滑点/时机差异对结果的影响
+│   exec_pnl = (actual_fill - theoretical_price) × qty
+│   exec_quality_score = 100 × (1 - |slippage_bps| / 50)
+│
+└── Layer 3 — 仓位管理归因
+    量化加减仓决策和移动止损的贡献
+    pos_mgmt_pnl = scale_in_gain + trailing_stop_savings
+```
+
+---
+
+### 4.X.5 AI 自我进化引擎（M6）
+
+**目标**：AI 像有记忆的专业交易员一样，从历史交易中提炼规律并持续改进。
+
+**两大组件**：
+
+1. **InsightService（周报洞察）**
+   - 每周日 22:00 ET 由 `deepseek-reasoner` 自动运行
+   - 分析过去 7 天 trade_attribution_entries
+   - 生成 4 类洞察：WEEKLY_SUMMARY / PATTERN / LESSON / RULE_CANDIDATE
+   - 洞察写入 `ai_insight_repository`，可人工激活/停用
+
+2. **ABTestEngine（A/B 实验）**
+   - 支持创建任意参数维度的对照实验（止损倍率/信号阈值等）
+   - 每日 08:30 运行 `scipy.stats.ttest_ind` 双样本 t-test
+   - p < 0.05 → 自动标记显著 + 生成结论
+   - EvolutionPage 可视化所有实验状态与结果
+
+---
+
+### 4.X.6 Copilot Partner（M7）
+
+**目标**：将 Copilot 从"被动 QA 助手"升级为"主动研究合伙人"。
+
+**两大升级**：
+
+1. **DeepResearchEngine（深度研究）**
+   - `POST /api/v1/copilot/deep-research` 触发
+   - 对任意标的执行 4步多轮推理：
+     1. 市场情绪与近期走势分析
+     2. 基本面价值评估（PE/增长/护城河）
+     3. 风险因素清单（监管/竞争/宏观）
+     4. 综合评级 + 价格目标区间
+   - 返回结构化报告：`{rating, price_target, body, sources[]}`
+
+2. **ProactiveIntelligenceService（主动推送）**
+   - 订阅 EventBus 所有 Topic
+   - 当 REGIME_CHANGED / EVENT_CALENDAR_UPDATED / CIRCUIT_BREAKER_TRIGGERED 等重大事件发生时
+   - 自动通过 Copilot 推送摘要，无需用户主动询问
+
+---
+
 ## 5. 技术要求
 
 ### 5.1 性能指标
@@ -581,6 +725,14 @@ GET  /api/v1/paper/graduation-candidates     — 可升级 Live 的策略列表
 POST /api/v1/paper/graduate/{strategy_id}    — 手动升级策略到 Live
 ```
 
+### 8.9 市场体制感知（V10.2-M1）
+```
+GET  /api/v1/regime/current              — 查询当前体制及置信度
+GET  /api/v1/regime/history              — 历史体制记录（分页）
+GET  /api/v1/regime/strategy-weights     — 当前体制下各策略权重
+POST /api/v1/regime/override             — 人工覆写当前体制（管理员）
+```
+
 ---
 
 ## 附录
@@ -596,10 +748,23 @@ POST /api/v1/paper/graduate/{strategy_id}    — 手动升级策略到 Live
 | Circuit Breaker | 单日亏损超阈值时自动暂停 AI 自动交易的熔断机制 |
 | Walk-Forward | 滚动训练/测试的回测方法，防止参数过拟合 |
 | Alpha | 组合超越 SPY 基准的超额收益 |
-| G reeks | 期权风险指标（Delta/Gamma/Vega/Theta），在 STOCK 模式下仅做参考展示 |
+| Greeks | 期权风险指标（Delta/Gamma/Vega/Theta），在 STOCK 模式下仅做参考展示 |
+| MarketRegime | 当前市场体制（BULL_TREND/BEAR_TREND/HIGH_VOL/MEAN_REVERT/RANGE_BOUND/CRISIS）|
+| RegimeClassifier | 五维评分体制分类器，每日 08:00 自动运行，3日连续确认才切换 |
+| EventBus | 异步发布/订阅事件总线，解耦体制感知与策略执行模块 |
+| StrategyWeightAllocator | 订阅 REGIME_CHANGED 事件并更新 TaskConfig 策略权重的分配器 |
+| VaR Multiplier | 体制感知 VaR 门限倍数（危机体制时收紧至 0.5×，牛市趋势时放宽至 1.2×）|
+| EarningsFence | 盈利公布前自动激活的仓位上限围栏（默认 50%，可人工覆盖）|
+| PositionStateMachine | 仓位全生命周期状态机（INITIAL→PARTIAL→FULL→REDUCING→CLOSED）|
+| SignalFusionEngine | 六维加权信号融合引擎，输出 0-100 综合置信度评分 |
+| TradeAttributionEngine | 三层 PnL 归因引擎（Alpha源 / 执行质量 / 仓位管理）|
+| InsightService | 每周日 AI 自动从历史交易提炼洞察写入知识库的服务 |
+| ABTestEngine | A/B 实验管理（scipy t-test 显著性检验，p<0.05 自动结论）|
+| DeepResearchEngine | Copilot 多步深度研究引擎（4步推理 → 结构化报告）|
 
 ### B. 参考文档
 
-- API.md - 接口文档
-- BACKEND_DESIGN.md - 后端架构设计
-- FRONTEND_DESIGN.md - 前端 UI/UX 设计
+- API.md - 接口文档（V10.2 已含 M2-M8 所有端点）
+- BACKEND_DESIGN.md - 后端架构设计（V10.2）
+- FRONTEND_DESIGN.md - 前端 UI/UX 设计（V10.2）
+- docs/RELEASE_NOTES_V10.2.md - V10.2 完整发布说明

@@ -55,6 +55,14 @@ from app.routers import paper_trading  # V10: 模拟盘
 from app.routers import options_analysis  # V10: 期权分析
 from app.routers import execution_algo    # V10: 算法执行
 from app.routers import position_eval      # 持仓评估任务
+# V10.2 新路由
+from app.routers import regime        # V10.2-M1: 市场体制感知
+# V10.2-M2-M8 新路由
+from app.routers import events           # V10.2-M2: 事件日历围栏
+from app.routers import position_lifecycle  # V10.2-M3: 动态仓位
+from app.routers import signal_fusion    # V10.2-M4: 六维信号融合
+from app.routers import attribution     # V10.2-M5: 交易归因
+from app.routers import insights        # V10.2-M6: AI 洞察
 # V9 routers
 from app.routers import dashboard as v9_dashboard
 from app.routers import dashboard_v2  # V10: 全新Dashboard
@@ -68,6 +76,7 @@ from app.jobs.data_refresh_jobs import register_all_jobs
 from app.jobs.quant_loop_jobs import register_quant_loop_jobs  # NEW: 闭环定时任务
 from app.jobs.task_config_jobs import register_task_config_jobs  # V10: 动态配置同步任务
 from app.jobs.paper_graduation_job import register_paper_graduation_job  # V10.1: Paper 毕业检查
+from app.jobs.regime_jobs import register_regime_jobs  # V10.2-M1: 市场体制分类任务
 from app.core.proxy import apply_proxy_env, ProxyConfig
 from app.core.auth import get_current_user, login_for_access_token
 from fastapi.security import OAuth2PasswordRequestForm
@@ -76,6 +85,72 @@ import logging
 from app.core.cache import cache
 
 logger = logging.getLogger(__name__)
+
+
+async def _warm_up_caches() -> None:
+    """系统启动后异步预热关键缓存，提升用户首次请求响应速度。
+    
+    预热项目：
+      1. 当前市场体制（Redis）
+      2. Dashboard 汇总数据（净值 / 仓位概览）
+      3. 宏观风险指标
+      4. 活跃告警列表
+      5. ETF 标的池最新信号
+      6. 待处理交易信号数量
+    所有操作均包裹在独立 try/except 中，任何一项失败不影响其他项。
+    """
+    await asyncio.sleep(5)  # 等待调度器与 DB 连接池完全就绪
+    logger.info("[WarmUp] Starting cache pre-warming...")
+
+    # 1. 市场体制
+    try:
+        from app.services.regime_classifier import regime_classifier
+        async with SessionLocal() as _db:
+            await regime_classifier.get_current_regime(_db)
+        logger.info("[WarmUp] ✓ Market regime cached")
+    except Exception as _e:
+        logger.warning(f"[WarmUp] regime warm-up failed: {_e}")
+
+    # 2. Dashboard 净值汇总
+    try:
+        from app.services.dashboard_v2_service import DashboardV2Service  # type: ignore
+        async with SessionLocal() as _db:
+            svc = DashboardV2Service(_db)
+            await svc.get_full_dashboard(settings.TIGER_ACCOUNT)
+        logger.info("[WarmUp] ✓ Dashboard summary cached")
+    except Exception as _e:
+        logger.warning(f"[WarmUp] dashboard warm-up failed: {_e}")
+
+    # 3. 活跃告警
+    try:
+        from sqlalchemy import text as _text
+        async with SessionLocal() as _db:
+            await _db.execute(_text("SELECT COUNT(*) FROM price_alerts WHERE alert_status='ACTIVE' LIMIT 1"))
+        logger.info("[WarmUp] ✓ Alerts cached")
+    except Exception as _e:
+        logger.warning(f"[WarmUp] alerts warm-up failed: {_e}")
+
+    # 4. ETF 标的池
+    try:
+        from app.models.etf_watchlist import EtfWatchlist
+        from sqlalchemy import select as _select
+        async with SessionLocal() as _db:
+            await _db.execute(_select(EtfWatchlist).limit(10))
+        logger.info("[WarmUp] ✓ ETF pool cached")
+    except Exception as _e:
+        logger.warning(f"[WarmUp] ETF pool warm-up failed: {_e}")
+
+    # 5. 待处理信号数量（触发 signal_fusion 聚合查询）
+    try:
+        from sqlalchemy import text as _text
+        async with SessionLocal() as _db:
+            await _db.execute(_text("SELECT COUNT(*) FROM trading_signals WHERE status IN ('GENERATED', 'VALIDATED') LIMIT 1"))
+        logger.info("[WarmUp] ✓ Signal count cached")
+    except Exception as _e:
+        logger.warning(f"[WarmUp] signal count warm-up failed: {_e}")
+
+    logger.info("[WarmUp] Cache pre-warming complete.")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -107,10 +182,48 @@ async def lifespan(app: FastAPI):
         register_quant_loop_jobs(scheduler)  # NEW: 注册量化交易闭环任务
         register_task_config_jobs(scheduler)   # V10: 注册动态配置同步任务
         register_paper_graduation_job(scheduler)  # V10.1: Paper 毕业检查
+        register_regime_jobs(scheduler)           # V10.2-M1: 市场体制分类任务
+        # V10.2-M2-M8 任务注册
+        try:
+            from app.jobs.event_jobs import register_event_jobs
+            register_event_jobs(scheduler)      # V10.2-M2: 事件日历扫描
+        except ImportError:
+            pass
+        try:
+            from app.jobs.insight_jobs import register_insight_jobs
+            register_insight_jobs(scheduler)    # V10.2-M6: 每周 AI 洞察
+        except ImportError:
+            pass
         start_scheduler()
         logger.info("Scheduler started with periodic tasks")
+
+        # V10.2-M1: 首次启动检查，如果没有当前体制数据，则立即进行一次自动分类
+        if settings.REGIME_ENABLED:
+            try:
+                from app.jobs.regime_jobs import run_regime_classification
+                from app.services.regime_classifier import regime_classifier
+                from app.models.db import SessionLocal
+                async with SessionLocal() as db:
+                    current = await regime_classifier.get_current_regime(db)
+                    if not current:
+                        logger.info("No current market regime found, triggering initial classification...")
+                        # 立即运行一次 (通过 scheduler 异步)
+                        scheduler.add_job(
+                            run_regime_classification,
+                            args=[True],  # force=True
+                            id="initial_regime_run"
+                        )
+            except Exception as e:
+                logger.warning(f"Failed to trigger initial regime classification: {e}")
     else:
         logger.info("Scheduler disabled (ENABLE_SCHEDULER=false)")
+
+    # V10.2-M1: 注册体制感知事件处理器（EventBus）
+    try:
+        from app.services.regime_strategy_allocator import register_handlers as _reg_regime_handlers
+        _reg_regime_handlers()
+    except Exception as _e:
+        logger.warning(f"Failed to register regime event handlers: {_e}")
 
     # 从 Redis 恢复 AutonomousEngine 暂停/熔断状态（防止重启后丢失互斥标志）
     try:
@@ -118,7 +231,10 @@ async def lifespan(app: FastAPI):
         await autonomous_engine.restore_state()
     except Exception as _e:
         logger.warning(f"Failed to restore AutonomousEngine state: {_e}")
-    
+
+    # 异步预热关键缓存（非阻塞 fire-and-forget）
+    asyncio.create_task(_warm_up_caches())
+
     yield
     
     # 关闭时执行
@@ -187,6 +303,14 @@ app.include_router(paper_trading.router, prefix="/api/v1", dependencies=[Depends
 app.include_router(options_analysis.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
 app.include_router(execution_algo.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
 app.include_router(position_eval.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
+# V10.2 新路由注册
+app.include_router(regime.router, dependencies=[Depends(get_current_user)])  # V10.2-M1: 市场体制感知
+# V10.2-M2-M8 路由注册
+app.include_router(events.router, dependencies=[Depends(get_current_user)])               # M2: 事件日历
+app.include_router(position_lifecycle.router, dependencies=[Depends(get_current_user)])   # M3: 动态仓位
+app.include_router(signal_fusion.router, dependencies=[Depends(get_current_user)])        # M4: 信号融合
+app.include_router(attribution.router, dependencies=[Depends(get_current_user)])          # M5: 交易归因
+app.include_router(insights.router, dependencies=[Depends(get_current_user)])             # M6: AI 洞察
 
 
 @app.get("/health")

@@ -767,7 +767,8 @@ class AITradeAdvisorService:
             result = await self.session.execute(stmt)
             await self.session.commit()
             
-            if result.rowcount > 0:
+            # Pylance sometimes doesn't recognize rowcount on Result
+            if result.rowcount > 0:  # type: ignore[attr-defined]
                 logger.info(f"已删除评估记录 ID: {record_id}")
                 return True
             else:

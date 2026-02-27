@@ -15,12 +15,20 @@ Base URL 以你的启动参数为准（示例：`http://localhost:8088`）。
 
 - Health（系统接口）
 - AI 决策（/api/v1）
+- 策略管理（/api/v1）
 - 持仓评估（/api/v1）
 - 宏观风险（/api/v1）
 - 潜在机会（/api/v1）
 - 管理接口（/api/v1）
 - 交易计划（/api/v1）
 - **API 监控与 Rate Limit 管理**（/api/v1）
+- 市场体制感知（/api/v1/regime）— V10.2-M1
+- 事件日历 & 围栏管理（/api/v1/events）— V10.2-M2
+- 动态仓位生命周期（/api/v1/positions）— V10.2-M3
+- 信号融合（/api/v1/signals）— V10.2-M4
+- 交易归因（/api/v1/attribution）— V10.2-M5
+- AI 洞察 & 进化（/api/v1/insights）— V10.2-M6
+- Trading Copilot（/api/v1/copilot）— V10 & V10.2-M7
 
 ---
 
@@ -370,8 +378,167 @@ CACHE_TTL_GEOPOLITICAL_HOURS=24
 
 ---
 
+## 市场体制感知（/api/v1/regime）— V10.2-M1
+
+### GET /api/v1/regime/current
+- 用途：查询当前体制及置信度
+- 响应关键字段：`{ regime, confidence, detected_at, multipliers }`
+
+### GET /api/v1/regime/history
+- 用途：历史体制记录（分页）
+- Query：`limit?`, `offset?`
+- 响应：`{ total, items[] }`
+
+### GET /api/v1/regime/strategy-weights
+- 用途：当前体制下各策略权重
+- 响应：`{ regime, weights: {strategy_id: weight} }`
+
+### POST /api/v1/regime/override
+- 用途：人工覆写当前体制（管理员）
+- 请求：`{ regime: str, reason: str }`
+- 响应：`{ ok, applied_regime }`
+
+---
+
+## 事件日历 & 围栏管理（/api/v1/events）— V10.2-M2
+
+### GET /api/v1/events/calendar
+- 用途：获取事件日历列表（盈利/FOMC/CPI/NFP 等）
+- Query：`lookahead_days?: int`（默认 14）, `symbol?: str`
+- 响应：`EventCalendarItemResponse[]`，每项包含 `event_id/symbol/event_type/event_date/risk_level/fence_active/eps_estimate/eps_actual/reaction_pct`
+
+### GET /api/v1/events/earnings-fence
+- 用途：获取所有当前激活的盈利围栏状态列表
+- 响应：`FenceStatusResponse[]`，每项包含 `symbol/event_id/fence_active/days_to_event/size_cap_pct`
+
+### GET /api/v1/events/earnings-fence/{symbol}
+- 用途：查询指定标的盈利围栏状态
+- 响应：`FenceStatusResponse`
+
+### PUT /api/v1/events/earnings-fence/{event_id}/override
+- 用途：人工覆盖围栏（解除或强制激活）
+- 请求：`{ active: bool, reason: str }`
+- 响应：更新后的 `EventCalendarItemResponse`
+
+### POST /api/v1/events/earnings-result
+- 用途：录入盈利实际结果（EPS 实际值、营收、反应涨跌幅）
+- 请求：`{ event_id: int, eps_actual: float, revenue_actual?: float, reaction_pct: float }`
+- 响应：更新后的 `EventCalendarItemResponse`
+
+---
+
+## 动态仓位生命周期（/api/v1/positions）— V10.2-M3
+
+### POST /api/v1/positions/{position_id}/lifecycle
+- 用途：对持仓执行生命周期决策（检查加仓/减仓/移动止损条件）
+- 请求：`PositionContext`（包含 `account_id/symbol/current_price/entry_price/quantity/stop_loss/take_profit/market_regime`）
+- 响应：`LifecycleStatusResponse`（包含 `action/scale_direction/new_stop_loss/reason/triggered_rules[]`）
+
+### POST /api/v1/positions/{position_id}/manual-scale
+- 用途：手动触发仓位缩放（加仓或减仓）
+- 请求：`ManualScaleRequest`（`scale_type: SCALE_IN/SCALE_OUT`, `qty_pct: float`, `reason?: str`）
+- 响应：更新后的持仓状态
+
+### POST /api/v1/positions/scale-in-candidates
+- 用途：扫描所有持仓，返回符合加仓条件的候选列表
+- 请求：`{ account_id: str }`
+- 响应：`ScaleInCandidatesResponse`（`candidates[]` 含 `symbol/score/suggested_qty_pct/reason`）
+
+---
+
+## 信号融合（/api/v1/signals）— V10.2-M4
+
+### POST /api/v1/signals/fuse
+- 用途：将多维原始信号融合为统一置信度评分
+- 请求：`FusedSignalRequest`（`symbol/tech_score/fundamental_score/macro_score/volatility_score/options_score/sentiment_score/market_regime?`）
+- 响应：`FusedSignalResponse`（`composite_score/weights_used/dim_scores{tech/fundamental/macro/volatility/options/sentiment}/regime_multiplier/signal_strength`）
+
+### POST /api/v1/signals/sentiment/{symbol}
+- 用途：获取指定标的的实时情绪评分（新闻 + 社交媒体）
+- 响应：`SentimentScoreResponse`（`symbol/sentiment_score/bearish_pct/bullish_pct/neutral_pct/source_count/analyzed_at`）
+
+---
+
+## 交易归因（/api/v1/attribution）— V10.2-M5
+
+### GET /api/v1/attribution/trades
+- 用途：获取交易三层归因分析列表
+- Query：`days?: int`（默认 30）, `symbol?: str`, `category?: str`（alpha_source/execution/position_mgmt）
+- 响应：`TradeAttributionItemResponse[]`，每项包含 `trade_id/symbol/realized_pnl/alpha_pnl/exec_pnl/pos_mgmt_pnl/alpha_source/exec_quality_score/layers{}`
+
+### GET /api/v1/attribution/summary
+- 用途：获取归因汇总统计（三层 PnL 占比 + 最佳/最差策略）
+- Query：`days?: int`（默认 30）
+- 响应：`AttributionSummaryResponse`（`total_pnl/alpha_contribution_pct/exec_contribution_pct/pos_mgmt_contribution_pct/top_alpha_sources[]/exec_quality_avg/by_category{}`）
+
+---
+
+## AI 洞察 & 进化（/api/v1/insights）— V10.2-M6
+
+### GET /api/v1/insights/repository
+- 用途：获取 AI 洞察知识库列表
+- Query：`insight_type?: str`（WEEKLY_SUMMARY/PATTERN/LESSON/RULE_CANDIDATE）, `active?: bool`
+- 响应：`InsightListResponse`（`total/items[]`，每项含 `insight_id/insight_type/title/body/confidence/active/source_trades/created_at`）
+
+### POST /api/v1/insights/repository
+- 用途：手动添加洞察条目
+- 请求：`AIInsightItemCreate`（`insight_type/title/body/confidence/source_trades?`）
+- 响应：`AIInsightItemResponse`
+
+### PATCH /api/v1/insights/repository/{insight_id}
+- 用途：更新洞察状态（激活/停用）或内容
+- 请求：`{ active?: bool, body?: str, confidence?: float }`
+- 响应：更新后的 `AIInsightItemResponse`
+
+### GET /api/v1/insights/experiments
+- 用途：获取 A/B 实验列表
+- Query：`status?: str`（RUNNING/COMPLETED/PAUSED）
+- 响应：`ABExperimentItemResponse[]`
+
+### POST /api/v1/insights/experiments
+- 用途：创建新 A/B 实验
+- 请求：`CreateExperimentRequest`（`name/description/hypothesis/control_params/test_params/target_metric/start_date/end_date`）
+- 响应：`ABExperimentItemResponse`（含 `experiment_id/status/statistical_significance/p_value`）
+
+---
+
+## Trading Copilot（/api/v1/copilot）— V10 & V10.2-M7
+
+### POST /api/v1/copilot/chat
+- 用途：发送 Copilot 对话消息
+- 请求：`{ account_id, session_id, message }`
+- 响应：`{ reply, action_intent?, tokens_used, model_used }`
+
+### GET /api/v1/copilot/history
+- 用途：获取会话历史
+- Query：`account_id`, `session_id`, `limit?`
+
+### DELETE /api/v1/copilot/history
+- 用途：清空会话历史
+
+### POST /api/v1/copilot/confirm/{action_id}
+- 用途：确认 Copilot 意图操作
+- 响应：`{ executed, result }`
+
+### GET /api/v1/copilot/morning-brief
+- 用途：盘前摘要（每日 08:30 ET）
+
+### GET /api/v1/copilot/daily-report
+- 用途：当日复盘报告
+
+### POST /api/v1/copilot/deep-research — V10.2-M7
+- 用途：对指定标的执行多步深度研究，返回结构化研究报告
+- 请求：`{ symbol: str, query?: str }`
+- 响应：`{ report: DeepResearchReport }`
+  - `DeepResearchReport` 字段：`symbol/rating/price_target/body/sources[]/model_used/generated_at`
+- 说明：内部调用 `deepseek-reasoner` 分多步执行：市场情绪分析 → 基本面深潜 → 风险因素扫描 → 综合评级
+
+---
+
 ## 更新历史
 
+- **2026-02-28**: V10.2-M2~M8 上线；新增事件日历、动态仓位、信号融合、交易归因、AI 洞察进化、Copilot Deep Research 共 18 个端点；文档补全
+- **2026-02-27**: V10.2-M1 上线；新增 `/api/v1/regime` 4 个端点
 - **2026-01-16**: 统一所有接口路径为 `/api/v1` 前缀（除 `/health` 外）；更新文档所有接口路径
 - **2026-01-09**: 合并 `API_Monitoring.md`（API 监控模块）到主文档；补充监控端点与操作说明
 - 其它历史记录请见各相关文件头部注释

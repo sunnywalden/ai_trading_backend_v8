@@ -9,7 +9,7 @@ class CopilotMessage(Base):
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     account_id = Column(String(64), nullable=False)
     session_id = Column(String(64), nullable=False)
-    role = Column(String(8), nullable=False, comment="user/assistant")
+    role = Column(String(16), nullable=False, comment="user/assistant/system")
     content = Column(Text, nullable=False)
     model_used = Column(String(64), nullable=True)
     action_intent = Column(JSON, nullable=True, comment='{"type":"modify_stop","params":{...}}')

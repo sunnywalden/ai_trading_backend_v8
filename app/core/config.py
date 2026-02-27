@@ -194,6 +194,9 @@ class Settings(BaseSettings):
     DATA_HUB_PRIMARY: str = "yfinance"      # yfinance / tiger
     DATA_HUB_FALLBACK: str = "tiger"        # 主源失败时使用
 
+    # 期权分析缓存时间（小时）
+    OPTIONS_ANALYSIS_CACHE_EXPIRE_HOURS: int = 24
+
     # AI 模型路由（轻量 vs 复杂推理）
     AI_LIGHTWEIGHT_MODEL: str = "deepseek-chat"     # 轻量查询/摘要
     AI_COMPLEX_MODEL: str = "deepseek-reasoner"     # 深度推理/自主决策
@@ -211,6 +214,23 @@ class Settings(BaseSettings):
     # AI 周报定时（每周一 08:00 生成上周复盘）
     SCHEDULER_WEEKLY_REPORT_DAY: str = "mon"
     SCHEDULER_WEEKLY_REPORT_HOUR: int = 8
+
+    # ==================== V10.2-M1: 市场体制感知配置 ====================
+    # 是否启用市场体制分类（关闭后体制固定为 BULL_TREND，不影响其他模块）
+    REGIME_ENABLED: bool = True
+
+    # 体制「连续确认」天数：连续 N 天同一体制信号才切换（防止噪声翻转）
+    REGIME_CONFIRM_DAYS: int = 3
+
+    # 各体制下的 VaR 门限倍数（相对于 MAX_VAR_PCT）。
+    # 格式："BULL_TREND:1.2,BEAR_TREND:0.8,HIGH_VOL:0.7,MEAN_REVERT:1.0,RANGE_BOUND:1.0,CRISIS:0.5"
+    REGIME_VAR_MULTIPLIERS: str = (
+        "BULL_TREND:1.2,BEAR_TREND:0.8,HIGH_VOL:0.7,"
+        "MEAN_REVERT:1.0,RANGE_BOUND:1.0,CRISIS:0.5"
+    )
+
+    # 每日体制分类 Job 触发小时（UTC+0 系统时间，默认 08:00 港股/美股开盘前）
+    REGIME_CLASSIFICATION_HOUR: int = 8
 
     model_config = SettingsConfigDict(
         env_file=str(ENV_FILE) if ENV_FILE else ".env",

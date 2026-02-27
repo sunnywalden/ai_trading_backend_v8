@@ -186,6 +186,36 @@ async def ensure_mysql_schema_updates() -> None:
                 # 忽略错误，避免阻断启动
                 pass
 
+        # 列类型修复（已有列的长度/类型扩展）
+        # 格式: (table, column, min_char_length, modify_sql)
+        column_type_fixes = [
+            (
+                "copilot_messages",
+                "role",
+                16,
+                "ALTER TABLE copilot_messages MODIFY COLUMN role VARCHAR(16) NOT NULL COMMENT 'user/assistant/system'"
+            ),
+        ]
+        for table_name, column_name, min_length, modify_sql in column_type_fixes:
+            try:
+                result = await conn.execute(
+                    text(
+                        """
+                        SELECT CHARACTER_MAXIMUM_LENGTH
+                        FROM information_schema.columns
+                        WHERE table_schema = DATABASE()
+                        AND table_name = :table_name
+                        AND column_name = :column_name
+                        """
+                    ),
+                    {"table_name": table_name, "column_name": column_name}
+                )
+                row = result.fetchone()
+                if row and (row[0] or 0) < min_length:
+                    await conn.execute(text(modify_sql))
+            except Exception:
+                pass
+
 
 async def get_redis():
     """获取 Redis 客户端的依赖项"""
