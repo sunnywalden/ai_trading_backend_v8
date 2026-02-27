@@ -85,9 +85,14 @@ class CopilotService:
                 return cached
 
         context = await self._build_context(account_id)
-        prompt = f"""你是专业量化交易 AI，请基于以下信息生成今日盘前交易摘要。
+        prompt = f"""你是顶级私募、量化系统专业 AI，请基于以下真实市场与账户信息生成今日盘前交易摘要。
 
 当前状态：{json.dumps(context, ensure_ascii=False, indent=2)}
+
+注意：
+1. 标的范围严格限制在【美股】和【港股】，严禁包含任何 A 股（如 .SZ 或 .SH 结尾的股票）。
+2. 如果 top_signals 中有数据，请优先基于这些真实信号进行分析；如果为空，则根据已知市场趋势推荐 2-3 个主流对冲或套利标的。
+3. 语气要简洁、专业、客观。
 
 请务必按以下 JSON 格式输出：
 {{
@@ -95,9 +100,9 @@ class CopilotService:
   "summary": "概要描述",
   "market_outlook": "市场展望",
   "top_signals": [
-    {{"symbol": "AAPL", "action": "BUY", "reason": "突破压力位"}}
+    {{"symbol": "AAPL", "action": "BUY", "reason": "xxxxx"}}
   ],
-  "risk_alerts": ["波动率上升", "关键支撑位跌破"]
+  "risk_alerts": ["xxxxx", "xxxxx"]
 }}
 仅输出 JSON。"""
 
@@ -225,26 +230,65 @@ class CopilotService:
         for pattern, intent_type in INTENT_PATTERNS:
             m = re.search(pattern, user_msg)
             if m:
-                return {"type": intent_type, "params": {"matched": m.groups()}}
+                groups = m.groups()
+                # 范围检查：禁止 A 股操作 (SZ/SH)
+                if groups and any(isinstance(g, str) and (g.upper().endswith(".SZ") or g.upper().endswith(".SH")) for g in groups):
+                    logger.warning(f"Blocking A-share intent detection: {user_msg}")
+                    return None
+                return {"type": intent_type, "params": {"matched": groups}}
         return None
 
     async def _build_context(self, account_id: str) -> dict:
-        """构建账户上下文摘要（简化）"""
+        """构建增强版账户上下文摘要，为 AI 提供真实决策依据"""
         from app.core.runtime_config import get_autonomy_level as _get_level
-        return {
+        from app.models.db import SessionLocal
+        from sqlalchemy import select, desc
+        from app.services.regime_classifier import regime_classifier
+        from app.models.trading_signal import TradingSignal, SignalStatus
+
+        context = {
             "account_id": account_id,
             "date": date.today().isoformat(),
             "autonomy_level": await _get_level(),
+            "market_regime": "UNKNOWN",
+            "top_signals": [],
         }
+
+        async with SessionLocal() as db:
+            # 1. 获取当前市场体制
+            regime_data = await regime_classifier.get_current_regime(db)
+            if regime_data:
+                context["market_regime"] = regime_data.get("regime", "UNKNOWN")
+
+            # 2. 获取高置信度信号 (限 5 条，仅限美股/港股)
+            # 排除包含 .SZ 或 .SH 的标的
+            stmt = select(TradingSignal).where(
+                TradingSignal.account_id == account_id,
+                TradingSignal.status == SignalStatus.VALIDATED,
+                ~TradingSignal.symbol.like("%.SZ"),
+                ~TradingSignal.symbol.like("%.SH"),
+            ).order_by(desc(TradingSignal.confidence)).limit(5)
+            
+            result = await db.execute(stmt)
+            signals = result.scalars().all()
+            for s in signals:
+                context["top_signals"].append({
+                    "symbol": s.symbol,
+                    "action": s.signal_type.value if hasattr(s.signal_type, 'value') else s.signal_type,
+                    "confidence": s.confidence,
+                    "reason": s.research_summary[:50] if s.research_summary else "六维指标共振"
+                })
+
+        return context
 
     def _build_system_prompt(self, context: dict) -> str:
         return f"""你是 Trading Copilot，一个专业的量化交易 AI 助理。
 当前账户信息：{json.dumps(context, ensure_ascii=False)}
 规则：
-1. 对查询类问题直接回答
-2. 对操作类请求（下单、止损等），先确认意图再标注"需要确认"
-3. 对风险超标的操作，警告并拒绝
-4. 所有回复使用中文，简洁专业"""
+1. 标的范围仅限【美股】和【港股】，禁止推荐或分析任何 A 股（如 .SZ 或 .SH 结尾的标的）。
+2. 对查询类问题直接回答。
+3. 对操作类请求（下单、止损等），先确认意图再标注"需要确认"。
+4. 所有回复使用中文，简洁、专业、客观。"""
 
     async def _get_history(self, account_id: str, session_id: str, db: Optional[AsyncSession]) -> list:
         if not db:
