@@ -107,8 +107,9 @@ class CopilotService:
 仅输出 JSON。"""
 
         messages = [{"role": "user", "content": prompt}]
-        # 优化：优先使用 lightweight 模型提速，除非是 force_refresh 且明确需要复杂分析
-        model_type = "complex" if force_refresh else "lightweight"
+        # 优化：早间简报优先保证响应速度，使用 lightweight 模型 (deepseek-chat)
+        # 强制刷新也不需要 complex 推理，仅是为了获取最新数据快照
+        model_type = "lightweight"
         raw_response, _, _ = await self._call_ai(messages, model_type)
         
         result = None
@@ -258,7 +259,8 @@ class CopilotService:
             # 1. 获取当前市场体制
             regime_data = await regime_classifier.get_current_regime(db)
             if regime_data:
-                context["market_regime"] = regime_data.get("regime", "UNKNOWN")
+                # V10.2: regime_data 现在是 MarketRegime ORM 实例而非 dict
+                context["market_regime"] = regime_data.regime
 
             # 2. 获取高置信度信号 (限 5 条，仅限美股/港股)
             # 排除包含 .SZ 或 .SH 的标的
