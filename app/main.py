@@ -48,6 +48,7 @@ from app.routers import autonomy      # V10: AI自主中枢
 from app.routers import copilot       # V10: AI助手
 from app.routers import backtest      # V10: 回测引擎
 from app.routers import portfolio     # V10: 组合优化
+from app.routers import etf           # V10.1: ETF自选列表
 from app.routers import task_config   # V10: 统一任务配置管理
 from app.routers import stress_test   # V10: 压力测试
 from app.routers import paper_trading  # V10: 模拟盘
@@ -110,6 +111,13 @@ async def lifespan(app: FastAPI):
         logger.info("Scheduler started with periodic tasks")
     else:
         logger.info("Scheduler disabled (ENABLE_SCHEDULER=false)")
+
+    # 从 Redis 恢复 AutonomousEngine 暂停/熔断状态（防止重启后丢失互斥标志）
+    try:
+        from app.services.autonomous_engine import autonomous_engine
+        await autonomous_engine.restore_state()
+    except Exception as _e:
+        logger.warning(f"Failed to restore AutonomousEngine state: {_e}")
     
     yield
     
@@ -170,6 +178,7 @@ app.include_router(v9_orders.router, prefix="/api/v1", dependencies=[Depends(get
 app.include_router(v9_websocket.router, prefix="/api/v1")
 # V10 新路由注册
 app.include_router(portfolio.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
+app.include_router(etf.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
 app.include_router(autonomy.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
 app.include_router(backtest.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
 app.include_router(copilot.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
@@ -368,7 +377,7 @@ async def search_symbols(
 ):
     """模糊搜索美港股标的"""
     svc = AiAdviceService(session)
-    return await svc.search_symbols(q)
+    return await svc.search_symbols(q or "")
 
 
 @app.post("/api/v1/ai/analyze-stock", response_model=KlineAnalysisResponse)
@@ -491,7 +500,7 @@ async def update_job_schedule(
         if not job:
             raise HTTPException(status_code=404, detail=t("error.job_not_found", id=job_id))
         job_info = format_job(job)
-        next_run = job_info.get("next_run_time") or "soon"
+        next_run = job_info.get("next_run_time") if job_info else "soon"
         message = f"Job schedule updated successfully. Next run: {next_run}"
         return {"status": "success", "message": message, "job": job_info}
     except ValueError as exc:

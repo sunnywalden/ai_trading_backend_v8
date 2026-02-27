@@ -29,10 +29,38 @@ class AutonomousEngine:
     def pause(self):
         self.is_running = False
         logger.info("AutonomousEngine PAUSED")
+        # 尝试持久化到 Redis（如果 Redis 可用）
+        try:
+            import asyncio
+            from app.core.cache import cache
+            asyncio.get_event_loop().create_task(
+                cache.set("autonomous_engine:paused", "1", expire=86400 * 7)
+            )
+        except Exception:
+            pass
 
     def resume(self):
         self.is_running = True
         logger.info("AutonomousEngine RESUMED")
+        try:
+            import asyncio
+            from app.core.cache import cache
+            asyncio.get_event_loop().create_task(
+                cache.delete("autonomous_engine:paused")
+            )
+        except Exception:
+            pass
+
+    async def restore_state(self) -> None:
+        """应用启动时从 Redis 恢复暂停状态，防止重启丢失互斥状态。"""
+        try:
+            from app.core.cache import cache
+            val = await cache.get("autonomous_engine:paused")
+            if val:
+                self.is_running = False
+                logger.warning("[AutonomousEngine] Restored PAUSED state from Redis")
+        except Exception:
+            pass
 
     async def run_decision_cycle(self, account_id: str, db: AsyncSession) -> list[dict]:
         """执行一个自主决策周期"""
@@ -65,6 +93,22 @@ class AutonomousEngine:
             logger.debug(f"[AutonomousEngine] No pending signals for {account_id}")
             return []
 
+        # ⚘️ 竞争防护：立刻将所有信号标记为 QUEUED，防止运行相邻 jobs 重复拥取
+        #  (run_daily_trading_cycle 在 08:00 + run_autonomous_decision_cycle 每 30m 均可能调用这里)
+        from sqlalchemy import update as sa_update
+        from app.models.trading_signal import TradingSignal as _TSModel, SignalStatus as _SS
+        signal_ids = [s["id"] for s in signals]
+        try:
+            await db.execute(
+                sa_update(_TSModel)
+                .where(_TSModel.id.in_(signal_ids))
+                .where(_TSModel.status.in_([_SS.GENERATED, _SS.VALIDATED]))
+                .values(status=_SS.QUEUED)
+            )
+            await db.commit()
+        except Exception as _e:
+            logger.warning(f"[AutonomousEngine] Failed to lock signals to QUEUED: {_e}")
+
         for signal in signals:
             decision = await self._ai_decide(signal, current_positions, current_equity)
             gate = await risk_gate_service.check(
@@ -84,15 +128,26 @@ class AutonomousEngine:
             if gate.circuit_breaker:
                 logger.critical(f"[AutonomousEngine] Circuit breaker triggered for {account_id}!")
                 await self._notify_circuit_breaker(account_id, daily_pnl, current_equity)
+                # 将信号回退为 VALIDATED，等待炴断器解除后重试
+                await self._update_signal_status(db, signal["id"], _SS.VALIDATED)
+
+            elif not gate.passed:
+                await self._update_signal_status(db, signal["id"], _SS.REJECTED)
+                logger.info(f"[AutonomousEngine] Signal {signal['id']} rejected by RiskGate: {gate.reason}")
 
             elif gate.passed:
                 if level == "ADVISORY":
                     await self._notify_suggestion(account_id, decision)
+                    await self._update_signal_status(db, signal["id"], _SS.VALIDATED)  # 保持待人工确认
                 else:
                     order_id = await self._execute_order(account_id, decision, db)
                     daily_trades += 1
-                    if level == "SEMI" and order_id:
-                        await self._schedule_revoke_window(account_id, order_id)
+                    if order_id:
+                        await self._update_signal_status(db, signal["id"], _SS.EXECUTED)
+                        if level == "SEMI":
+                            await self._schedule_revoke_window(account_id, order_id)
+                    else:
+                        await self._update_signal_status(db, signal["id"], _SS.FAILED)
 
             # 写审计日志
             await self._write_audit_log(db, account_id, level, decision, gate, order_id, circuit_breaker)
@@ -154,7 +209,11 @@ class AutonomousEngine:
             
             if not isinstance(decision, dict):
                 return {"action": "HOLD", "symbol": signal.get("symbol", ""), "qty": 0, "confidence": 0.0, "reasoning": "Parse failed"}
-                
+
+            # 如果 AI 未给出数量，回退到信号原始建议量，防止 qty=0 触发 RiskGate 拦截
+            if not decision.get("qty") and signal.get("quantity", 0) > 0:
+                decision["qty"] = signal["quantity"]
+
             return decision
         except Exception as e:
             logger.error(f"AI decide failed: {e}, using HOLD fallback")
@@ -192,22 +251,56 @@ class AutonomousEngine:
     # ──────────────────────────────────────────
 
     async def _fetch_pending_signals(self, account_id: str, db: AsyncSession) -> list[dict]:
-        """从 trading_signals 获取今日未处理信号（简化实现）"""
-        from sqlalchemy import text, select
+        """
+        从 trading_signals 获取待处理信号。
+        - 状态: GENERATED 或 VALIDATED（PENDING 在枚举中不存在，是历史错误）
+        - 优先级降序，置信度降序
+        - TTL: 仅处理 24h 内创建的信号，防止执行历史积压信号
+        - 数量: 单次最多处理 10 条
+        """
+        from sqlalchemy import select, and_, or_, desc as sa_desc
+        from app.models.trading_signal import TradingSignal, SignalStatus
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
         try:
-            # 获取最近 10 个 PENDING 信号
-            result = await db.execute(
-                text(
-                    "SELECT id, symbol, strategy_name, signal_type, confidence_score "
-                    "FROM trading_signals WHERE status='PENDING' AND account_id=:aid "
-                    "ORDER BY created_at DESC LIMIT 10"
-                ),
-                {"aid": account_id},
+            stmt = (
+                select(TradingSignal)
+                .where(
+                    and_(
+                        TradingSignal.account_id == account_id,
+                        TradingSignal.status.in_([
+                            SignalStatus.GENERATED,
+                            SignalStatus.VALIDATED,
+                        ]),
+                        # TTL 过滤：跳过 24h 前的信号
+                        or_(
+                            TradingSignal.created_at >= cutoff,
+                            TradingSignal.created_at.is_(None),  # 兼容无时间戳的旧数据
+                        ),
+                    )
+                )
+                .order_by(sa_desc(TradingSignal.priority), sa_desc(TradingSignal.confidence))
+                .limit(10)
             )
-            rows = result.fetchall()
-            return [{"id": r[0], "symbol": r[1], "strategy": r[2], "signal_type": r[3], "confidence": r[4]} for r in rows]
+            result = await db.execute(stmt)
+            rows = result.scalars().all()
+            return [
+                {
+                    "id": r.id,
+                    "signal_id": r.signal_id,
+                    "symbol": r.symbol,
+                    "signal_type": r.signal_type.value if r.signal_type else "ENTRY",
+                    "confidence": float(r.confidence or 0.5),
+                    "direction": r.direction or "LONG",
+                    "quantity": float(r.suggested_quantity or 0),
+                    "strategy": str(r.signal_source.value) if r.signal_source else "STRATEGY",
+                    "status": r.status.value,
+                    "notes": r.notes,
+                }
+                for r in rows
+            ]
         except Exception as e:
-            logger.warning(f"Failed to fetch pending signals: {e}")
+            logger.warning(f"Failed to fetch pending signals: {e}", exc_info=True)
             return []
 
     async def _execute_order(self, account_id: str, decision: dict, db: AsyncSession) -> Optional[str]:
@@ -246,6 +339,22 @@ class AutonomousEngine:
         """ADVISORY 模式：推送建议通知（Telegram）"""
         logger.info(f"[AutonomousEngine] ADVISORY suggestion for {account_id}: {decision}")
         # TODO: 接入 telegram_service.send_message
+
+    async def _update_signal_status(
+        self,
+        db: AsyncSession,
+        signal_db_id: int,
+        new_status: Any,
+    ) -> None:
+        """更新 TradingSignal 状态，捕获异常以免中断主流程。"""
+        try:
+            from sqlalchemy import update as _upd
+            from app.models.trading_signal import TradingSignal as _TS
+            await db.execute(
+                _upd(_TS).where(_TS.id == signal_db_id).values(status=new_status)
+            )
+        except Exception as e:
+            logger.warning(f"[AutonomousEngine] Failed to update signal {signal_db_id} status: {e}")
 
     async def _notify_circuit_breaker(self, account_id: str, daily_pnl: float, equity: float) -> None:
         """熔断触发：推送紧急通知"""

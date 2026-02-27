@@ -60,11 +60,15 @@ def is_hk_stock(symbol: str) -> bool:
     
     规则：
     - 以 ".HK" 结尾（不区分大小写），如 "0700.HK"
+    - 以 "HK" 结尾且前面是数字，如 "0700HK"
     - 纯数字且长度 ≤ 5 位，如 "700"、"00700"
     """
     s = symbol.strip().upper()
     if s.endswith(".HK"):
         return True
+    if s.endswith("HK"):
+        core = s[:-2]
+        return core.isdigit() and 1 <= len(core) <= 5
     core = s.split(".")[0]
     return core.isdigit() and 1 <= len(core) <= 5
 
@@ -75,9 +79,12 @@ def normalize_hk_symbol(symbol: str) -> str:
     示例：
       "700"      -> "00700"
       "0700.HK"  -> "00700"
+      "0700HK"   -> "00700"
       "00700"    -> "00700"
     """
     s = symbol.strip().upper()
     if s.endswith(".HK"):
         s = s[:-3]
+    elif s.endswith("HK"):
+        s = s[:-2]
     return s.zfill(5)

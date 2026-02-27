@@ -26,26 +26,26 @@ class TrendDirection(str, Enum):
 # ============ 账户概览 ============
 class AccountOverview(BaseModel):
     """账户概览"""
-    total_equity: float = Field(0.0, description="总权益")
-    cash: float = Field(0.0, description="可用现金")
-    market_value: float = Field(0.0, description="市值")
-    buying_power: float = Field(0.0, description="购买力")
-    margin_used: float = Field(0.0, description="已用保证金")
-    margin_available: float = Field(0.0, description="可用保证金")
+    total_equity: float = Field(default=0.0, description="总权益")
+    cash: float = Field(default=0.0, description="可用现金")
+    market_value: float = Field(default=0.0, description="市值")
+    buying_power: float = Field(default=0.0, description="购买力")
+    margin_used: float = Field(default=0.0, description="已用保证金")
+    margin_available: float = Field(default=0.0, description="可用保证金")
 
 
 # ============ 盈亏分析 ============
 class PnLMetrics(BaseModel):
     """盈亏指标"""
-    daily_pnl: float = Field(0.0, description="今日盈亏")
-    daily_return_pct: float = Field(0.0, description="今日收益率%")
-    weekly_pnl: float = Field(0.0, description="本周盈亏")
-    weekly_return_pct: float = Field(0.0, description="本周收益率%")
-    mtd_pnl: float = Field(0.0, description="本月盈亏")
-    mtd_return_pct: float = Field(0.0, description="本月收益率%")
-    ytd_pnl: float = Field(0.0, description="本年盈亏")
-    ytd_return_pct: float = Field(0.0, description="本年收益率%")
-    trend: TrendDirection = Field(TrendDirection.FLAT, description="趋势")
+    daily_pnl: float = Field(default=0.0, description="今日盈亏")
+    daily_return_pct: float = Field(default=0.0, description="今日收益率%")
+    weekly_pnl: float = Field(default=0.0, description="本周盈亏")
+    weekly_return_pct: float = Field(default=0.0, description="本周收益率%")
+    mtd_pnl: float = Field(default=0.0, description="本月盈亏")
+    mtd_return_pct: float = Field(default=0.0, description="本月收益率%")
+    ytd_pnl: float = Field(default=0.0, description="本年盈亏")
+    ytd_return_pct: float = Field(default=0.0, description="本年收益率%")
+    trend: TrendDirection = Field(default=TrendDirection.FLAT, description="趋势")
 
 
 class PnLAttribution(BaseModel):
@@ -72,13 +72,13 @@ class GreeksExposure(BaseModel):
 class RiskMetrics(BaseModel):
     """风险指标"""
     risk_level: RiskLevel = RiskLevel.LOW
-    var_1d: float = Field(0.0, description="1日VaR")
-    var_5d: float = Field(0.0, description="5日VaR")
-    max_drawdown: float = Field(0.0, description="最大回撤%")
-    sharpe_ratio: float = Field(0.0, description="夏普比率")
-    beta: float = Field(0.0, description="β系数")
-    concentration_risk: float = Field(0.0, description="集中度风险%")
-    greeks: GreeksExposure = GreeksExposure()
+    var_1d: float = Field(default=0.0, description="1日VaR")
+    var_5d: float = Field(default=0.0, description="5日VaR")
+    max_drawdown: float = Field(default=0.0, description="最大回撤%")
+    sharpe_ratio: float = Field(default=0.0, description="夏普比率")
+    beta: float = Field(default=0.0, description="β系数")
+    concentration_risk: float = Field(default=0.0, description="集中度风险%")
+    greeks: GreeksExposure = Field(default_factory=GreeksExposure)
 
 
 class MacroRiskAlert(BaseModel):

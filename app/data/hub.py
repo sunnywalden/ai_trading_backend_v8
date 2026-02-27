@@ -42,11 +42,21 @@ class DataHub:
         primary = settings.DATA_HUB_PRIMARY
         fallback = settings.DATA_HUB_FALLBACK
 
-        # 港股始终通过 Tiger API 获取，不走 yfinance fallback
+        # 港股处理逻辑
         if is_hk_stock(symbol):
-            normalized = normalize_hk_symbol(symbol)
-            logger.debug(f"DataHub: HK symbol detected ({symbol} -> {normalized}), force Tiger")
-            return await self._tiger_ohlcv(normalized, start, end, interval)
+            normalized_tiger = normalize_hk_symbol(symbol)  # 如 00700
+            # yfinance 港股通常使用 XXXX.HK 格式
+            core = normalized_tiger.lstrip('0')
+            normalized_yf = f"{core.zfill(4)}.HK"
+            
+            logger.debug(f"DataHub: HK symbol detected ({symbol}), Tiger: {normalized_tiger}, YF: {normalized_yf}")
+            
+            # 优先尝试 Tiger API
+            try:
+                return await self._tiger_ohlcv(normalized_tiger, start, end, interval)
+            except Exception as e:
+                logger.warning(f"DataHub: Tiger fail for {normalized_tiger}: {e}, trying yfinance as fallback")
+                return await self._fetch_ohlcv("yfinance", normalized_yf, start, end, interval)
 
         try:
             return await self._fetch_ohlcv(primary, symbol, start, end, interval)
@@ -63,11 +73,17 @@ class DataHub:
         primary = settings.DATA_HUB_PRIMARY
         fallback = settings.DATA_HUB_FALLBACK
 
-        # 港股始终通过 Tiger API 获取实时报价
+        # 港股处理
         if is_hk_stock(symbol):
-            normalized = normalize_hk_symbol(symbol)
-            logger.debug(f"DataHub quote: HK symbol ({symbol} -> {normalized}), force Tiger")
-            return await self._tiger_quote(normalized)
+            normalized_tiger = normalize_hk_symbol(symbol)
+            core = normalized_tiger.lstrip('0')
+            normalized_yf = f"{core.zfill(4)}.HK"
+            
+            try:
+                return await self._tiger_quote(normalized_tiger)
+            except Exception as e:
+                logger.warning(f"DataHub: Tiger quote fail for {normalized_tiger}: {e}, trying yfinance")
+                return await self._fetch_quote("yfinance", normalized_yf)
 
         try:
             return await self._fetch_quote(primary, symbol)

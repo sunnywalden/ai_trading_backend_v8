@@ -212,21 +212,32 @@ class QuantTradingLoop:
         self,
         account_id: str
     ) -> Dict[str, Any]:
-        """阶段3: 执行已验证的交易信号"""
-        
-        # 执行信号批次
-        execution_results = await self.order_executor.execute_signal_batch(
+        """
+        阶段3: 执行已验证的交易信号。
+
+        【架构说明】统一走 AutonomousEngine.run_decision_cycle() 作为唯一执行路径：
+        - 包含 AI 二次推理、RiskGate 检查、自主级别判断、审计日志
+        - 避免 QuantTradingLoop 和 run_autonomous_decision_cycle 双路径竞争
+        - OrderExecutor 仅作为底层 Broker 适配器，不直接被此处调用
+        """
+        from app.services.autonomous_engine import autonomous_engine
+
+        results = await autonomous_engine.run_decision_cycle(
             account_id=account_id,
-            max_orders=5,  # 每次最多执行5个订单
-            trade_mode=TradeMode.DRY_RUN  # 可根据配置改为LIVE
+            db=self.session
         )
-        
+
+        executed = sum(1 for r in results if r.get("order_id"))
+        blocked  = sum(1 for r in results if not r.get("gate_passed"))
+        cb       = any(r.get("circuit_breaker") for r in results)
+
         return {
             "status": "completed",
-            "executed_orders": execution_results["executed"],
-            "failed_orders": execution_results["failed"],
-            "queued_orders": execution_results["queued"],
-            "execution_details": execution_results.get("results", [])
+            "decisions": len(results),
+            "executed_orders": executed,
+            "blocked_by_risk": blocked,
+            "circuit_breaker": cb,
+            "execution_details": results,
         }
     
     async def _phase_4_performance_evaluation(

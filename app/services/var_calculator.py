@@ -62,6 +62,10 @@ class VaRCalculator:
         # 获取当前账户权益
         current_equity = await self._get_current_equity(account_id)
         
+        # 获取当前持有头寸的 Beta（如果有基准数据）
+        beta = await self._calculate_portfolio_beta(returns)
+        sharpe = self._calculate_sharpe_ratio(returns)
+        
         # 计算VaR（历史模拟法）
         var_95 = self._calculate_historical_var(returns, 0.95)
         var_99 = self._calculate_historical_var(returns, 0.99)
@@ -98,6 +102,8 @@ class VaRCalculator:
             "max_drawdown_pct": max_drawdown,
             "drawdown_duration_days": dd_duration,
             "volatility_annualized": volatility_annualized,
+            "sharpe_ratio": sharpe,
+            "beta": beta,
             
             # 风险等级
             "risk_level": self._assess_risk_level(var_95, max_drawdown),
@@ -105,7 +111,47 @@ class VaRCalculator:
             # 解读
             "interpretation": self._interpret_var(var_95, cvar_95, max_drawdown)
         }
-    
+
+    async def _calculate_portfolio_beta(self, returns: List[float]) -> float:
+        """计算投资组合相对于SPY的Beta"""
+        try:
+            benchmark_returns = await self.benchmark_service.get_benchmark_returns("SPY", len(returns))
+            if not benchmark_returns or len(benchmark_returns) < 10:
+                return 1.0  # 默认值
+            
+            # 取两者重合的长度
+            n = min(len(returns), len(benchmark_returns))
+            p_returns = returns[-n:]
+            m_returns = benchmark_returns[-n:]
+            
+            # 计算协方差和基准方差
+            mean_p = statistics.mean(p_returns)
+            mean_m = statistics.mean(m_returns)
+            
+            cov_pm = sum((p - mean_p) * (m - mean_m) for p, m in zip(p_returns, m_returns)) / (n - 1)
+            var_m = statistics.variance(m_returns)
+            
+            return cov_pm / var_m if var_m > 0 else 1.0
+        except Exception as e:
+            print(f"Beta计算失败: {e}")
+            return 1.0
+
+    def _calculate_sharpe_ratio(self, returns: List[float], risk_free_annual: float = 0.045) -> float:
+        """计算夏普比率（年化）"""
+        if not returns or len(returns) < 5:
+            return 0.0
+            
+        rf_daily = risk_free_annual / 252
+        excess_returns = [r - rf_daily for r in returns]
+        
+        avg_excess = statistics.mean(excess_returns)
+        std_dev = statistics.stdev(returns) # 使用总收益标准差
+        
+        if std_dev == 0:
+            return 0.0
+            
+        return (avg_excess / std_dev) * math.sqrt(252)
+
     def _calculate_historical_var(
         self,
         returns: List[float],

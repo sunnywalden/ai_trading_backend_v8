@@ -240,11 +240,22 @@ class DashboardV2Service:
         result = await self.session.execute(stmt)
         snaps = list(result.scalars().all())
         
-        if len(snaps) < 2:
-            return 0.0, 0.0
+        # 获取当前权益作为补充，以防近期快照缺失
+        curr_eq = await self._get_current_equity(account_id)
         
+        if not snaps:
+            return 0.0, 0.0
+            
         first_eq = float(snaps[0].total_equity)
-        last_eq = float(snaps[-1].total_equity)
+        
+        # 如果 end 是今天且当前有实时权益，使用实时权益作为结束点
+        if end >= date.today() and curr_eq > 0:
+            last_eq = curr_eq
+        else:
+            if len(snaps) < 2:
+                return 0.0, 0.0
+            last_eq = float(snaps[-1].total_equity)
+
         if first_eq <= 0:
             return 0.0, 0.0
         
@@ -277,7 +288,7 @@ class DashboardV2Service:
             
             for p in opt_positions:
                 all_attrs.append(PnLAttribution(
-                    symbol=p.symbol,
+                    symbol=p.contract.broker_symbol,
                     contribution=float(p.unrealized_pnl or 0),
                     contribution_pct=float(p.unrealized_pnl_pct),
                     position_size=float(p.market_value or 0),
@@ -332,15 +343,22 @@ class DashboardV2Service:
             var_data: dict = {}
             try:
                 from app.services.var_calculator import VaRCalculator
-                var_data = await VaRCalculator(self.session).calculate_var_cvar(account_id)
+                var_data = await VaRCalculator(self.session).calculate_var_cvar(account_id, eq)
             except Exception as _ve:
-                logger.debug(f"VaR calculation skipped: {_ve}")
+                logger.error(f"VaR calculation failed: {_ve}")
 
-            var_1d   = abs(float(var_data.get("var_95", 0.0))) * 100  # 转为百分比
-            var_5d   = abs(float(var_data.get("var_99", 0.0))) * 100
-            max_dd   = abs(float(var_data.get("max_drawdown", 0.0))) * 100
+            var_1d   = abs(float(var_data.get("var_95_pct", 0.0))) * 100  # 转为百分比
+            var_5d   = abs(float(var_data.get("var_99_pct", 0.0))) * 100
+            max_dd   = abs(float(var_data.get("max_drawdown_pct", 0.0))) * 100
             sharpe   = float(var_data.get("sharpe_ratio", 0.0))
             beta_val = float(var_data.get("beta", 0.0))
+            
+            # 计算集中度风险
+            conc_risk = 0.0
+            stk_positions = await self.broker.list_underlying_positions(account_id)
+            if stk_positions:
+                max_val = max(abs(p.market_value) for p in stk_positions)
+                conc_risk = (max_val / eq) * 100 if eq > 0 else 0.0
 
             return RiskMetrics(
                 risk_level=risk_level,
@@ -349,7 +367,7 @@ class DashboardV2Service:
                 max_drawdown=max_dd,
                 sharpe_ratio=sharpe,
                 beta=beta_val,
-                concentration_risk=0.0,
+                concentration_risk=conc_risk,
                 greeks=greeks,
             )
         except Exception as e:
@@ -427,13 +445,13 @@ class DashboardV2Service:
             
             signal_summaries = [
                 SignalSummary(
-                    signal_id=s.signal_id,
-                    symbol=s.symbol,
-                    signal_type=s.signal_type.value if hasattr(s.signal_type, 'value') else str(s.signal_type),
-                    direction=s.direction,
-                    confidence=s.confidence,
-                    expected_return=s.expected_return or 0.0,
-                    risk_score=s.risk_score or 0.0,
+                    signal_id=str(s.signal_id),
+                    symbol=str(s.symbol),
+                    signal_type=str(s.signal_type.value if hasattr(s.signal_type, "value") else s.signal_type),
+                    direction=str(s.direction),
+                    confidence=float(s.confidence) if s.confidence is not None else 0.0,
+                    expected_return=float(s.expected_return) if s.expected_return is not None else 0.0,
+                    risk_score=float(s.risk_score) if s.risk_score is not None else 0.0,
                     timestamp=s.generated_at,
                 )
                 for s in signals
@@ -620,10 +638,10 @@ class DashboardV2Service:
         return [
             TradingPlanSummary(
                 plan_id=str(p.id),
-                symbol=p.symbol,
-                plan_type=p.plan_type or "UNKNOWN",
-                status=p.plan_status,
-                target_price=float(p.take_profit) if p.take_profit else None,
+                symbol=str(p.symbol),
+                plan_type=str(p.plan_type),
+                status=str(p.plan_status),
+                target_price=float(p.take_profit) if p.take_profit is not None else None,
                 quantity=0.0,
                 created_at=p.created_at,
                 expires_at=p.valid_until,
@@ -744,13 +762,13 @@ class DashboardV2Service:
             return [
                 StrategyPerformance(
                     strategy_id=str(row.strategy_id),
-                    strategy_name=row.strategy_name or str(row.strategy_id),
+                    strategy_name=str(row.strategy_name or row.strategy_id),
                     total_runs=int(row.total_runs),
-                    win_rate=round(float(row.success_rate or 0) * 100, 1),
+                    win_rate=float(row.success_rate or 0),
                     avg_return=0.0,
                     sharpe=0.0,
                     last_run_at=row.last_run_at,
-                    status=row.last_run_status or "UNKNOWN",
+                    status=str(row.last_run_status or "UNKNOWN"),
                 )
                 for row in rows
             ]
@@ -851,9 +869,9 @@ class DashboardV2Service:
             return [
                 MarketHotspot(
                     category="stock",
-                    topic=row.symbol,
+                    topic=str(row.symbol),
                     heat_score=float(row.cnt),
-                    related_symbols=[row.symbol],
+                    related_symbols=[str(row.symbol)],
                     opportunities_count=int(row.cnt),
                 )
                 for row in rows
@@ -876,11 +894,12 @@ class DashboardV2Service:
         alerts = result.scalars().all()
         
         for alert in alerts:
+            trigger_price = float(alert.trigger_price) if alert.trigger_price is not None else 0.0
             todos.append(TodoItem(
                 todo_type="alert",
                 priority="high",
-                title=f"{alert.symbol} 价格告警",
-                description=f"价格触及 ${float(alert.trigger_price):.2f}",
+                title=f"{str(alert.symbol)} 价格告警",
+                description=f"价格触及 ${trigger_price:.2f}",
                 action_link=f"/alerts",
                 due_at=None,
                 created_at=alert.trigger_time,
