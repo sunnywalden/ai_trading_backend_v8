@@ -1,9 +1,11 @@
-from typing import List, Dict
+from typing import List, Dict, Optional, Any
 from decimal import Decimal, ROUND_FLOOR, ROUND_CEILING
 from datetime import datetime, date
 import asyncio
 import logging
+import json
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict
 
 from tigeropen.tiger_open_config import get_client_config
 from tigeropen.trade.trade_client import TradeClient
@@ -23,6 +25,8 @@ class TigerOptionClient(OptionBrokerClient):
     使用老虎证券官方 Python SDK (tigeropen) 实现：
     - TradeClient：获取持仓信息
     - QuoteClient：获取期权 Greeks 和实时行情
+    
+    优化：增加进程级/Redis 缓存，减少对 Tiger API 的实时调用
     """
 
     def __init__(self, private_key_path: str, tiger_id: str, account: str):
@@ -43,6 +47,34 @@ class TigerOptionClient(OptionBrokerClient):
         self.trade_client = TradeClient(self.client_config)
         self.quote_client = QuoteClient(self.client_config)
         self._executor = ThreadPoolExecutor(max_workers=4)
+        
+        # 缓存配置
+        self._pos_cache_ttl = 300 # 5分钟缓存
+        self._equity_cache_ttl = 300 # 5分钟缓存
+        self._cache_prefix = "broker_pos:"
+    
+    async def _get_cached_data(self, key: str) -> Optional[Any]:
+        """尝试从 Redis 获取缓存数据"""
+        try:
+            return await cache.get(f"{self._cache_prefix}{key}")
+        except Exception as e:
+            logger.error(f" Error reading cache for {key}: {e}")
+            return None
+
+    async def _set_cached_data(self, key: str, value: Any, ttl: int):
+        """保存数据到 Redis 缓存"""
+        try:
+            await cache.set(f"{self._cache_prefix}{key}", value, expire=ttl)
+        except Exception as e:
+            logger.error(f" Error writing cache for {key}: {e}")
+
+    async def invalidate_cache(self, account_id: Optional[str] = None):
+        """手动失效持仓和权益缓存（例如在下单后）"""
+        acc = account_id or self.account
+        logger.info(f" Invalidating position cache for account: {acc}")
+        await cache.delete(f"{self._cache_prefix}underlying:{acc}")
+        await cache.delete(f"{self._cache_prefix}options:{acc}")
+        await cache.delete(f"{self._cache_prefix}equity:{acc}")
     
     async def _get_hk_stock_names_from_cache(self, symbols: List[str]) -> Dict[str, str]:
         """从缓存获取港股名称
@@ -113,15 +145,26 @@ class TigerOptionClient(OptionBrokerClient):
             return await loop.run_in_executor(self._executor, lambda: func(*args, **kwargs))
         return await loop.run_in_executor(self._executor, func, *args)
 
-    async def list_underlying_positions(self, account_id: str) -> List[UnderlyingPosition]:
-        """获取股票/ETF 仓位
+    async def list_underlying_positions(self, account_id: str, force_refresh: bool = False) -> List[UnderlyingPosition]:
+        """获取股票/ETF 仓位（带缓存）
 
         使用 TradeClient.get_positions() 获取股票持仓
         """
+        # 1. 检查 Redis 缓存
+        if not force_refresh:
+            try:
+                cached = await self._get_cached_data(f"underlying:{account_id}")
+                if cached:
+                    logger.debug(f" Using cached underlying positions for {account_id}")
+                    return [UnderlyingPosition(**p) for p in cached]
+            except Exception as e:
+                logger.error(f" Error decoing underlying cache: {e}")
+
+        # 2. 从 API 获取
         results: List[UnderlyingPosition] = []
 
         try:
-            logger.info(f" Fetching underlying positions for account: {account_id}")
+            logger.info(f" Fetching underlying positions for account (API): {account_id}")
             
             # 获取美股持仓
             us_positions = await self._run_in_executor(
@@ -198,13 +241,13 @@ class TigerOptionClient(OptionBrokerClient):
                         # 合并结果
                         stock_names.update(new_names)
                         
-                        # 将新获取的名称存入缓存
+                        # 更新缓存
                         if new_names:
                             await self._set_hk_stock_names_to_cache(new_names)
                     else:
                         logger.info(f" All {len(hk_symbols)} HK stock names found in cache")
                     
-                    # 构建持仓对象
+                    # 构建最终持仓列表
                     for symbol, pos in hk_position_map.items():
                         quantity = int(pos.quantity or 0)
                         
@@ -229,26 +272,55 @@ class TigerOptionClient(OptionBrokerClient):
                             name=stock_name,
                         )
                         results.append(underlying)
+                        
             except Exception as hk_error:
-                logger.info(f" Error fetching HK positions: {hk_error}")
+                logger.error(f" Error fetching HK positions: {hk_error}")
+
+            # 3. 结果存回缓存
+            logger.info(f" Caching {len(results)} positions for account: {account_id}")
+            # 处理 dataclass 序列化 (date -> isoformat 在 asdict 后处理，但 UnderlyingPosition 没有 date)
+            await self._set_cached_data(
+                f"underlying:{account_id}", 
+                [asdict(p) for p in results],
+                self._pos_cache_ttl
+            )
             
-            logger.info(f" Total positions to return: {len(results)}")
-
         except Exception as e:
-            logger.info(f" Error fetching underlying positions: {e}")
-
+            logger.error(f" Failed to list underlying positions from API: {e}")
+            
         return results
 
-    async def list_option_positions(self, account_id: str) -> List[OptionPosition]:
-        """获取期权仓位 + Greeks
+    async def list_option_positions(self, account_id: str, force_refresh: bool = False) -> List[OptionPosition]:
+        """获取期权仓位 + Greeks（带缓存）
 
         使用 TradeClient.get_positions() 获取期权持仓，
         然后用 QuoteClient.get_option_briefs() 获取 Greeks
         """
+        # 1. 检查 Redis 缓存
+        if not force_refresh:
+            try:
+                cached = await self._get_cached_data(f"option:{account_id}")
+                if cached:
+                    logger.debug(f" Using cached option positions for {account_id}")
+                    results = []
+                    for p in cached:
+                        # 转换 contract.expiry String -> date object
+                        c_dict = p.pop('contract')
+                        if isinstance(c_dict.get('expiry'), str):
+                            c_dict['expiry'] = date.fromisoformat(c_dict['expiry'])
+                        
+                        contract = OptionContract(**c_dict)
+                        greeks = Greeks(**p.pop('greeks'))
+                        results.append(OptionPosition(contract=contract, greeks=greeks, **p))
+                    return results
+            except Exception as e:
+                logger.error(f" Error decoding option cache: {e}")
+
+        # 2. 从 API 获取
         results: List[OptionPosition] = []
 
         try:
-            logger.info(f" Fetching option positions for account: {account_id}")
+            logger.info(f" Fetching option positions for account (API): {account_id}")
             # 获取期权持仓
             positions = await self._run_in_executor(
                 self.trade_client.get_positions,
@@ -350,8 +422,25 @@ class TigerOptionClient(OptionBrokerClient):
                 )
                 results.append(option_pos)
 
+            # 3. 结果存回缓存
+            logger.info(f" Caching {len(results)} option positions for account: {account_id}")
+            def serialize_date(obj):
+                if isinstance(obj, dict):
+                    return {k: serialize_date(v) for k, v in obj.items()}
+                elif isinstance(obj, list):
+                    return [serialize_date(i) for i in obj]
+                elif isinstance(obj, date):
+                    return obj.isoformat()
+                return obj
+
+            await self._set_cached_data(
+                f"option:{account_id}", 
+                serialize_date([asdict(p) for p in results]),
+                self._pos_cache_ttl
+            )
+
         except Exception as e:
-            logger.info(f" Error fetching option positions: {e}")
+            logger.error(f" Failed to list option positions from API: {e}")
 
         return results
 
@@ -371,57 +460,66 @@ class TigerOptionClient(OptionBrokerClient):
         # 降级返回配置的账户名
         return self.account
 
-    async def get_account_equity(self, account_id: str) -> float:
-        """获取账户权益（净清算价值）
-        
-        返回账户的总资产价值（USD）
-        """
+    async def get_account_equity(self, account_id: str, force_refresh: bool = False) -> float:
+        """获取账户权益（带缓存）"""
+        # 1. 检查 Redis 缓存
+        if not force_refresh:
+            try:
+                cached = await self._get_cached_data(f"equity:{account_id}")
+                if cached is not None:
+                    logger.debug(f" Using cached equity for {account_id}: {cached}")
+                    return float(cached)
+            except Exception as e:
+                logger.error(f" Error decoding equity cache: {e}")
+
+        # 2. 从 API 获取
         try:
-            logger.info(f" Fetching account equity for: {account_id}")
+            logger.info(f" Fetching account equity for (API): {account_id}")
             assets = await self._run_in_executor(
                 self.trade_client.get_assets,
                 account=account_id
             )
             
+            equity_value = 0.0
             if assets:
-                logger.info(f" Got assets object: {type(assets)}")
-                
                 # 如果是列表，取第一个元素
-                if isinstance(assets, list) and len(assets) > 0:
-                    asset = assets[0]
-                    logger.info(f" Using first asset from list")
-                else:
-                    asset = assets
+                asset = assets[0] if isinstance(assets, list) and len(assets) > 0 else assets
                 
                 # 优先使用 summary.net_liquidation（净清算价值）
-                if hasattr(asset, 'summary') and asset.summary:
-                    # summary 是一个对象，不是字典
-                    if hasattr(asset.summary, 'net_liquidation'):
-                        net_liq = asset.summary.net_liquidation
+                has_valid = False
+                if hasattr(asset, 'summary') and getattr(asset, 'summary'):
+                    summary = getattr(asset, 'summary')
+                    if hasattr(summary, 'net_liquidation'):
+                        net_liq = getattr(summary, 'net_liquidation')
                         # Tiger API 可能返回 inf，需要检查
                         if net_liq and net_liq != float('inf'):
                             logger.info(f" Net liquidation: {net_liq}")
-                            return float(net_liq)
+                            equity_value = float(net_liq)
+                            has_valid = True
                 
-                # 降级尝试其他字段
-                for attr in ['net_liquidation', 'equity_with_loan', 'total_cash_balance']:
-                    value = getattr(asset, attr, None)
-                    if value and value != float('inf'):
-                        logger.info(f" Using {attr}: {value}")
-                        return float(value)
+                if not has_valid:
+                    # 降级尝试其他字段
+                    for attr in ['net_liquidation', 'equity_with_loan', 'total_cash_balance']:
+                        value = getattr(asset, attr, None)
+                        if value and value != float('inf'):
+                            logger.info(f" Using {attr}: {value}")
+                            equity_value = float(value)
+                            has_valid = True
+                            break
                 
-                logger.info(f" Warning: Could not find valid equity value in assets")
+                if has_valid:
+                    # 3. 结果存回缓存
+                    await self._set_cached_data(f"equity:{account_id}", equity_value, self._pos_cache_ttl)
+                    return equity_value
+                else:
+                    logger.info(f" Warning: Could not find valid equity value in assets")
             else:
                 logger.info(f" Warning: assets is None")
                         
         except Exception as e:
-            logger.info(f" Error fetching account equity: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f" Error fetching account equity: {e}")
         
-        # 如果获取失败，返回 None（由调用方决定默认值）
-        logger.info(f" Returning None for equity")
-        return None
+        return 0.0
 
     async def get_stock_bars(self, symbol: str, start_date: str, end_date: str, period: str = "day") -> List[dict]:
         """获取股票历史K线数据"""
@@ -475,15 +573,16 @@ class TigerOptionClient(OptionBrokerClient):
         """获取股票实时行情"""
         try:
             logger.info(f" Fetching quote for {symbol}")
-            quotes = await self._run_in_executor(
-                self.quote_client.get_market_quotes,
+            # 使用 get_stock_briefs，因为它在其他地方也被使用且已知存在
+            briefs = await self._run_in_executor(
+                self.quote_client.get_stock_briefs,
                 [symbol]
             )
             
-            if quotes is not None and not quotes.empty:
-                row = quotes.iloc[0]
-                # 提取最新价，Tiger 可能返回 latest_price 或 last_price
-                last_price = row.get('latest_price') or row.get('last_price') or 0
+            if briefs is not None and not briefs.empty:
+                row = briefs.iloc[0]
+                # 尝试多个字段获取最新价
+                last_price = row.get('latest_price') or row.get('last_price') or row.get('latest_price_usd') or 0
                 return {
                     "symbol": symbol,
                     "last_price": float(last_price),
@@ -720,7 +819,15 @@ class TigerOptionClient(OptionBrokerClient):
             if status not in cancellable:
                 logger.info(f"cancel_order: order {order_id} status={status} not cancellable")
                 return False
-            self.trade_client.cancel_order(target)
+            # Tiger SDK cancel_order 通常需要显式指定 account 和 order_id (int 类型)
+            o_id = getattr(target, 'id', order_id)
+            try:
+                target_id = int(o_id)
+            except (ValueError, TypeError):
+                logger.error(f"cancel_order: invalid order_id format: {o_id}")
+                return False
+                
+            self.trade_client.cancel_order(account=account, order_id=target_id)
             logger.info(f"cancel_order: sent cancel request for order {order_id}")
             return True
 

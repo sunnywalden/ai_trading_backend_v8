@@ -1,9 +1,11 @@
 # 后端架构设计文档
 
 > **AI量化交易闭环系统** - Backend Design  
-> 版本：V10.0 | 更新日期：2026-02-24
+> 版本：V10.1 | 更新日期：2026-02-27
 > 
-> **V10 变更摘要**：AI 自主决策引擎（三级自主模式）、DataHub 多源路由、BacktestEngine（Walk-Forward）、PortfolioOptimizer（Markowitz+Kelly）、RiskGate 风险门、压力测试服务、TWAP/VWAP 执行算法、Trading Copilot、Paper Trading、期权分析中心（只读）、AI 周报服务、6 张新增 DB 表
+> **V10.1 变更摘要**：Tiger 真实下单接入（美股/港股/期权）、SEMI/FULL 模式 Telegram 通知落地、Copilot 操作指令执行落地、Dashboard 仪表盘数据脱虚向实、AI 组合级决策 + 结构化 JSON 输出、Dashboard 2秒极速性能优化。
+> 
+> **V10.0 变更摘要**：AI 自主决策引擎（三级自主模式）、DataHub 多源路由、BacktestEngine（Walk-Forward）、PortfolioOptimizer（Markowitz+Kelly）、RiskGate 风险门、压力测试服务、TWAP/VWAP 执行算法、Trading Copilot、Paper Trading、期权分析中心（只读）、AI 周报服务、6 张新增 DB 表。
 
 ---
 
@@ -15,13 +17,16 @@
 - **数据库**：MySQL 8.0 + SQLAlchemy 2.0 (Async)
 - **缓存**：Redis 7.0
 - **调度器**：APScheduler
-- **券商接口**：Tiger Trade API
+- **通知系统**：Telegram Bot API
+- **券商接口**：Tiger Trade API OpenAPI
 - **AI**：OpenAI（gpt-4o-mini / gpt-5.2）+ DeepSeek（deepseek-chat / deepseek-reasoner）
-- **数据源**：Tiger API（美股/港股/期权实时报价，首选）→ yfinance（美股降级）→ FRED（宏观）— DataHub 多源路由；港股与期权行情与美股使用同一 Tiger API 通道，无需 Futu 独立数据源
+- **数据源**：Tiger API（美股/港股/期权实时报价，首选）→ yfinance（美股降级）→ FRED（宏观）— DataHub 多源路由；港股与期权行情与美股使用同一 Tiger API 通道，无需 Futu 独立数据源。
 
-### 1.2 AI 模型路由策略
+### 1.2 AI 模型路由策略与输出规范
 
-| 场景 | 轻量（默认） | 复杂推理 |
+#### 1.2.1 路由策略
+
+| 场景 | 轻量（默认，极速响应） | 复杂推理（深度分析） |
 |------|-------------|---------|
 | Copilot 对话 | deepseek-chat / gpt-4o-mini | deepseek-reasoner / gpt-5.2 |
 | 自主决策引擎 | — | deepseek-reasoner / gpt-5.2 |
@@ -29,6 +34,13 @@
 | 信号简单摘要 | deepseek-chat / gpt-4o-mini | — |
 
 路由逻辑：`AI_LIGHTWEIGHT_MODEL` / `AI_COMPLEX_MODEL` 从 config 读取；客户端统一使用 `BaseAIClient`。
+
+#### 1.2.2 结构化输出规范 (V10.1)
+
+为了解决正则解析不稳定的问题，V10.1 全面切换至结构化输出（JSON Output Mode）：
+- 意图检测、风控决策、执行指令统一使用 `response_format={"type": "json_object"}`。
+- 禁止在系统提示词之外通过 Regex 提取字段。
+- AI 响应必须符合预定义的 Pydantic Schema。
 
 ### 1.3 项目结构
 
@@ -524,13 +536,18 @@ async def run_strategy(strategy_id: int, account_id: str):
 - 最大回撤保护
 - 日内交易次数限制
 
-### 3.2 OrderExecutor - 订单执行引擎
+### 3.2 OrderExecutor - 订单执行与实盘接入
 
 **职责**：自动执行已验证的交易信号，支持批量处理和状态监控。
 
-**执行模式**：
-- **DRY_RUN**：模拟执行（测试模式）
-- **REAL**：真实下单（Tiger API）
+**执行模式与接入 (V10.1)**：
+- **PAPER_TRADING**：模拟执行，读写 `paper_accounts`。
+- **LIVE_TRADING**：实盘接入，通过 `TigerOrderExecutor` 对转 Tiger OpenAPI。
+- **支持标的**：美股、港股、美股期权、港股期权（统一走 Tiger 通道）。
+
+**回滚与通知 (V10.1)**：
+- **SEMI 模式回滚**：下单后 30 分钟通过 Telegram 提供撤销链接，Token 存储在缓存中。
+- **止损修改**：Copilot 可通过 `modify_stop_loss` API 直接修改实盘止损。
 
 **关键方法**：
 - `execute_signal_batch()` - 批量执行
@@ -682,33 +699,26 @@ async def _evaluate_single(symbol: str):
 - 6 大决策维度（技术/基本面/K线/R:R/情景/风险）
 - 严格决策原则（R:R < 1:2 → HOLD）
 
-### 4.2 Dashboard V2 Service
+### 4.2 Dashboard V2 Service (Performance Optimized)
 
-**核心功能**：聚合全平台数据，构建实时仪表盘
+**核心功能**：聚合全平台数据，构建实时仪表盘，并提供持仓/宏观评估。映射至 `position_macro.py`。
 
-**数据源**：
-- 账户权益（AccountService）
-- 持仓信息（PositionMacroService）
-- Greeks 敞口（OptionExposureService）
-- 信号/计划/告警统计
-- AI 洞察
+**V10.1 性能优化关键项**：
+- **2秒极速响应**：通过 `asyncio.gather` 实现多标的技术分析与评分的全面并行化。
+- **三级缓存策略 (Redis)**：
+  - 账户概览：60秒 TTL。
+  - 宏观分析风险水位：1小时 TTL。
+  - 持仓技术评分：10分钟 TTL。
+- **数据脱虚向实**：
+  - 调用 `var_calculator.py` 计算真实 95% VaR。
+  - 实时聚合 `algo_execution_tasks` 计算日内实盘/模拟盘滑点。
 
-**并行聚合**：
+**并行实现模式**：
 ```python
-async def get_full_dashboard():
-    # 15+ 异步任务并行执行
-    tasks = [
-        _get_account_overview(),
-        _get_pnl_metrics(),
-        _get_risk_metrics(),
-        _get_signal_summary(),
-        _get_plan_summary(),
-        # ...
-    ]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    
-    # 错误隔离：单个模块失败不影响整体
-    return DashboardV2Response(...)
+async def get_positions_assessment():
+    # 1. 全量标的评分并行化 (PositionScoringService.get_all_position_scores)
+    # 2. 存量标的技术快照并行化 (asyncio.gather(process_symbol_tasks))
+    # 3. 错误隔离策略 (return_exceptions=True)
 ```
 
 **性能优化**：
@@ -779,16 +789,17 @@ class AutonomousEngine:
     """三级自主模式：FULL / SEMI（默认）/ ADVISORY"""
     
     async def run_decision_cycle(self, account_id: str):
-        # 1. 拉取信号（来自已运行的 StrategyRun）
+        # 1. 组合级上下文准备 (V10.1: 聚合 signals + positions + optimized_weights)
+        portfolio_ctx = await portfolio_optimizer.get_current_state(account_id)
         signals = await strategy_service.get_pending_signals(account_id)
         
-        # 2. 调用 AI 复杂推理模型做决策
-        decision = await self._ai_decide(signals)
-        # decision = {"action":"BUY","symbol":"AAPL","qty":50,
-        #             "algo":"TWAP","confidence":0.82,"reasoning":"..."}
+        # 2. 调用 AI 批量决策 (Portfolio-Level Prompting)
+        # V10.1: 一次性决定所有信号的执行比例，避免单一标的盲目性
+        decisions = await self._ai_portfolio_decide(signals, portfolio_ctx)
         
-        # 3. RiskGate 不可绕过检查
-        gate = await risk_gate.check(account_id, decision.symbol, decision.qty, decision.action)
+        for decision in decisions:
+            # 3. RiskGate 不可绕过检查
+            gate = await risk_gate.check(account_id, decision.symbol, decision.qty, decision.action)
         if not gate.passed:
             await self._log_rejection(account_id, decision, gate)
             return
@@ -808,21 +819,38 @@ class AutonomousEngine:
         await self._audit(account_id, decision, gate, order_id)
 ```
 
-#### BacktestRunner — 事件驱动回测 + Walk-Forward
+#### BacktestRunner — 事件驱动回测与自动毕业验证 (V10.1)
 
 ```python
 class BacktestRunner:
     async def run(self, task: BacktestTask) -> dict:
         """
-        事件驱动回测：
-        1. 拉取历史 OHLCV（DataHub）
-        2. 按 bar 驱动策略 signal 函数
-        3. 模拟撮合（滑点 0.05%，交易费 0.1%）
+        1. OHLCV 加载 (DataHub) 2. bar 驱动 3. 模拟撮合 (Tiger API 实时滑点模拟)。
         4. 若 walk_forward=True，滚动窗口 in-sample/out-of-sample 验证
         5. 计算绩效指标：Sharpe / Sortino / MaxDrawdown / WinRate / Alpha
         """
 
-    def _check_graduation(self, result: dict) -> bool:
+    async def _check_graduation(self, task_result: dict) -> bool:
+        """
+        毕业红线检查：
+        - Sharpe Ratio > 1.2 (过去 30 天)
+        - Win Rate > 55%
+        - Max Drawdown < 5%
+        满足后：Paper -> Live 自动升级
+        """
+
+#### PaperTradingService — 模拟账户与毕业管理 (V10.1)
+
+```python
+class PaperTradingService:
+    """管理 Paper 账户生命周期，并在 V10.1 执行 'Paper-to-Live' 自动毕业流程"""
+
+    async def get_graduation_candidates(self) -> List[Strategy]:
+        """识别已盘中模拟运行 30 天且收益达标的策略"""
+
+    async def graduate_to_live(self, strategy_id: int):
+        """升级策略：切换 order_executor 指向 Tiger OpenAPI"""
+```
         """Paper→Live 毕业检查：Sharpe≥1.0 且 MaxDrawdown≤20% 且 WinRate≥50%"""
         return (result["sharpe"] >= 1.0 and 
                 abs(result["max_drawdown"]) <= 0.20 and 
@@ -856,22 +884,40 @@ class TwapVwapService:
         """VWAP：按实时成交量比例分配每片数量"""
 ```
 
-#### CopilotService — 对话式 AI 助理
+#### CopilotService — 对话式 AI 助理与意图执行
 
 ```python
 class CopilotService:
     async def chat(self, account_id: str, session_id: str, message: str) -> CopilotResponse:
         """
         1. 轻量查询 → deepseek-chat/gpt-4o-mini（历史、状态查询）
-        2. 复杂分析/操作意图 → deepseek-reasoner/gpt-5.2
-        3. 若检测到操作意图：返回 action_intent + 需要人工确认
+        2. 复杂分析/操作意图 → deepseek-reasoner/gpt-5.2 (V10.1: 逻辑推理)
+        3. 意图检测规则：
+           - MODIFY_STOP-LOSS 意图 -> 映射至 order_service.modify_stop_loss
+           - SUBMIT_TWAP/VWAP 意图 -> 映射至 twap_vwap_service.submit
+           - CLOSE_ALL_POSITIONS 意图 -> 映射至 position_service.close_all
+        4. 确认流程：返回 action_intent -> 前端确认 -> confirm_action 实际调用执行 API。
         """
-    
+```
+
+**V10.1 意图指令落地表**：
+
+| 意图代码 | 触发 API | 支持场景 |
+|---------|---------|---------|
+| `MODIFY_STOP` | `order_service.modify_stop_loss` | 降低/提高实盘止损位 |
+| `SUBMIT_ALGO` | `twap_vwap_service.submit` | 美股/港股大单批量成交 |
+| `LIQUIDATE` | `position_service.close_all` | 紧急清仓 |
+| `HEDGE` | `auto_hedge_engine.activate` | 按 Delta 自动调整对冲 |
+
+```python
     async def morning_brief(self, account_id: str) -> str:
-        """每日 08:15 生成盘前摘要（AI 复杂模型）"""
-    
-    async def confirm_action(self, account_id: str, action_id: str) -> bool:
-        """执行 Copilot 建议的操作（须人工确认）"""
+        """
+        每日 08:30 (盘前) 与 22:30 (美股开盘前) 生成。
+        V10.1 性能优化实现 (<2s)：
+        - Redis 4h 强缓存映射。
+        - Tiered Model Routing: 默认使用 AI_LIGHTWEIGHT_MODEL。
+        - 分析任务后台化，不阻塞主线程。
+        """
 ```
 
 ---
@@ -970,7 +1016,9 @@ scheduler.add_job(
 - Redis 缓存关键数据：
   - 技术指标：1 小时
   - 基本面数据：24 小时
-  - 宏观数据：24 小时
+  - 宏观分析概览：1 小时（性能优化版）
+  - 持仓评估（综合版）：10 分钟（并行优化版）
+  - 早间简报：4 小时（带模型动态切换）
   - Dashboard 聚合：60 秒
 
 ### 8.3 并行处理

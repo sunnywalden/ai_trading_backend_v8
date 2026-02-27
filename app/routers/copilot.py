@@ -75,9 +75,12 @@ async def get_history(
 
 
 @router.get("/morning-brief")
-async def morning_brief(current_user: str = Depends(get_current_user)):
+async def morning_brief(
+    refresh: bool = False,
+    current_user: str = Depends(get_current_user)
+):
     """获取今日盘前摘要 (V10 structured)"""
-    return await copilot_service.morning_brief(current_user)
+    return await copilot_service.morning_brief(current_user, force_refresh=refresh)
 
 
 @router.post("/confirm/{action_id}")

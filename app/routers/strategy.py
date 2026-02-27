@@ -450,6 +450,46 @@ async def toggle_strategy(
     return {"status": "ok", "strategy_id": strategy_id, "is_active": is_active}
 
 
+@router.get("/strategies/performance/batch")
+async def get_strategies_performance_batch(
+    ids: str = Query(..., description="逗号分隔的策略ID列表，如 1,2,3"),
+    session: AsyncSession = Depends(get_session),
+    current_user: str = Depends(get_current_user),
+):
+    """批量获取多个策略的表现统计（单次请求替代 N 次）"""
+    from app.engine.strategy_engine import StrategyEngine
+    from app.core.cache import cache
+
+    id_list = [sid.strip() for sid in ids.split(",") if sid.strip()]
+    if not id_list:
+        raise HTTPException(status_code=400, detail="ids 参数不能为空")
+    if len(id_list) > 100:
+        raise HTTPException(status_code=400, detail="单次请求最多查询 100 个策略")
+
+    engine = StrategyEngine(session)
+
+    async def _get_one(strategy_id: str):
+        cache_key = f"strategy_performance:{strategy_id}"
+        cached = await cache.get(cache_key)
+        if cached:
+            return strategy_id, cached
+        try:
+            perf = await engine.get_strategy_performance(strategy_id)
+            await cache.set(cache_key, perf, expire=300)  # 5 分钟缓存单条表现
+            return strategy_id, perf
+        except Exception:
+            return strategy_id, None
+
+    results = await asyncio.gather(*[_get_one(sid) for sid in id_list], return_exceptions=False)
+    performances = {sid: perf for sid, perf in results if perf is not None}
+
+    return {
+        "status": "ok",
+        "count": len(performances),
+        "performances": performances
+    }
+
+
 @router.get("/strategies/{strategy_id}/performance")
 async def get_strategy_performance(
     strategy_id: str,
