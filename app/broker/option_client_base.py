@@ -21,6 +21,31 @@ class OptionBrokerClient(Protocol):
         """获取账户权益（USD）"""
         ...
 
+    async def get_stock_bars(self, symbol: str, start_date: str, end_date: str, period: str = "day") -> List[dict]:
+        """获取股票历史K线数据
+        
+        Args:
+            symbol: 股票代码
+            start_date: 开始日期 (YYYY-MM-DD)
+            end_date: 结束日期 (YYYY-MM-DD)
+            period: 周期 (day, week, month)
+            
+        Returns:
+            List[dict]: 包含 close 等字段的列表
+        """
+        ...
+
+    async def get_stock_quote(self, symbol: str) -> dict:
+        """获取股票实时行情
+        
+        Args:
+            symbol: 股票代码
+            
+        Returns:
+            dict: 包含 last_price 等字段的字典
+        """
+        ...
+
     async def place_order(self, account_id: str, order_params: dict) -> dict:
         """下单接口
         
