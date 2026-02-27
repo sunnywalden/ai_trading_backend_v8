@@ -230,33 +230,52 @@ class DashboardV2Service:
     
     async def _calc_period_pnl_and_return(self, account_id: str, start: date, end: date) -> tuple[float, float]:
         """计算期间盈亏金额和收益率"""
-        stmt = select(EquitySnapshot).where(
+        # 1. 寻起始点：找 <= start 的最晚一条快照作为基准
+        stmt_first = select(EquitySnapshot).where(
+            and_(
+                EquitySnapshot.account_id == account_id,
+                EquitySnapshot.snapshot_date <= start
+            )
+        ).order_by(desc(EquitySnapshot.snapshot_date)).limit(1)
+        
+        # 2. 寻范围内快照：用于备份
+        stmt_range = select(EquitySnapshot).where(
             and_(
                 EquitySnapshot.account_id == account_id,
                 EquitySnapshot.snapshot_date >= start,
                 EquitySnapshot.snapshot_date <= end,
             )
         ).order_by(EquitySnapshot.snapshot_date)
-        result = await self.session.execute(stmt)
-        snaps = list(result.scalars().all())
+
+        res_first, res_range = await asyncio.gather(
+            self.session.execute(stmt_first),
+            self.session.execute(stmt_range)
+        )
         
-        # 获取当前权益作为补充，以防近期快照缺失
-        curr_eq = await self._get_current_equity(account_id)
+        snap_first = res_first.scalar()
+        snaps_in_range = list(res_range.scalars().all())
         
-        if not snaps:
+        # 确定起始权益
+        if snap_first:
+            first_eq = float(snap_first.total_equity)
+        elif snaps_in_range:
+            first_eq = float(snaps_in_range[0].total_equity)
+        else:
             return 0.0, 0.0
             
-        first_eq = float(snaps[0].total_equity)
-        
-        # 如果 end 是今天且当前有实时权益，使用实时权益作为结束点
+        # 确定结束权益
+        curr_eq = await self._get_current_equity(account_id)
         if end >= date.today() and curr_eq > 0:
             last_eq = curr_eq
         else:
-            if len(snaps) < 2:
+            if snaps_in_range:
+                last_eq = float(snaps_in_range[-1].total_equity)
+            elif snap_first:
+                last_eq = float(snap_first.total_equity)
+            else:
                 return 0.0, 0.0
-            last_eq = float(snaps[-1].total_equity)
 
-        if first_eq <= 0:
+        if first_eq <= 0 or (last_eq == first_eq and not snaps_in_range):
             return 0.0, 0.0
         
         pnl = last_eq - first_eq
