@@ -110,6 +110,7 @@ class SignalPipeline(BaseModel):
     generated_count: int = 0
     validated_count: int = 0
     executed_count: int = 0
+    skipped_count: int = 0
     rejected_count: int = 0
     success_rate: float = 0.0
 
