@@ -1155,7 +1155,14 @@ class AutonomousEngine:
         from sqlalchemy import update as _upd
         from app.models.trading_signal import TradingSignal as _TS
 
-        stmt = _upd(_TS).where(_TS.id == signal_db_id).values(status=new_status)
+        # 如果状态变为 EXECUTED，同步写入 executed_at
+        from datetime import datetime as _dt
+        from app.models.trading_signal import SignalStatus as _SSEnum
+        _values: dict = {"status": new_status}
+        if hasattr(new_status, "value") and new_status == _SSEnum.EXECUTED:
+            _values["executed_at"] = _dt.utcnow()
+
+        stmt = _upd(_TS).where(_TS.id == signal_db_id).values(**_values)
         for attempt in (1, 2):
             try:
                 await db.execute(stmt)

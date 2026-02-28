@@ -17,6 +17,7 @@ from app.core.runtime_config import (
 )
 from app.models.db import get_session
 from app.models.trading_signal import TradingSignal, SignalStatus
+from app.models.autonomy_audit_log import AutonomyAuditLog
 from app.services.autonomous_engine import autonomous_engine
 
 router = APIRouter(prefix="/autonomy", tags=["V10-Autonomy"])
@@ -51,13 +52,13 @@ async def get_autonomy_status(
     account_id = await _resolve_account_id()
     today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
 
-    # 今日已执行交易数
+    # 今日已执行交易数（与引擎对齐：从审计日志统计 order_id 非空的下单记录）
     exec_result = await session.execute(
-        select(func.count(TradingSignal.id)).where(
+        select(func.count(AutonomyAuditLog.id)).where(
             and_(
-                TradingSignal.account_id == account_id,
-                TradingSignal.status == SignalStatus.EXECUTED,
-                TradingSignal.executed_at >= today,
+                AutonomyAuditLog.account_id == account_id,
+                AutonomyAuditLog.order_id.isnot(None),
+                AutonomyAuditLog.created_at >= today,
             )
         )
     )
