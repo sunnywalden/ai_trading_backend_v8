@@ -153,16 +153,31 @@ class AutonomousEngine:
                 logger.info(f"[AutonomousEngine] Signal {signal['id']} rejected by RiskGate: {gate.reason}")
 
             elif gate.passed:
+                # 检查交易数量，如果为 0 则视为 HOLD 决策，跳过下单步骤并更新状态为 EXECUTED (由于无实际操作) 或保持 VALIDATED
+                if decision["action"] == "HOLD" or float(decision.get("qty", 0)) <= 0:
+                    logger.info(f"[AutonomousEngine] Decision for {decision['symbol']} is HOLD or qty=0, skipping execution.")
+                    await self._update_signal_status(db, signal["id"], _SS.EXECUTED)
+                    results.append({"signal_id": signal["id"], "decision": decision, "gate_passed": True, "order_id": None})
+                    continue
+
                 if level == "ADVISORY":
                     await self._notify_suggestion(account_id, decision)
                     await self._update_signal_status(db, signal["id"], _SS.VALIDATED)  # 保持待人工确认
                 else:
-                    order_id = await self._execute_order(account_id, decision, db)
+                    try:
+                        order_id = await self._execute_order(account_id, decision, db)
+                    except Exception as _exec_err:
+                        logger.error(f"[AutonomousEngine] _execute_order threw: {_exec_err}")
+                        order_id = None
                     daily_trades += 1
                     if order_id:
                         await self._update_signal_status(db, signal["id"], _SS.EXECUTED)
                         if level == "SEMI":
                             await self._schedule_revoke_window(account_id, order_id)
+                        # 执行成功后，自动写入 TradingPlan 供生命周期中心观测
+                        await self._create_plan_for_executed_signal(
+                            db, account_id, signal, decision, order_id
+                        )
                     else:
                         await self._update_signal_status(db, signal["id"], _SS.FAILED)
 
@@ -241,8 +256,13 @@ class AutonomousEngine:
             return {"action": "HOLD", "symbol": signal.get("symbol", ""), "qty": 0, "confidence": 0.0, "reasoning": f"AI error: {e}"}
 
     async def _call_ai(self, prompt: str, model_type: str = "lightweight") -> Any:
-        """调用 AI（轻量/复杂路由）"""
-        from openai import AsyncOpenAI
+        """
+        调用 AI（轻量/复杂路由）。
+        - 最多重试 3 次，指数退避（2s → 4s → 8s）
+        - 超时 / 连接失败均不向上抛出，返回 None（调用方降级为 HOLD）
+        """
+        import asyncio
+        from openai import AsyncOpenAI, APITimeoutError, APIConnectionError, APIStatusError
 
         model = settings.AI_COMPLEX_MODEL if model_type == "complex" else settings.AI_LIGHTWEIGHT_MODEL
 
@@ -253,19 +273,61 @@ class AutonomousEngine:
                 base_url=settings.DEEPSEEK_API_BASE,
                 timeout=settings.DEEPSEEK_TIMEOUT_SECONDS,
             )
+            hard_timeout = settings.DEEPSEEK_TIMEOUT_SECONDS + 10
         else:
             client = AsyncOpenAI(
                 api_key=settings.OPENAI_API_KEY,
                 base_url=settings.OPENAI_API_BASE,
                 timeout=settings.OPENAI_TIMEOUT_SECONDS,
             )
+            hard_timeout = settings.OPENAI_TIMEOUT_SECONDS + 10
 
-        resp = await client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=1000,
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                resp = await asyncio.wait_for(
+                    client.chat.completions.create(
+                        model=model,
+                        messages=[{"role": "user", "content": prompt}],
+                        max_tokens=1000,
+                    ),
+                    timeout=hard_timeout,
+                )
+                return resp.choices[0].message.content
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"[AutonomousEngine._call_ai] Attempt {attempt}/{max_attempts} timed out "
+                    f"(hard_timeout={hard_timeout}s, model={model})"
+                )
+            except APITimeoutError:
+                logger.warning(
+                    f"[AutonomousEngine._call_ai] Attempt {attempt}/{max_attempts} APITimeoutError (model={model})"
+                )
+            except APIConnectionError as e:
+                logger.warning(
+                    f"[AutonomousEngine._call_ai] Attempt {attempt}/{max_attempts} connection error: {e}"
+                )
+            except APIStatusError as e:
+                # 4xx/5xx — 通常重试无意义，直接返回 None
+                logger.error(
+                    f"[AutonomousEngine._call_ai] APIStatusError {e.status_code}: {e.message}"
+                )
+                return None
+            except Exception as e:
+                logger.error(
+                    f"[AutonomousEngine._call_ai] Unexpected error on attempt {attempt}: {e}"
+                )
+                return None
+
+            if attempt < max_attempts:
+                wait_sec = 2 ** attempt  # 2s, 4s
+                logger.info(f"[AutonomousEngine._call_ai] Retrying in {wait_sec}s...")
+                await asyncio.sleep(wait_sec)
+
+        logger.error(
+            f"[AutonomousEngine._call_ai] All {max_attempts} attempts exhausted for model={model}. Returning None."
         )
-        return resp.choices[0].message.content
+        return None
 
     # ──────────────────────────────────────────
     # 辅助方法
@@ -279,10 +341,36 @@ class AutonomousEngine:
         - TTL: 仅处理 24h 内创建的信号，防止执行历史积压信号
         - 数量: 单次最多处理 10 条
         """
-        from sqlalchemy import select, and_, or_, desc as sa_desc
+        from sqlalchemy import select, and_, or_, desc as sa_desc, update as sa_upd
         from app.models.trading_signal import TradingSignal, SignalStatus
 
         cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+
+        # ── 积压信号救援：超过 2h 仍处于 QUEUED 的信号（通常由重启导致卡住）重置为 VALIDATED ──
+        try:
+            stuck_cutoff = datetime.now(timezone.utc) - timedelta(hours=2)
+            rescue_stmt = (
+                sa_upd(TradingSignal)
+                .where(
+                    and_(
+                        TradingSignal.account_id == account_id,
+                        TradingSignal.status == SignalStatus.QUEUED,
+                        TradingSignal.created_at <= stuck_cutoff,
+                    )
+                )
+                .values(status=SignalStatus.VALIDATED)
+            )
+            rescued_result = await db.execute(rescue_stmt)
+            rescued_count: int = getattr(rescued_result, "rowcount", 0) or 0
+            if rescued_count:
+                logger.info(
+                    f"[AutonomousEngine] Rescued {rescued_count} stuck QUEUED signals "
+                    f"(>{stuck_cutoff.strftime('%H:%M UTC')}) → VALIDATED for {account_id}"
+                )
+                await db.commit()
+        except Exception as _re:
+            logger.warning(f"[AutonomousEngine] Signal rescue failed: {_re}")
+
         try:
             stmt = (
                 select(TradingSignal)
@@ -323,6 +411,61 @@ class AutonomousEngine:
         except Exception as e:
             logger.warning(f"Failed to fetch pending signals: {e}", exc_info=True)
             return []
+
+    async def _create_plan_for_executed_signal(
+        self,
+        db: AsyncSession,
+        account_id: str,
+        signal: dict,
+        decision: dict,
+        order_id: str,
+    ) -> None:
+        """执行成功后自动创建 TradingPlan，使生命周期中心可见该自主决策活动。"""
+        try:
+            from decimal import Decimal
+            from app.models.trading_plan import TradingPlan
+
+            direction = (decision.get("action") or "BUY").upper()
+            # 优先使用信号建议价；没有则用极小占位值（仅满足 NOT NULL 约束，不影响已执行计划）
+            entry = float(
+                signal.get("price") or signal.get("suggested_price") or 1.0
+            )
+            entry = max(entry, 0.01)
+
+            if direction in ("BUY", "LONG"):
+                sl = round(entry * 0.95, 6)
+                tp = round(entry * 1.10, 6)
+            else:
+                sl = round(entry * 1.05, 6)
+                tp = round(entry * 0.90, 6)
+            # 确保 sl < entry < tp（满足 TradingPlanService 校验）
+            sl = min(sl, round(entry * 0.9999, 6))
+            tp = max(tp, round(entry * 1.0001, 6))
+
+            plan = TradingPlan(
+                account_id=account_id,
+                symbol=signal.get("symbol", ""),
+                plan_type="AUTONOMOUS",
+                plan_status="EXECUTED",
+                entry_price=Decimal(str(entry)),
+                stop_loss=Decimal(str(sl)),
+                take_profit=Decimal(str(tp)),
+                target_position=Decimal("0.05"),
+                direction=direction,
+                confidence=Decimal(str(round(float(decision.get("confidence") or 0.7), 4))),
+                reasoning=str(decision.get("reasoning", ""))[:2000],
+                autonomy_action="AUTO_EXECUTE",
+                source="AI_AUTONOMOUS",
+                pipeline_stage=7,           # S7: 下单执行（已完成）
+                stage_entered_at=datetime.now(timezone.utc),
+            )
+            db.add(plan)
+            logger.info(
+                f"[AutonomousEngine] TradingPlan created for {signal.get('symbol')} "
+                f"order_id={order_id}"
+            )
+        except Exception as _e:
+            logger.warning(f"[AutonomousEngine] Failed to auto-create TradingPlan: {_e}")
 
     async def _execute_order(self, account_id: str, decision: dict, db: AsyncSession) -> Optional[str]:
         """通过 OrderService 执行订单"""
