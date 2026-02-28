@@ -224,6 +224,7 @@ class TradingPlanService:
 
     async def _create_signal_from_plan(self, plan: TradingPlan) -> TradingSignal:
         """从交易计划创建信号"""
+        target_position = float(plan.target_position)
         signal = TradingSignal(
             signal_id=str(uuid.uuid4()),
             signal_type=SignalType.ENTRY,
@@ -235,7 +236,9 @@ class TradingPlanService:
             confidence=0.7,
             expected_return=0.1,
             risk_score=50,
-            suggested_quantity=int(plan.target_position * 100),  # 简化计算
+            suggested_quantity=int(target_position * 100),  # 保持历史语义兼容（展示百分比）
+            quantity_mode="PCT_EQUITY",
+            quantity_value=target_position,
             suggested_price=float(plan.entry_price),
             stop_loss=float(plan.stop_loss),
             take_profit=float(plan.take_profit),

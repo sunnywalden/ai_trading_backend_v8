@@ -326,6 +326,12 @@ class QuickTradeService:
         """
         # 处理市价单模式：字段可能为 None
         order_mode = preview.get("order_mode", "LIMIT")
+        calc_qty = preview.get("calculated_quantity")
+        suggested_weight = float(preview.get("suggested_weight") or 0.1)
+        suggested_weight = max(0.01, min(suggested_weight, 1.0))
+
+        quantity_mode = "ABS_SHARES" if calc_qty else "PCT_EQUITY"
+        quantity_value = float(calc_qty) if calc_qty else suggested_weight
         
         signal = TradingSignal(
             signal_id=str(uuid.uuid4()),
@@ -339,6 +345,8 @@ class QuickTradeService:
             expected_return=0.1,  # 默认预期收益
             risk_score=preview.get("risk_score", 50),
             suggested_quantity=preview.get("calculated_quantity"),  # 市价单为 None
+            quantity_mode=quantity_mode,
+            quantity_value=quantity_value,
             suggested_price=preview.get("current_price"),  # 市价单为 None
             stop_loss=preview.get("calculated_stop_loss"),  # 市价单为 None
             take_profit=preview.get("calculated_take_profit"),  # 市价单为 None

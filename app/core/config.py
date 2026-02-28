@@ -211,6 +211,10 @@ class Settings(BaseSettings):
     POSITION_TAKE_PROFIT_PCT: float = 0.15  # 止盈阈值：浮盈 >= 15% 触发 EXIT 信号
     POSITION_MONITOR_INTERVAL_MINUTES: int = 15  # 持仓扫描间隔（分钟）
 
+    # 券商订单状态自动对账（用于回写手动撤单/成交结果）
+    BROKER_ORDER_SYNC_INTERVAL_MINUTES: int = 10
+    BROKER_ORDER_SYNC_LOOKBACK_DAYS: int = 3
+
     # AI 周报定时（每周一 08:00 生成上周复盘）
     SCHEDULER_WEEKLY_REPORT_DAY: str = "mon"
     SCHEDULER_WEEKLY_REPORT_HOUR: int = 8
