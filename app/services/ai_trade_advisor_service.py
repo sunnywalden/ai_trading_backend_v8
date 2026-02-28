@@ -493,6 +493,8 @@ class AITradeAdvisorService:
             symbol=symbol,
             signal_type=SignalType.ENTRY,
             direction=direction,
+            quantity_mode="ABS_SHARES",
+            quantity_value=float(quantity) if quantity else 0.0,
             suggested_price=float(price) if price else None,
             suggested_quantity=float(quantity) if quantity else 1.0,
             stop_loss=float(stop_loss) if stop_loss else None,

@@ -267,6 +267,8 @@ class PositionRebalanceMonitor:
             signal_source     = SignalSource.STRATEGY,
             status            = SignalStatus.GENERATED,
             direction         = direction,
+            quantity_mode     = "ABS_SHARES",
+            quantity_value    = quantity,
             suggested_quantity= quantity,
             signal_strength   = max(0.1, (100 - score) / 100),  # 分数越低信号越强
             confidence        = max(0.1, (100 - score) / 100),

@@ -1,13 +1,22 @@
 # 产品需求文档 (PRD)
 
 > **AI量化交易闭环系统** - 个人美港股智能交易平台  
-> 版本：V10.3 | 更新日期：2026-02-27  
+> 版本：V10.3.2 | 更新日期：2026-02-28  
+> 变更摘要（V10.3.2）：**P0 执行幂等主键（Execution Intent）**——新增 `autonomous_execution_intent` 表与 `idempotency_key` 唯一约束，确保同一信号同一动作只受理一次；**P1 统一执行入口强化**——`AutonomousEngine.run_decision_cycle` 内统一进入 execution-intent 状态机（PENDING/EXECUTING/SUCCESS/FAILED/SKIPPED/REJECTED）；**P2 语义一致性升级**——交易信号新增 `quantity_mode + quantity_value`（`PCT_EQUITY` / `ABS_SHARES`）并在自主决策链路标准化解析，`HOLD/qty<=0` 由 `EXECUTED` 语义纠偏为 `SKIPPED`。
 > 变更摘要（V10.3）：**交易全链路可观测性（Full Trade Observability）**——Trade Lifecycle Center（交易生命周期中枢）双维度可视化（计划生命周期状态机 + 持仓生命周期状态机）+ 实时甘特泳道图；**智能订单簿（Intelligent Order Book）**——统一交易列表（标的/方向/价位/17阶段进度/AI简述/实时P&L/风险标记），替代分散的 AI Advisor + Journal 孤岛视图；**AI 决策溯源面板（Decision Provenance）**——从原始信号到最终执行的完整因果链可视化；**系统态势感知栏（System Situational Awareness Bar）**——全局粘性状态栏，实时聚合体制/VaR水位/事件围栏/活跃阶段/执行队列等关键状态  
 > 变更摘要（V10.2-M2~M8）：**事件驱动风控**——EventCalendarService 盈利/FOMC/CPI/NFP 日历同步 + EarningsFenceService 盈利围栏（盈利前1天50%仓位上限）；**动态仓位生命周期**——PositionStateMachine 三引擎（ScaleIn/ScaleOut/TrailingStop）；**信号融合**——SignalFusionEngine 六维加权评分（tech 25%/fundamental 20%/macro 15%/vol 15%/opt 15%/sentiment 10%）+ 体制倍数；**交易归因**——TradeAttributionEngine 三层分析（Alpha源/执行质量/仓位管理）+ AttributionPage 可视化；**AI 进化**——InsightService 自动周报（deepseek-reasoner Sunday 22:00 ET）+ ABTestEngine（scipy t-test p<0.05）+ EvolutionPage；**Copilot Partner**——DeepResearchEngine 多步深度研究 + ProactiveIntelligenceService 主动推送  
 > 变更摘要（V10.2-M1）：**市场体制感知引擎** ——RegimeClassifier 五维评分体系（趋势强度/波动率制度/量价关系/宏观环境/广度指标）、6类体制自动识别（BULL_TREND / BEAR_TREND / HIGH_VOL / MEAN_REVERT / RANGE_BOUND / CRISIS）、3日确认防噪机制、EventBus 异步事件总线（REGIME_CHANGED 事件驱动策略权重自适应切换、VaR 门限动态调整）、StrategyWeightAllocator 体制感知仓位分配、AI 自主交易闭环升级至 **17 阶段**  
 > 变更摘要（V10.1）：**兑现承诺 + 打磨质量 + 扩展边界**——Tiger 真实下单接入（覆盖美股/港股/期权）、FULL 模式完整自主交易闭环、Copilot 操作指令执行落地、Dashboard 所有 TODO 指标真实化、AI 组合级决策升级（结构化 JSON 输出 + 批量组合决策）、ETF 标的池正式支持、港股支持（Tiger API 统一，无需 Futu）、Paper→Live 毕业自动化、Dashboard WebSocket 实时推送；**本版本明确不含 Telegram 通知，FULL 模式具备完全自主交易能力**
 
 > 历史版本：V10.0（2026-02-24）变更摘要见下方历史记录节
+
+### V10.3.2 验收标准（新增）
+
+- [x] 同一 `account_id + signal_id + symbol + action` 重复触发时，仅首个 execution intent 入库成功，后续被幂等拒绝。
+- [x] 自主执行链路包含 execution intent 状态流转：`PENDING → EXECUTING → SUCCESS/FAILED`，以及 `SKIPPED/REJECTED` 分支。
+- [x] 信号数量语义统一：`quantity_mode=PCT_EQUITY/ABS_SHARES` + `quantity_value`，并兼容历史 `suggested_quantity`。
+- [x] `HOLD/qty<=0` 不再标记为 `EXECUTED`，改为 `SKIPPED`。
+- [x] Dashboard 信号管道增加 `skipped_count`。
 
 ---
 

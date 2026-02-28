@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
 
 from app.core.config import settings
 from app.services.risk_gate_service import risk_gate_service
@@ -140,6 +142,7 @@ class AutonomousEngine:
             )
 
             order_id: Optional[str] = None
+            execution_intent_id: Optional[str] = None
             circuit_breaker = gate.circuit_breaker
 
             if gate.circuit_breaker:
@@ -153,11 +156,53 @@ class AutonomousEngine:
                 logger.info(f"[AutonomousEngine] Signal {signal['id']} rejected by RiskGate: {gate.reason}")
 
             elif gate.passed:
-                # 检查交易数量，如果为 0 则视为 HOLD 决策，跳过下单步骤并更新状态为 EXECUTED (由于无实际操作) 或保持 VALIDATED
+                # 检查交易数量，如果为 0 则视为 HOLD 决策，更新为 SKIPPED（语义化区分“已执行”）
                 if decision["action"] == "HOLD" or float(decision.get("qty", 0)) <= 0:
                     logger.info(f"[AutonomousEngine] Decision for {decision['symbol']} is HOLD or qty=0, skipping execution.")
-                    await self._update_signal_status(db, signal["id"], _SS.EXECUTED)
-                    results.append({"signal_id": signal["id"], "decision": decision, "gate_passed": True, "order_id": None})
+                    execution_intent_id = await self._create_execution_intent(
+                        db=db,
+                        account_id=account_id,
+                        signal=signal,
+                        decision=decision,
+                        status="SKIPPED",
+                        reason="no-op(HOLD/qty<=0)",
+                    )
+                    await self._update_signal_status(db, signal["id"], _SS.SKIPPED)
+                    results.append(
+                        {
+                            "signal_id": signal["id"],
+                            "decision": decision,
+                            "gate_passed": True,
+                            "order_id": None,
+                            "execution_intent_id": execution_intent_id,
+                            "reason": "no-op(HOLD/qty<=0)",
+                        }
+                    )
+                    continue
+
+                execution_intent_id = await self._create_execution_intent(
+                    db=db,
+                    account_id=account_id,
+                    signal=signal,
+                    decision=decision,
+                    status="PENDING",
+                    reason="accepted-by-risk-gate",
+                )
+                if not execution_intent_id:
+                    await self._update_signal_status(db, signal["id"], _SS.REJECTED)
+                    logger.warning(
+                        f"[AutonomousEngine] Duplicate intent key detected, rejecting signal {signal['id']}"
+                    )
+                    results.append(
+                        {
+                            "signal_id": signal["id"],
+                            "decision": decision,
+                            "gate_passed": True,
+                            "order_id": None,
+                            "execution_intent_id": None,
+                            "reason": "duplicate-execution-intent",
+                        }
+                    )
                     continue
 
                 # 幂等防护：避免短时间内对同一 symbol 重复自动下单
@@ -170,6 +215,12 @@ class AutonomousEngine:
                     cooldown_minutes=cooldown_min,
                 ):
                     await self._update_signal_status(db, signal["id"], _SS.REJECTED)
+                    await self._update_execution_intent(
+                        db,
+                        execution_intent_id,
+                        status="REJECTED",
+                        reason=f"duplicate-order cooldown({cooldown_min}m)",
+                    )
                     logger.warning(
                         f"[AutonomousEngine] Duplicate-order guard hit: "
                         f"{decision.get('symbol')} {str(decision.get('action') or '').upper()} "
@@ -181,6 +232,7 @@ class AutonomousEngine:
                             "decision": decision,
                             "gate_passed": True,
                             "order_id": None,
+                            "execution_intent_id": execution_intent_id,
                             "reason": f"duplicate-order cooldown({cooldown_min}m)",
                         }
                     )
@@ -196,6 +248,12 @@ class AutonomousEngine:
                 )
                 if not lock_key:
                     await self._update_signal_status(db, signal["id"], _SS.REJECTED)
+                    await self._update_execution_intent(
+                        db,
+                        execution_intent_id,
+                        status="REJECTED",
+                        reason=f"redis-order-lock({lock_seconds}s)",
+                    )
                     logger.warning(
                         f"[AutonomousEngine] Redis order lock hit: "
                         f"{decision.get('symbol')} {str(decision.get('action') or '').upper()} "
@@ -207,6 +265,7 @@ class AutonomousEngine:
                             "decision": decision,
                             "gate_passed": True,
                             "order_id": None,
+                            "execution_intent_id": execution_intent_id,
                             "reason": f"redis-order-lock({lock_seconds}s)",
                         }
                     )
@@ -215,7 +274,19 @@ class AutonomousEngine:
                 if level == "ADVISORY":
                     await self._notify_suggestion(account_id, decision)
                     await self._update_signal_status(db, signal["id"], _SS.VALIDATED)  # 保持待人工确认
+                    await self._update_execution_intent(
+                        db,
+                        execution_intent_id,
+                        status="SKIPPED",
+                        reason="advisory-mode(no-auto-execution)",
+                    )
                 else:
+                    await self._update_execution_intent(
+                        db,
+                        execution_intent_id,
+                        status="EXECUTING",
+                        reason="submitting-order",
+                    )
                     try:
                         order_id = await self._execute_order(account_id, decision, db)
                     except Exception as _exec_err:
@@ -224,6 +295,13 @@ class AutonomousEngine:
                     daily_trades += 1
                     if order_id:
                         await self._update_signal_status(db, signal["id"], _SS.EXECUTED)
+                        await self._update_execution_intent(
+                            db,
+                            execution_intent_id,
+                            status="SUCCESS",
+                            reason="order-submitted",
+                            order_id=order_id,
+                        )
                         if level == "SEMI":
                             await self._schedule_revoke_window(account_id, order_id)
                         # 执行成功后，自动写入 TradingPlan 供生命周期中心观测
@@ -234,6 +312,12 @@ class AutonomousEngine:
                         # 下单失败时释放锁，允许尽快重试（仍受 DB 冷却防护约束）
                         await self._release_symbol_order_lock(lock_key)
                         await self._update_signal_status(db, signal["id"], _SS.FAILED)
+                        await self._update_execution_intent(
+                            db,
+                            execution_intent_id,
+                            status="FAILED",
+                            reason="order-submission-failed",
+                        )
 
             # 写审计日志（若库表未升级，不影响主交易流程）
             try:
@@ -254,6 +338,7 @@ class AutonomousEngine:
                 "action": decision["action"],
                 "gate_passed": gate.passed,
                 "order_id": order_id,
+                "execution_intent_id": execution_intent_id,
                 "circuit_breaker": circuit_breaker,
                 "reason": gate.reason,
             })
@@ -276,13 +361,21 @@ class AutonomousEngine:
         symbol = signal.get("symbol", "")
 
         # -------------------------------
-        # 仓位比例 → 参考股数换算
-        # signal["quantity"] 存储的是仓位比例（0.05~0.30），不是股票数量。
-        # 尝试从 positions 中获取当前价格，换算出参考股数供 AI 参考。
+        # 数量语义标准化（V10.3.2）
+        # - PCT_EQUITY: quantity_value 是仓位比例（0.05 = 5%）
+        # - ABS_SHARES: quantity_value 是股数
         # -------------------------------
-        qty_pct: float = signal.get("quantity", 0.10)  # 默认 10% 仓位
-        if qty_pct > 1.0:
-            qty_pct = qty_pct / 100.0  # 兼容已存为百分比整数（如 17 → 0.17）
+        quantity_mode = str(signal.get("quantity_mode") or "PCT_EQUITY").upper()
+        quantity_value = float(signal.get("quantity_value") or signal.get("quantity") or 0.10)
+
+        target_abs_qty: Optional[float] = None
+        qty_pct: float = 0.10
+        if quantity_mode == "ABS_SHARES" and quantity_value > 0:
+            target_abs_qty = quantity_value
+        else:
+            qty_pct = quantity_value if quantity_value > 0 else 0.10
+            if qty_pct > 1.0:
+                qty_pct = qty_pct / 100.0  # 兼容 17 => 0.17
 
         # ① 优先从持仓字典取价格
         pos_info = positions.get(symbol, {})
@@ -308,12 +401,18 @@ class AutonomousEngine:
             except Exception as _qe:
                 logger.warning(f"[AutonomousEngine._ai_decide] DataHub quote failed for {symbol}: {_qe}")
 
-        # 参考股数 = 账户净值 × 仓位比例 / 当前价格
-        # 港股取整，美股保留2位小数（fractional shares）
+        # 参考股数
+        # - PCT_EQUITY: 账户净值 × 仓位比例 / 当前价格
+        # - ABS_SHARES: 直接使用目标股数
+        # 港股取整，美股保留小数
         from app.broker.factory import is_hk_stock as _is_hk_ref
-        if current_price > 0:
+        if target_abs_qty is not None:
+            ref_qty: float = float(int(round(target_abs_qty))) if _is_hk_ref(symbol) else round(float(target_abs_qty), 4)
+            if current_price > 0 and equity > 0:
+                qty_pct = max(0.0, min((ref_qty * current_price) / equity, 1.0))
+        elif current_price > 0:
             _raw_ref = equity * qty_pct / current_price
-            ref_qty: float = float(int(round(_raw_ref))) if _is_hk_ref(symbol) else round(_raw_ref, 2)
+            ref_qty = float(int(round(_raw_ref))) if _is_hk_ref(symbol) else round(_raw_ref, 4)
         else:
             ref_qty = 0.0
 
@@ -327,11 +426,11 @@ class AutonomousEngine:
         # 构造提示词
         prompt = f"""你是顶级量化交易 AI。基于以下信号做出交易决策。
 
-信号: {json.dumps({**signal, "quantity_pct_of_portfolio": round(qty_pct * 100, 1)}, ensure_ascii=False)}
+信号: {json.dumps({**signal, "quantity_mode_normalized": quantity_mode, "quantity_pct_of_portfolio": round(qty_pct * 100, 1)}, ensure_ascii=False)}
 当前持仓: {json.dumps({k: v for k, v in positions.items()}, ensure_ascii=False)}
 账户净值: ${equity:,.2f}
 允许标的类型: {cfg.ALLOWED_ASSET_TYPES}
-参考：信号建议仓位比例={qty_pct*100:.1f}%，参考价格={price_label}，对应参考股数={ref_qty if ref_qty > 0 else '请根据市价自行估算'}
+参考：数量模式={quantity_mode}，信号建议仓位比例={qty_pct*100:.1f}%，参考价格={price_label}，对应参考股数={ref_qty if ref_qty > 0 else '请根据市价自行估算'}
 
 注意：
 1. qty 规则：{_qty_rule}。
@@ -624,6 +723,103 @@ class AutonomousEngine:
     # 辅助方法
     # ──────────────────────────────────────────
 
+    def _build_execution_idempotency_key(
+        self,
+        account_id: str,
+        signal: dict,
+        decision: dict,
+    ) -> str:
+        """构造稳定幂等键（同一信号同一动作只能受理一次）。"""
+        raw = "|".join(
+            [
+                str(account_id or ""),
+                str(signal.get("signal_id") or signal.get("id") or ""),
+                str(decision.get("symbol") or "").upper(),
+                str(decision.get("action") or "").upper(),
+            ]
+        )
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+    async def _create_execution_intent(
+        self,
+        db: AsyncSession,
+        account_id: str,
+        signal: dict,
+        decision: dict,
+        status: str,
+        reason: str,
+    ) -> Optional[str]:
+        """创建执行意图；若幂等键冲突则返回 None。"""
+        from app.models.execution_intent import AutonomousExecutionIntent
+
+        intent_id = str(uuid.uuid4())
+        idem_key = self._build_execution_idempotency_key(account_id, signal, decision)
+
+        row = AutonomousExecutionIntent(
+            intent_id=intent_id,
+            idempotency_key=idem_key,
+            account_id=account_id,
+            signal_id=str(signal.get("signal_id") or signal.get("id") or ""),
+            signal_db_id=int(signal.get("id") or 0) or None,
+            symbol=str(decision.get("symbol") or ""),
+            action=str(decision.get("action") or "HOLD").upper(),
+            qty=float(decision.get("qty") or 0.0),
+            status=status,
+            reason=reason,
+        )
+        try:
+            db.add(row)
+            await db.commit()
+            return intent_id
+        except IntegrityError:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            return None
+        except Exception as e:
+            logger.warning(f"[AutonomousEngine] create execution intent failed: {e}")
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            return None
+
+    async def _update_execution_intent(
+        self,
+        db: AsyncSession,
+        intent_id: Optional[str],
+        status: str,
+        reason: Optional[str] = None,
+        order_id: Optional[str] = None,
+    ) -> None:
+        """更新执行意图状态。"""
+        if not intent_id:
+            return
+
+        try:
+            from sqlalchemy import update as sa_update
+            from app.models.execution_intent import AutonomousExecutionIntent
+
+            payload: dict[str, Any] = {"status": status}
+            if reason is not None:
+                payload["reason"] = reason
+            if order_id is not None:
+                payload["order_id"] = order_id
+
+            await db.execute(
+                sa_update(AutonomousExecutionIntent)
+                .where(AutonomousExecutionIntent.intent_id == intent_id)
+                .values(**payload)
+            )
+            await db.commit()
+        except Exception as e:
+            logger.warning(f"[AutonomousEngine] update execution intent failed: {e}")
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+
     async def _has_recent_autonomous_execution(
         self,
         db: AsyncSession,
@@ -777,6 +973,8 @@ class AutonomousEngine:
                     "signal_type": r.signal_type.value if r.signal_type else "ENTRY",
                     "confidence": float(r.confidence or 0.5),
                     "direction": r.direction or "LONG",
+                    "quantity_mode": str(getattr(r, "quantity_mode", None) or "PCT_EQUITY").upper(),
+                    "quantity_value": float(getattr(r, "quantity_value", None) or r.suggested_quantity or 0),
                     "quantity": float(r.suggested_quantity or 0),
                     "strategy": str(r.signal_source.value) if r.signal_source else "STRATEGY",
                     "status": r.status.value,
@@ -808,6 +1006,15 @@ class AutonomousEngine:
             )
             entry = max(entry, 0.01)
 
+            qty_mode = str(signal.get("quantity_mode") or "PCT_EQUITY").upper()
+            qty_value = float(signal.get("quantity_value") or signal.get("quantity") or 0.05)
+            if qty_mode == "ABS_SHARES" and qty_value > 0 and entry > 0:
+                baseline_equity = float(getattr(settings, "PAPER_INITIAL_CAPITAL", 100000.0) or 100000.0)
+                target_position_pct = min(max((qty_value * entry) / baseline_equity, 0.01), 1.0)
+            else:
+                target_position_pct = qty_value if qty_value <= 1.0 else qty_value / 100.0
+                target_position_pct = min(max(target_position_pct, 0.01), 1.0)
+
             if direction in ("BUY", "LONG"):
                 sl = round(entry * 0.95, 6)
                 tp = round(entry * 1.10, 6)
@@ -826,7 +1033,7 @@ class AutonomousEngine:
                 entry_price=Decimal(str(entry)),
                 stop_loss=Decimal(str(sl)),
                 take_profit=Decimal(str(tp)),
-                target_position=Decimal("0.05"),
+                target_position=Decimal(str(round(target_position_pct, 4))),
                 direction=direction,
                 confidence=Decimal(str(round(float(decision.get("confidence") or 0.7), 4))),
                 reasoning=str(decision.get("reasoning", ""))[:2000],

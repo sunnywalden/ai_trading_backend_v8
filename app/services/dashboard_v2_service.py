@@ -439,15 +439,17 @@ class DashboardV2Service:
             generated = status_counts.get(SignalStatus.GENERATED, 0)
             validated = status_counts.get(SignalStatus.VALIDATED, 0)
             executed = status_counts.get(SignalStatus.EXECUTED, 0)
+            skipped = status_counts.get(SignalStatus.SKIPPED, 0)
             rejected = status_counts.get(SignalStatus.REJECTED, 0)
             
-            total = generated + validated + executed + rejected
+            total = generated + validated + executed + skipped + rejected
             success_rate = (executed / total * 100) if total > 0 else 0.0
             
             pipeline = SignalPipeline(
                 generated_count=generated,
                 validated_count=validated,
                 executed_count=executed,
+                skipped_count=skipped,
                 rejected_count=rejected,
                 success_rate=success_rate,
             )

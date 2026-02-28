@@ -33,6 +33,7 @@ class SignalStatus(str, Enum):
     EXECUTING = "EXECUTING"       # 执行中
     EXECUTED = "EXECUTED"         # 已执行
     FAILED = "FAILED"            # 执行失败
+    SKIPPED = "SKIPPED"          # 已跳过（无交易动作）
     CANCELLED = "CANCELLED"       # 已取消
     EXPIRED = "EXPIRED"          # 已过期
 
@@ -70,6 +71,8 @@ class TradingSignal(Base):
     risk_score: Mapped[Optional[float]] = mapped_column(Float)                       # 风险评分
     
     # 交易参数
+    quantity_mode: Mapped[Optional[str]] = mapped_column(String(16), nullable=True, default="PCT_EQUITY")  # PCT_EQUITY / ABS_SHARES
+    quantity_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)          # quantity_mode 对应的原始值
     suggested_quantity: Mapped[Optional[float]] = mapped_column(Float)               # 建议数量
     suggested_price: Mapped[Optional[float]] = mapped_column(Float)                  # 建议价格
     stop_loss: Mapped[Optional[float]] = mapped_column(Float)                        # 止损价

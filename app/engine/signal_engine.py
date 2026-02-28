@@ -182,6 +182,8 @@ class SignalEngine:
                     new_signal_strength,
                     signal_dims.get('risk_score', 50.0)
                 )
+                existing_signal.quantity_mode = "PCT_EQUITY"
+                existing_signal.quantity_value = existing_signal.suggested_quantity
                 existing_signal.priority = int(new_signal_strength)
                 existing_signal.strategy_run_id = strategy_run.id
                 existing_signal.factor_scores = {
@@ -210,6 +212,10 @@ class SignalEngine:
             direction=signal_direction,
             account_id=strategy_run.account_id
         )
+        suggested_qty = self._calculate_position_size(
+            new_signal_strength,
+            signal_dims.get('risk_score', 50.0)
+        )
         
         # ✨ 创建新信号
         signal = TradingSignal(
@@ -226,10 +232,9 @@ class SignalEngine:
             expected_return=signal_dims.get('expected_return', 0.05),
             risk_score=signal_dims.get('risk_score', 50.0),
             
-            suggested_quantity=self._calculate_position_size(
-                new_signal_strength,
-                signal_dims.get('risk_score', 50.0)
-            ),
+            suggested_quantity=suggested_qty,
+            quantity_mode="PCT_EQUITY",
+            quantity_value=suggested_qty,
             
             strategy_id=strategy_run.strategy_id,
             strategy_run_id=strategy_run.id,

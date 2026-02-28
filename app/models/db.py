@@ -116,6 +116,7 @@ async def ensure_mysql_tables() -> None:
     import app.models.task_config as task_cfg  # noqa: F401
     import app.models.position_eval_task    # noqa: F401
     import app.models.fsm_transition_log    # V10.3: FSM事件日志
+    import app.models.execution_intent      # V10.3.2: 执行幂等意图
 
     # 使用 SQLAlchemy metadata.create_all 自动创建所有缺失的表
     async with engine.begin() as conn:
@@ -130,6 +131,16 @@ async def ensure_mysql_schema_updates() -> None:
     # 定义需要检查的列更新
     # 格式: (table_name, column_name, add_column_sql)
     column_updates = [
+        (
+            "trading_signals",
+            "quantity_mode",
+            "ALTER TABLE trading_signals ADD COLUMN quantity_mode VARCHAR(16) NULL COMMENT 'V10.3.2: 数量语义模式 PCT_EQUITY/ABS_SHARES'"
+        ),
+        (
+            "trading_signals",
+            "quantity_value",
+            "ALTER TABLE trading_signals ADD COLUMN quantity_value FLOAT NULL COMMENT 'V10.3.2: 数量语义原始值'"
+        ),
         (
             "trading_signals", 
             "pnl", 
@@ -230,6 +241,35 @@ async def ensure_mysql_schema_updates() -> None:
             except Exception:
                 # 忽略错误，避免阻断启动
                 pass
+
+        # 枚举扩容修复：trading_signals.status 增加 SKIPPED（仅 MySQL ENUM 生效）
+        try:
+            result = await conn.execute(
+                text(
+                    """
+                    SELECT COLUMN_TYPE
+                    FROM information_schema.columns
+                    WHERE table_schema = DATABASE()
+                      AND table_name = 'trading_signals'
+                      AND column_name = 'status'
+                    """
+                )
+            )
+            row = result.fetchone()
+            column_type = (row[0] or "") if row else ""
+            if column_type.lower().startswith("enum(") and "'SKIPPED'" not in column_type:
+                await conn.execute(
+                    text(
+                        """
+                        ALTER TABLE trading_signals
+                        MODIFY COLUMN status ENUM(
+                            'GENERATED','VALIDATED','REJECTED','QUEUED','EXECUTING','EXECUTED','FAILED','SKIPPED','CANCELLED','EXPIRED'
+                        ) NOT NULL DEFAULT 'GENERATED'
+                        """
+                    )
+                )
+        except Exception:
+            pass
 
         # 列类型修复（已有列的长度/类型扩展）
         # 格式: (table, column, min_char_length, modify_sql)
