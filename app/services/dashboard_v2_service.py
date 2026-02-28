@@ -654,7 +654,21 @@ class DashboardV2Service:
             )
         ).order_by(desc(TradingPlan.created_at)).limit(10)
         result = await self.session.execute(stmt)
-        plans = result.scalars().all()
+        plans = list(result.scalars().all())
+
+        # 兜底：若当前无活跃计划，展示“今日已结束的自主计划”，避免前端空白看不到刚完成的交易轨迹
+        if not plans:
+            today = date.today()
+            fallback_stmt = select(TradingPlan).where(
+                and_(
+                    TradingPlan.account_id == account_id,
+                    TradingPlan.source == "AI_AUTONOMOUS",
+                    TradingPlan.plan_status.in_(["EXECUTED", "REVOKED", "FAILED", "CANCELLED", "EXPIRED"]),
+                    func.date(TradingPlan.updated_at) == today,
+                )
+            ).order_by(desc(TradingPlan.updated_at)).limit(10)
+            fallback_result = await self.session.execute(fallback_stmt)
+            plans = list(fallback_result.scalars().all())
         
         return [
             TradingPlanSummary(

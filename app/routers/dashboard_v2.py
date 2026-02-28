@@ -8,10 +8,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.db import get_session
 from app.core.auth import get_current_user
 from app.core.config import settings
+from app.broker.factory import make_option_broker_client
 from app.services.dashboard_v2_service import DashboardV2Service
 from app.schemas.dashboard_v2 import DashboardV2Response, DashboardQuickUpdate
 
 router = APIRouter(prefix="/dashboard/v2", tags=["Dashboard-V2"])
+
+
+async def _resolve_account_id(account_id: str | None) -> str:
+    """统一账户解析：优先显式参数，其次券商实时账户，最后配置项。"""
+    if account_id:
+        return account_id
+    try:
+        broker = make_option_broker_client()
+        broker_id = await broker.get_account_id()
+        if broker_id:
+            return str(broker_id)
+    except Exception:
+        pass
+    return settings.TIGER_ACCOUNT
 
 
 @router.get("/full", response_model=DashboardV2Response, summary="获取完整Dashboard")
@@ -37,8 +52,7 @@ async def get_full_dashboard(
     - 待办事项
     - 性能趋势（30天）
     """
-    if not account_id:
-        account_id = settings.TIGER_ACCOUNT
+    account_id = await _resolve_account_id(account_id)
     
     service = DashboardV2Service(session)
     return await service.get_full_dashboard(account_id)
@@ -63,8 +77,7 @@ async def get_quick_update(
     
     建议刷新频率：每10-30秒
     """
-    if not account_id:
-        account_id = settings.TIGER_ACCOUNT
+    account_id = await _resolve_account_id(account_id)
     
     service = DashboardV2Service(session)
     return await service.get_quick_update(account_id)

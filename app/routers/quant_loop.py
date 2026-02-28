@@ -18,6 +18,7 @@ from app.engine.performance_analyzer import PerformanceAnalyzer
 from app.engine.adaptive_optimizer import AdaptiveOptimizer
 from app.core.auth import get_current_user
 from app.core.config import settings
+from app.broker.factory import make_option_broker_client
 
 
 # Request/Response Models
@@ -32,6 +33,20 @@ class RejectSignalsRequest(BaseModel):
 
 
 router = APIRouter(prefix="/api/v1/quant-loop", tags=["Quantitative Trading Loop"])
+
+
+async def _resolve_account_id(account_id: Optional[str]) -> str:
+    """统一账户解析：优先显式参数，其次券商实时账户，最后配置项。"""
+    if account_id:
+        return account_id
+    try:
+        broker = make_option_broker_client()
+        broker_id = await broker.get_account_id()
+        if broker_id:
+            return str(broker_id)
+    except Exception:
+        pass
+    return str(settings.TIGER_ACCOUNT or "")
 
 
 @router.post("/run-cycle")
@@ -75,8 +90,7 @@ async def get_loop_status(
     current_user: dict = Depends(get_current_user)
 ):
     """获取闭环系统状态"""
-    if not account_id:
-        account_id = settings.TIGER_ACCOUNT
+    account_id = await _resolve_account_id(account_id)
     
     loop = QuantTradingLoop(session)
     status = await loop.get_loop_status(account_id)
