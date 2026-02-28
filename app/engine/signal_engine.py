@@ -103,16 +103,26 @@ class SignalEngine:
             return SignalType.ENTRY  # Broker未初始化，默认ENTRY
         
         try:
+            def _pos_symbol(p: Any) -> Optional[str]:
+                if isinstance(p, dict):
+                    return p.get("symbol") or p.get("ticker")
+                return getattr(p, "symbol", None) or getattr(p, "ticker", None)
+
+            def _pos_qty(p: Any) -> float:
+                if isinstance(p, dict):
+                    return float(p.get("qty") or p.get("quantity") or 0)
+                return float(getattr(p, "qty", None) or getattr(p, "quantity", None) or 0)
+
             # 获取当前持仓
             positions = await self.broker.list_underlying_positions(account_id)
             
             # 查找该symbol的持仓
-            position = next((p for p in positions if p.get('symbol') == symbol), None)
+            position = next((p for p in positions if _pos_symbol(p) == symbol), None)
             
             if not position:
                 return SignalType.ENTRY  # 无持仓 → 开仓
             
-            position_qty = position.get('qty', 0)
+            position_qty = _pos_qty(position)
             
             # 判断方向
             if position_qty > 0:  # 多头持仓

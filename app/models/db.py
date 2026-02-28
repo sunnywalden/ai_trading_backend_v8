@@ -186,6 +186,9 @@ async def ensure_mysql_schema_updates() -> None:
         ("trading_plan", "stage_history",      "ALTER TABLE trading_plan ADD COLUMN stage_history JSON NULL COMMENT 'V10.3: 阶段历史'"),
         ("trading_plan", "provenance_snapshot","ALTER TABLE trading_plan ADD COLUMN provenance_snapshot JSON NULL COMMENT 'V10.3: 决策溯源快照'"),
         ("trading_plan", "position_fsm_state", "ALTER TABLE trading_plan ADD COLUMN position_fsm_state VARCHAR(20) NULL COMMENT 'V10.3: 持仓FSM状态'"),
+        # V10.2-M1: 审计日志体制上下文字段（兼容历史库缺列）
+        ("autonomy_audit_log", "regime_at_decision", "ALTER TABLE autonomy_audit_log ADD COLUMN regime_at_decision VARCHAR(32) NULL COMMENT 'V10.2: 决策时市场体制'"),
+        ("autonomy_audit_log", "regime_confidence", "ALTER TABLE autonomy_audit_log ADD COLUMN regime_confidence FLOAT NULL COMMENT 'V10.2: 体制置信度'"),
     ]
 
     async with engine.begin() as conn:

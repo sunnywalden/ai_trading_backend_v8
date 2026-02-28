@@ -160,6 +160,58 @@ class AutonomousEngine:
                     results.append({"signal_id": signal["id"], "decision": decision, "gate_passed": True, "order_id": None})
                     continue
 
+                # 幂等防护：避免短时间内对同一 symbol 重复自动下单
+                cooldown_min = int(getattr(settings, "AUTONOMOUS_ORDER_COOLDOWN_MINUTES", 120) or 120)
+                if await self._has_recent_autonomous_execution(
+                    db=db,
+                    account_id=account_id,
+                    symbol=str(decision.get("symbol") or ""),
+                    direction=str(decision.get("action") or "").upper(),
+                    cooldown_minutes=cooldown_min,
+                ):
+                    await self._update_signal_status(db, signal["id"], _SS.REJECTED)
+                    logger.warning(
+                        f"[AutonomousEngine] Duplicate-order guard hit: "
+                        f"{decision.get('symbol')} {str(decision.get('action') or '').upper()} "
+                        f"within {cooldown_min}m, signal={signal['id']}"
+                    )
+                    results.append(
+                        {
+                            "signal_id": signal["id"],
+                            "decision": decision,
+                            "gate_passed": True,
+                            "order_id": None,
+                            "reason": f"duplicate-order cooldown({cooldown_min}m)",
+                        }
+                    )
+                    continue
+
+                # 并发防护（Redis 原子锁）：防止相邻任务/手动多开导致同标的同方向同时下单
+                lock_seconds = int(getattr(settings, "AUTONOMOUS_ORDER_LOCK_SECONDS", 180) or 180)
+                lock_key = await self._acquire_symbol_order_lock(
+                    account_id=account_id,
+                    symbol=str(decision.get("symbol") or ""),
+                    direction=str(decision.get("action") or "").upper(),
+                    lock_seconds=lock_seconds,
+                )
+                if not lock_key:
+                    await self._update_signal_status(db, signal["id"], _SS.REJECTED)
+                    logger.warning(
+                        f"[AutonomousEngine] Redis order lock hit: "
+                        f"{decision.get('symbol')} {str(decision.get('action') or '').upper()} "
+                        f"within {lock_seconds}s, signal={signal['id']}"
+                    )
+                    results.append(
+                        {
+                            "signal_id": signal["id"],
+                            "decision": decision,
+                            "gate_passed": True,
+                            "order_id": None,
+                            "reason": f"redis-order-lock({lock_seconds}s)",
+                        }
+                    )
+                    continue
+
                 if level == "ADVISORY":
                     await self._notify_suggestion(account_id, decision)
                     await self._update_signal_status(db, signal["id"], _SS.VALIDATED)  # 保持待人工确认
@@ -179,14 +231,23 @@ class AutonomousEngine:
                             db, account_id, signal, decision, order_id
                         )
                     else:
+                        # 下单失败时释放锁，允许尽快重试（仍受 DB 冷却防护约束）
+                        await self._release_symbol_order_lock(lock_key)
                         await self._update_signal_status(db, signal["id"], _SS.FAILED)
 
-            # 写审计日志
-            await self._write_audit_log(
-                db, account_id, level, decision, gate, order_id, circuit_breaker,
-                regime_at_decision=regime_at_decision,  # V10.2-M1
-                regime_confidence=regime_confidence,      # V10.2-M1
-            )
+            # 写审计日志（若库表未升级，不影响主交易流程）
+            try:
+                await self._write_audit_log(
+                    db, account_id, level, decision, gate, order_id, circuit_breaker,
+                    regime_at_decision=regime_at_decision,  # V10.2-M1
+                    regime_confidence=regime_confidence,      # V10.2-M1
+                )
+            except Exception as _audit_e:
+                logger.warning(f"[AutonomousEngine] Audit write skipped due to DB schema mismatch: {_audit_e}")
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
 
             results.append({
                 "symbol": decision["symbol"],
@@ -300,15 +361,16 @@ class AutonomousEngine:
             if sig_type in ("ENTRY", "ADD") and sig_conf >= 0.85 and ref_qty > 0:
                 fallback_action = "BUY" if sig_dir in ("LONG", "BUY") else "SELL" if sig_dir in ("SHORT", "SELL") else None
                 if fallback_action:
+                    _fallback_algo = "LMT" if current_price > 0 else "MKT"
                     logger.warning(
                         f"[AutonomousEngine._ai_decide] Fallback triggered for {symbol}: "
-                        f"action={fallback_action}, qty={ref_qty}, reason={reason}"
+                        f"action={fallback_action}, qty={ref_qty}, algo={_fallback_algo}, reason={reason}"
                     )
                     return {
                         "action": fallback_action,
                         "symbol": symbol,
                         "qty": ref_qty,
-                        "algo": "MKT",
+                        "algo": _fallback_algo,
                         "confidence": max(0.7, sig_conf),
                         "reasoning": f"rule-based fallback: {reason}",
                         "ref_price": current_price if current_price > 0 else None,
@@ -322,16 +384,97 @@ class AutonomousEngine:
                 "reasoning": reason,
             }
 
+        def _parse_ai_json(raw: str) -> Optional[dict]:
+            import json as _json
+            import ast as _ast
+
+            if not raw:
+                return None
+
+            text = raw.strip()
+
+            # 1) 直接整段解析
+            try:
+                obj = _json.loads(text)
+                return obj if isinstance(obj, dict) else None
+            except Exception:
+                pass
+
+            # 1.1) 常见“伪 JSON”修复：中文引号 / 全角冒号
+            relaxed = (
+                text.replace("“", '"')
+                    .replace("”", '"')
+                    .replace("‘", "'")
+                    .replace("’", "'")
+                    .replace("：", ":")
+            )
+            try:
+                obj = _json.loads(relaxed)
+                return obj if isinstance(obj, dict) else None
+            except Exception:
+                pass
+
+            # 1.2) 退化为 Python 字典字面量解析（单引号/True/False/None 等）
+            try:
+                obj = _ast.literal_eval(relaxed)
+                return obj if isinstance(obj, dict) else None
+            except Exception:
+                pass
+
+            # 2) 去掉 markdown code fence
+            if text.startswith("```"):
+                lines = text.splitlines()
+                if len(lines) >= 3:
+                    text = "\n".join(lines[1:-1]).strip()
+                    try:
+                        obj = _json.loads(text)
+                        return obj if isinstance(obj, dict) else None
+                    except Exception:
+                        pass
+
+            # 3) 从文本中提取“第一个平衡的 JSON 对象”
+            start = text.find("{")
+            if start < 0:
+                return None
+            in_str = False
+            esc = False
+            depth = 0
+            for i, ch in enumerate(text[start:], start=start):
+                if in_str:
+                    if esc:
+                        esc = False
+                    elif ch == "\\":
+                        esc = True
+                    elif ch == '"':
+                        in_str = False
+                    continue
+                else:
+                    if ch == '"':
+                        in_str = True
+                    elif ch == '{':
+                        depth += 1
+                    elif ch == '}':
+                        depth -= 1
+                        if depth == 0:
+                            candidate = text[start : i + 1]
+                            try:
+                                obj = _json.loads(candidate)
+                                return obj if isinstance(obj, dict) else None
+                            except Exception:
+                                try:
+                                    obj = _ast.literal_eval(candidate)
+                                    return obj if isinstance(obj, dict) else None
+                                except Exception:
+                                    return None
+
+            return None
+
         try:
             decision = await self._call_ai(prompt, model_type="complex")
             if isinstance(decision, str):
-                import re
-                m = re.search(r"\{.*\}", decision, re.DOTALL)
-                if m:
-                    try:
-                        decision = json.loads(m.group())
-                    except Exception:
-                        pass
+                parsed = _parse_ai_json(decision)
+                if parsed is not None:
+                    decision = parsed
 
             if not isinstance(decision, dict):
                 return _rule_based_fallback("Parse failed")
@@ -411,12 +554,16 @@ class AutonomousEngine:
         max_attempts = 3
         for attempt in range(1, max_attempts + 1):
             try:
+                req_kwargs = {
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 1000,
+                }
+                # 尽量要求结构化 JSON 输出，降低 Parse failed 概率
+                req_kwargs["response_format"] = {"type": "json_object"}
+
                 resp = await asyncio.wait_for(
-                    client.chat.completions.create(
-                        model=model,
-                        messages=[{"role": "user", "content": prompt}],
-                        max_tokens=1000,
-                    ),
+                    client.chat.completions.create(**req_kwargs),
                     timeout=hard_timeout,
                 )
                 return resp.choices[0].message.content
@@ -434,7 +581,25 @@ class AutonomousEngine:
                     f"[AutonomousEngine._call_ai] Attempt {attempt}/{max_attempts} connection error: {e}"
                 )
             except APIStatusError as e:
-                # 4xx/5xx — 通常重试无意义，直接返回 None
+                # 某些模型/代理不支持 response_format，降级后再试一次
+                emsg = f"{getattr(e, 'message', '')}"
+                if "response_format" in emsg.lower() or "json_object" in emsg.lower():
+                    logger.warning(
+                        f"[AutonomousEngine._call_ai] response_format unsupported, retrying without it (attempt={attempt})"
+                    )
+                    try:
+                        resp = await asyncio.wait_for(
+                            client.chat.completions.create(
+                                model=model,
+                                messages=[{"role": "user", "content": prompt}],
+                                max_tokens=1000,
+                            ),
+                            timeout=hard_timeout,
+                        )
+                        return resp.choices[0].message.content
+                    except Exception as e2:
+                        logger.error(f"[AutonomousEngine._call_ai] fallback call failed: {e2}")
+                # 其他 4xx/5xx — 通常重试无意义，直接返回 None
                 logger.error(
                     f"[AutonomousEngine._call_ai] APIStatusError {e.status_code}: {e.message}"
                 )
@@ -458,6 +623,91 @@ class AutonomousEngine:
     # ──────────────────────────────────────────
     # 辅助方法
     # ──────────────────────────────────────────
+
+    async def _has_recent_autonomous_execution(
+        self,
+        db: AsyncSession,
+        account_id: str,
+        symbol: str,
+        direction: str,
+        cooldown_minutes: int,
+    ) -> bool:
+        """检查最近是否已对同一标的+方向执行过 AI_AUTONOMOUS 下单（防重复下单）。"""
+        if not symbol or cooldown_minutes <= 0:
+            return False
+
+        norm_dir = "BUY" if direction in ("BUY", "LONG") else "SELL" if direction in ("SELL", "SHORT") else ""
+        if not norm_dir:
+            return False
+
+        from sqlalchemy import select as sa_select, and_, or_, desc as sa_desc
+        from app.models.trading_plan import TradingPlan
+
+        cutoff = datetime.utcnow() - timedelta(minutes=cooldown_minutes)
+
+        stmt = (
+            sa_select(TradingPlan.id, TradingPlan.created_at)
+            .where(
+                and_(
+                    TradingPlan.account_id == account_id,
+                    TradingPlan.symbol == symbol,
+                    TradingPlan.direction == norm_dir,
+                    TradingPlan.source == "AI_AUTONOMOUS",
+                    TradingPlan.created_at >= cutoff,
+                    or_(
+                        TradingPlan.plan_status == "EXECUTED",
+                        TradingPlan.plan_status == "ACTIVE",
+                    ),
+                )
+            )
+            .order_by(sa_desc(TradingPlan.id))
+            .limit(1)
+        )
+
+        row = (await db.execute(stmt)).first()
+        return row is not None
+
+    async def _acquire_symbol_order_lock(
+        self,
+        account_id: str,
+        symbol: str,
+        direction: str,
+        lock_seconds: int,
+    ) -> Optional[str]:
+        """
+        使用 Redis SET NX EX 原子锁，防止同标的同方向并发重复下单。
+        返回 lock_key 表示加锁成功；返回 None 表示已被占用或 Redis 不可用。
+        """
+        if not symbol or lock_seconds <= 0:
+            return None
+
+        norm_dir = "BUY" if direction in ("BUY", "LONG") else "SELL" if direction in ("SELL", "SHORT") else ""
+        if not norm_dir:
+            return None
+
+        try:
+            from app.models.db import redis_client
+            if redis_client is None:
+                # Redis 不可用：降级为“放行”，依赖 DB 冷却防重
+                return "NO_REDIS"
+
+            lock_key = f"ai_trading:autonomous:order_lock:{account_id}:{symbol}:{norm_dir}"
+            locked = await redis_client.set(lock_key, "1", ex=lock_seconds, nx=True)
+            return lock_key if locked else None
+        except Exception as e:
+            logger.warning(f"[AutonomousEngine] Acquire Redis order lock failed: {e}")
+            return "NO_REDIS"
+
+    async def _release_symbol_order_lock(self, lock_key: Optional[str]) -> None:
+        """释放 Redis 下单锁（仅对真实 key 生效）。"""
+        if not lock_key or lock_key == "NO_REDIS":
+            return
+        try:
+            from app.models.db import redis_client
+            if redis_client is not None:
+                await redis_client.delete(lock_key)
+        except Exception:
+            pass
 
     async def _fetch_pending_signals(self, account_id: str, db: AsyncSession) -> list[dict]:
         """
