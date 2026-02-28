@@ -579,11 +579,11 @@ class DashboardV2Service:
         """获取执行统计"""
         today = date.today()
         
-        # 活跃计划数
+        # 活跃计划数（包含自主交易状态）
         stmt = select(func.count(TradingPlan.id)).where(
             and_(
                 TradingPlan.account_id == account_id,
-                TradingPlan.plan_status == "ACTIVE",
+                TradingPlan.plan_status.in_(["ACTIVE", "AUTO_EXECUTING"]),
             )
         )
         result = await self.session.execute(stmt)
@@ -646,11 +646,11 @@ class DashboardV2Service:
         )
     
     async def _get_active_plans(self, account_id: str) -> List[TradingPlanSummary]:
-        """获取活跃计划"""
+        """获取活跃计划（包含自主交易状态）"""
         stmt = select(TradingPlan).where(
             and_(
                 TradingPlan.account_id == account_id,
-                TradingPlan.plan_status == "ACTIVE",
+                TradingPlan.plan_status.in_(["ACTIVE", "AUTO_EXECUTING"]),
             )
         ).order_by(desc(TradingPlan.created_at)).limit(10)
         result = await self.session.execute(stmt)

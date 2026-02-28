@@ -133,15 +133,17 @@ async def reconcile_broker_order_status(
             new_stage = None
             new_status = None
             if sig.status == SignalStatus.EXECUTED:
-                new_stage = 12  # 订单结算
-            elif sig.status in (SignalStatus.CANCELLED, SignalStatus.FAILED, SignalStatus.VALIDATED):
-                new_stage = 16  # 已完成
+                new_stage = 12  # 持仓监控
+                new_status = "EXECUTED"
+            elif sig.status == SignalStatus.CANCELLED:
+                new_stage = 16  # 已归档
                 new_status = "REVOKED"
-
-            # 【重要】如果计划已成交（EXECUTED），哪怕处于 Stage 12，如果订单实际上已撤单，也需同步改为已撤销
-            if sig.status in (SignalStatus.CANCELLED, SignalStatus.FAILED, SignalStatus.VALIDATED) and plan.plan_status == "EXECUTED":
-                new_stage = 16
-                new_status = "REVOKED"
+            elif sig.status == SignalStatus.REJECTED:
+                new_stage = 16  # 已归档
+                new_status = "FAILED"
+            elif sig.status == SignalStatus.VALIDATED:
+                # 依然在验证中但没有 order_id，可以维持原状或根据业务逻辑重置
+                pass
 
             if new_stage is not None and (new_stage != plan.pipeline_stage or new_status != plan.plan_status):
                 old_stage = plan.pipeline_stage
@@ -160,6 +162,74 @@ async def reconcile_broker_order_status(
                 ))
 
     await session.commit()
+
+    # 4) 【信号状态补救】处理 order_id 已被清空但 status 仍为 EXECUTED 的信号
+    #    场景：信号曾经 EXECUTING → 某次对账时 order_id 被置 None，但 status 未更新
+    #    通过 AutonomyAuditLog.revoked_at 来判断该 symbol 的订单是否已被取消
+    revoked_audit_rows = await session.execute(
+        select(AutonomyAuditLog.symbol, AutonomyAuditLog.created_at)
+        .where(AutonomyAuditLog.account_id == real_account_id)
+        .where(AutonomyAuditLog.revoked_at.is_not(None))
+        .where(AutonomyAuditLog.created_at >= since)
+        .where(AutonomyAuditLog.symbol.is_not(None))
+    )
+    revoked_symbols_ts = {row[0]: row[1] for row in revoked_audit_rows.fetchall()}
+
+    orphan_executed_signals = (await session.execute(
+        select(TradingSignal)
+        .where(TradingSignal.account_id == real_account_id)
+        .where(TradingSignal.status == SignalStatus.EXECUTED)
+        .where(TradingSignal.order_id.is_(None))
+        .where(TradingSignal.symbol.in_(list(revoked_symbols_ts.keys())))
+    )).scalars().all()
+
+    orphan_fixed = 0
+    for sig in orphan_executed_signals:
+        sig.status = SignalStatus.CANCELLED
+        session.add(sig)
+        orphan_fixed += 1
+
+    # 5) 【交易日志补建】为所有已 revoked 的审计记录补建缺失的 TradeJournal 条目
+    from app.models.trade_journal import TradeJournal
+    journal_created = 0
+    for audit_row in (await session.execute(
+        select(AutonomyAuditLog)
+        .where(AutonomyAuditLog.account_id == real_account_id)
+        .where(AutonomyAuditLog.revoked_at.is_not(None))
+        .where(AutonomyAuditLog.created_at >= since)
+        .where(AutonomyAuditLog.symbol.is_not(None))
+    )).scalars().all():
+        existing_check = await session.execute(
+            select(func.count(TradeJournal.id)).where(
+                and_(
+                    TradeJournal.account_id == real_account_id,
+                    TradeJournal.symbol == audit_row.symbol,
+                    TradeJournal.created_at >= audit_row.created_at - timedelta(hours=1),
+                    TradeJournal.created_at <= audit_row.created_at + timedelta(hours=1),
+                )
+            )
+        )
+        if (existing_check.scalar() or 0) == 0:
+            try:
+                from datetime import date as _date
+                direction = "BUY" if audit_row.decision_type in ("BUY", "LONG") else "SELL"
+                j = TradeJournal(
+                    account_id=real_account_id,
+                    symbol=audit_row.symbol,
+                    direction=direction,
+                    entry_date=_date.today(),
+                    entry_price=0.0,
+                    quantity=0.0,
+                    journal_status="FAILED",
+                    lesson_learned=f"自主交易撤单: {audit_row.revoke_reason or 'Manual Cancel at Broker'}",
+                )
+                session.add(j)
+                journal_created += 1
+            except Exception:
+                pass  # 日志补建失败不影响主流程
+
+    if orphan_fixed > 0 or journal_created > 0:
+        await session.commit()
 
     remaining_exec = (
         await session.execute(
@@ -199,6 +269,8 @@ async def reconcile_broker_order_status(
         },
         "cancelled_synced": cancelled_synced,
         "filled_synced": filled_synced,
+        "orphan_signals_fixed": orphan_fixed,
+        "journal_entries_created": journal_created,
         "remaining_EXECUTING": int(remaining_exec),
         "signals_with_order_id": int(with_order_id),
         "audit_revoked_marked": int(revoked_marked),

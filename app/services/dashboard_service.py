@@ -147,10 +147,10 @@ class DashboardService:
         stats = {"active": 0, "executed": 0, "total": 0}
         for status, count in rows:
             stats["total"] += count
-            if status == "ACTIVE":
-                stats["active"] = count
+            if status in ["ACTIVE", "AUTO_EXECUTING"]:
+                stats["active"] += count
             elif status == "EXECUTED":
-                stats["executed"] = count
+                stats["executed"] += count
         return stats
 
     def _assess_risk_level(self, exposure: DashboardExposure) -> str:

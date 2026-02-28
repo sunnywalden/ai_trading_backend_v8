@@ -162,6 +162,9 @@ class OrderExecutor:
                 raise Exception(error_msg)
             
             order_id = resp.get("order_id")
+            if not order_id:
+                raise Exception("Broker did not return a valid order_id")
+            order_id = str(order_id)
             # 优先使用券商返回的实际委托参数（可能经过了精度对齐）
             executed_price = resp.get("executed_price", order_params["price"])
             executed_quantity = resp.get("executed_quantity", order_params["quantity"])
@@ -403,7 +406,6 @@ class OrderExecutor:
         stmt = select(TradingSignal).where(TradingSignal.order_id == str(order_id))
         result = await self.session.execute(stmt)
         signal = result.scalars().first()
-        
         if signal:
             # 状态映射
             if status == "FILLED":
@@ -411,10 +413,12 @@ class OrderExecutor:
                 signal.executed_price = resp.get("avg_fill_price")
                 signal.executed_quantity = resp.get("filled_quantity")
                 signal.executed_at = datetime.utcnow()
-            elif status in ["CANCELLED", "REJECTED"]:
-                # 用户要求执行失败不从待执行列表删除，因此重置为 VALIDATED
-                signal.status = SignalStatus.VALIDATED
-                signal.order_id = None # 清除已失效订单ID，允许再次下单
+            elif status == "CANCELLED":
+                signal.status = SignalStatus.CANCELLED
+                signal.order_id = None
+            elif status == "REJECTED":
+                signal.status = SignalStatus.REJECTED
+                signal.order_id = None
             
             await self.session.commit()
             print(f"[OrderExecutor] Updated signal {signal.signal_id} ({signal.symbol}) status to {signal.status.value}. Broker status: {status}")
@@ -424,21 +428,39 @@ class OrderExecutor:
                 from app.services.journal_service import JournalService
                 journal_svc = JournalService(self.session)
                 
-                updates = {}
+                updates: dict = {}
                 if status == "FILLED":
                     updates = {
                         "journal_status": "COMPLETED",
                         "entry_price": resp.get("avg_fill_price"),
                         "quantity": resp.get("filled_quantity")
                     }
-                elif status in ["CANCELLED", "REJECTED"]:
+                elif status == "CANCELLED":
                     updates = {
                         "journal_status": "FAILED",
-                        "lesson_learned": f"交易执行失败: {resp.get('message')}"
+                        "lesson_learned": f"交易已撤销 (Broker CANCELLED): {resp.get('message') or ''}"
+                    }
+                elif status == "REJECTED":
+                    updates = {
+                        "journal_status": "FAILED",
+                        "lesson_learned": f"交易被拒绝 (Broker REJECTED): {resp.get('message') or ''}"
                     }
                 
                 if updates:
-                    await journal_svc.update_journal_by_signal(signal.signal_id, updates)
+                    # 先尝试更新现有日志
+                    updated = await journal_svc.update_journal_by_signal(signal.signal_id, updates)
+                    # 如果不存在（如被风控拒绝前未记录），则创建新日志
+                    if not updated and (status in ["CANCELLED", "REJECTED"]):
+                        await journal_svc.create_from_execution(
+                            account_id=signal.account_id,
+                            symbol=signal.symbol,
+                            direction=signal.direction,
+                            price=signal.suggested_price or 0.0,
+                            quantity=signal.suggested_quantity or 0.0,
+                            signal_id=signal.signal_id
+                        )
+                        # 创建后再更新一次状态以填入失败理由
+                        await journal_svc.update_journal_by_signal(signal.signal_id, updates)
             except Exception as e:
                 print(f"[OrderExecutor] Failed to update journal for signal {signal.signal_id}: {e}")
         else:
