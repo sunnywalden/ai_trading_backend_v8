@@ -12,7 +12,7 @@
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +23,7 @@ from app.services.macro_indicators_service import MacroIndicatorsService
 from app.services.macro_risk_scoring_service import MacroRiskScoringService
 from app.services.geopolitical_events_service import GeopoliticalEventsService
 from app.models.trading_plan import TradingPlan
+from app.models.fsm_transition_log import FsmTransitionLog
 from app.broker.factory import make_option_broker_client
 from app.core.config import settings
 
@@ -297,8 +298,19 @@ async def plan_expiration_job():
                 )
                 plans = list(result.scalars().all())
                 if plans:
+                    now_utc = datetime.now(timezone.utc)
                     for plan in plans:
+                        old_stage = plan.pipeline_stage
                         plan.plan_status = "EXPIRED"
+                        plan.pipeline_stage = 16  # 已归档
+                        plan.stage_entered_at = now_utc
+                        session.add(FsmTransitionLog(
+                            plan_id=plan.id,
+                            fsm_type="PLAN",
+                            from_state=f"STAGE_{old_stage}" if old_stage is not None else "UNKNOWN",
+                            to_state="STAGE_16",
+                            trigger_reason="计划到期自动归档 (plan_expiration_job)",
+                        ))
                     await session.commit()
                 expired_count = len(plans)
             except Exception:

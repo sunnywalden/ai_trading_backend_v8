@@ -109,7 +109,7 @@ class AutonomousEngine:
         # 获取待处理信号
         signals = await self._fetch_pending_signals(account_id, db)
         if not signals:
-            logger.debug(f"[AutonomousEngine] No pending signals for {account_id}")
+            logger.info(f"[AutonomousEngine] No pending signals (GENERATED/VALIDATED) for {account_id} — cycle skipped")
             return []
 
         # ⚘️ 竞争防护：立刻将所有信号标记为 QUEUED，防止运行相邻 jobs 重复拥取
@@ -242,6 +242,15 @@ class AutonomousEngine:
                         f"{decision.get('symbol')} {str(decision.get('action') or '').upper()} "
                         f"within {cooldown_min}m, signal={signal['id']}"
                     )
+                    _cd_decision = dict(decision, reasoning=f"[冷却保护] {cooldown_min}分钟内已执行同标的同方向订单，跳过本次下单")
+                    try:
+                        await self._write_audit_log(
+                            db, account_id, level, _cd_decision, gate, None, False,
+                            regime_at_decision=regime_at_decision,
+                            regime_confidence=regime_confidence,
+                        )
+                    except Exception:
+                        pass
                     results.append(
                         {
                             "signal_id": signal["id"],
@@ -275,6 +284,15 @@ class AutonomousEngine:
                         f"{decision.get('symbol')} {str(decision.get('action') or '').upper()} "
                         f"within {lock_seconds}s, signal={signal['id']}"
                     )
+                    _lock_decision = dict(decision, reasoning=f"[并发锁] {lock_seconds}秒内已有相同标的同方向任务正在处理，跳过并发下单")
+                    try:
+                        await self._write_audit_log(
+                            db, account_id, level, _lock_decision, gate, None, False,
+                            regime_at_decision=regime_at_decision,
+                            regime_confidence=regime_confidence,
+                        )
+                    except Exception:
+                        pass
                     results.append(
                         {
                             "signal_id": signal["id"],
