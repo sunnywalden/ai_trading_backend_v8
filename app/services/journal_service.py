@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from typing import Optional, Any
 
-from sqlalchemy import select, func, and_, desc, or_, case
+from sqlalchemy import select, func, and_, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -62,9 +62,8 @@ class JournalService:
         total_result = await self.session.execute(count_stmt)
         total = total_result.scalar() or 0
 
-        # 默认排序策略：优先展示 COMPLETED，随后按时间倒序（同秒再按 id 倒序）
-        completed_first = case((TradeJournal.journal_status == "COMPLETED", 1), else_=0)
-        stmt = stmt.order_by(desc(completed_first), desc(TradeJournal.created_at), desc(TradeJournal.id)).offset((page - 1) * size).limit(size)
+        # 按记录时间倒序（同秒按 id 倒序）
+        stmt = stmt.order_by(desc(TradeJournal.created_at), desc(TradeJournal.id)).offset((page - 1) * size).limit(size)
         result = await self.session.execute(stmt)
         journals = list(result.scalars().all())
         return journals, total
