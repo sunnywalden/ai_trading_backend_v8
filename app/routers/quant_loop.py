@@ -649,3 +649,34 @@ async def sync_executing_orders(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=t("error.sync_failed", error=str(e)))
+
+
+@router.post("/sync-broker-orders")
+async def sync_broker_orders(
+    account_id: Optional[str] = None,
+    lookback_days: int = Query(3, ge=1, le=30, description="回溯对账天数"),
+    session: AsyncSession = Depends(get_session),
+    current_user: dict = Depends(get_current_user),
+    t: Callable = Depends(get_translator)
+):
+    """
+    完整券商订单对账（包含手动撤单补偿同步）。
+
+    用途：
+    - 券商 App 手动撤单后，一键回写本地 trading_signals / autonomy_audit_log / execution_intent
+    - 也可作为运维排障接口手动触发
+    """
+    try:
+        from app.services.broker_order_sync_service import reconcile_broker_order_status
+
+        result = await reconcile_broker_order_status(
+            session=session,
+            account_id=account_id,
+            lookback_days=lookback_days,
+        )
+        return {
+            "success": True,
+            "data": result,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=t("error.sync_failed", error=str(e)))

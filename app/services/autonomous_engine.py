@@ -147,11 +147,27 @@ class AutonomousEngine:
 
             if gate.circuit_breaker:
                 logger.critical(f"[AutonomousEngine] Circuit breaker triggered for {account_id}!")
+                execution_intent_id = await self._create_execution_intent(
+                    db=db,
+                    account_id=account_id,
+                    signal=signal,
+                    decision=decision,
+                    status="REJECTED",
+                    reason=f"circuit-breaker({gate.reason})",
+                )
                 await self._notify_circuit_breaker(account_id, daily_pnl, current_equity)
                 # 将信号回退为 VALIDATED，等待炴断器解除后重试
                 await self._update_signal_status(db, signal["id"], _SS.VALIDATED)
 
             elif not gate.passed:
+                execution_intent_id = await self._create_execution_intent(
+                    db=db,
+                    account_id=account_id,
+                    signal=signal,
+                    decision=decision,
+                    status="REJECTED",
+                    reason=f"risk-gate({gate.reason})",
+                )
                 await self._update_signal_status(db, signal["id"], _SS.REJECTED)
                 logger.info(f"[AutonomousEngine] Signal {signal['id']} rejected by RiskGate: {gate.reason}")
 

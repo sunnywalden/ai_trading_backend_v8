@@ -304,6 +304,8 @@ class PositionMonitor:
             expected_return=unrealized_pnl_pct,      # 锁定当前浮盈/浮亏
             risk_score=90.0 if exit_reason == PositionExitReason.STOP_LOSS else 50.0,
             suggested_quantity=abs(qty),
+            quantity_mode="ABS_SHARES",
+            quantity_value=abs(qty),
             suggested_price=current_price,
             strategy_id=strategy_id,
             strategy_run_id=strategy_run_id,

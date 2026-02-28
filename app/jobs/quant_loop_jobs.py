@@ -15,8 +15,21 @@ from app.models.db import SessionLocal
 from app.engine.quant_trading_loop import QuantTradingLoop
 from app.core.config import settings
 from app.core.market_hours import is_any_market_active
+from app.broker.factory import make_option_broker_client
 
 logger = logging.getLogger(__name__)
+
+
+async def _resolve_runtime_account_id() -> str:
+    """优先使用 Tiger API 返回的真实账户号，避免配置值与运行账户不一致。"""
+    try:
+        broker = make_option_broker_client()
+        real_acc = await broker.get_account_id()
+        if real_acc:
+            return str(real_acc)
+    except Exception:
+        pass
+    return settings.TIGER_ACCOUNT
 
 
 async def run_daily_trading_cycle():
@@ -32,6 +45,7 @@ async def run_daily_trading_cycle():
     from app.core.runtime_config import get_autonomy_level
 
     level = await get_autonomy_level()
+    account_id = await _resolve_runtime_account_id()
     # ADVISORY 模式下不自动执行交易，仅生成和验证信号
     should_execute = level in ("FULL", "SEMI")
 
@@ -40,7 +54,7 @@ async def run_daily_trading_cycle():
             loop = QuantTradingLoop(session)
 
             results = await loop.run_full_cycle(
-                account_id=settings.TIGER_ACCOUNT,
+                account_id=account_id,
                 execute_trades=should_execute,
                 optimize=True
             )
@@ -69,11 +83,12 @@ async def run_autonomous_decision_cycle():
 
     from app.services.autonomous_engine import autonomous_engine
     from app.models.db import SessionLocal as _SL
+    account_id = await _resolve_runtime_account_id()
 
     async with _SL() as session:
         try:
             results = await autonomous_engine.run_decision_cycle(
-                account_id=settings.TIGER_ACCOUNT,
+                account_id=account_id,
                 db=session
             )
             executed  = sum(1 for r in results if r.get("order_id"))
@@ -95,10 +110,11 @@ async def run_performance_evaluation():
     async with SessionLocal() as session:
         try:
             from app.engine.performance_analyzer import PerformanceAnalyzer
+            account_id = await _resolve_runtime_account_id()
 
             analyzer = PerformanceAnalyzer(session)
             performance = await analyzer.evaluate_daily_performance(
-                account_id=settings.TIGER_ACCOUNT
+                account_id=account_id
             )
 
             logger.info(
@@ -118,10 +134,11 @@ async def run_adaptive_optimization():
     async with SessionLocal() as session:
         try:
             from app.engine.adaptive_optimizer import AdaptiveOptimizer
+            account_id = await _resolve_runtime_account_id()
 
             optimizer = AdaptiveOptimizer(session)
             results = await optimizer.run_daily_optimization(
-                account_id=settings.TIGER_ACCOUNT
+                account_id=account_id
             )
 
             logger.info(
@@ -145,9 +162,10 @@ async def run_position_exit_scan():
     async with SessionLocal() as session:
         try:
             from app.engine.position_monitor import PositionMonitor
+            account_id = await _resolve_runtime_account_id()
 
             monitor = PositionMonitor(session)
-            result = await monitor.scan(account_id=settings.TIGER_ACCOUNT)
+            result = await monitor.scan(account_id=account_id)
 
             logger.info(
                 f"[quant_jobs] Position scan OK — "
@@ -179,9 +197,10 @@ async def run_position_rebalance_scan():
     async with SessionLocal() as session:
         try:
             from app.engine.position_rebalance_monitor import PositionRebalanceMonitor
+            account_id = await _resolve_runtime_account_id()
 
             monitor = PositionRebalanceMonitor(session)
-            result = await monitor.scan(account_id=settings.TIGER_ACCOUNT)
+            result = await monitor.scan(account_id=account_id)
 
             if result["reduce_signals"] + result["exit_signals"] > 0:
                 logger.info(
@@ -199,6 +218,36 @@ async def run_position_rebalance_scan():
             logger.error(f"[quant_jobs] Position rebalance scan FAILED: {e}", exc_info=True)
 
 
+async def run_broker_order_reconcile():
+    """
+    券商订单状态对账任务：定期回写本地订单状态。
+
+    该任务不受市场时段限制，用于及时同步：
+    - 券商侧手动撤单
+    - 非活跃时段成交回报
+    """
+    async with SessionLocal() as session:
+        try:
+            from app.services.broker_order_sync_service import reconcile_broker_order_status
+
+            account_id = await _resolve_runtime_account_id()
+            result = await reconcile_broker_order_status(
+                session=session,
+                account_id=account_id,
+                lookback_days=settings.BROKER_ORDER_SYNC_LOOKBACK_DAYS,
+            )
+            logger.info(
+                "[quant_jobs] Broker order reconcile OK — "
+                f"account={result.get('account_id')} "
+                f"candidate={result.get('candidate_order_ids', 0)} "
+                f"cancelled_synced={result.get('cancelled_synced', 0)} "
+                f"filled_synced={result.get('filled_synced', 0)} "
+                f"remaining_EXECUTING={result.get('remaining_EXECUTING', 0)}"
+            )
+        except Exception as e:
+            logger.error(f"[quant_jobs] Broker order reconcile FAILED: {e}", exc_info=True)
+
+
 def register_quant_loop_jobs(scheduler: AsyncIOScheduler):
     """
     注册量化交易闭环定时任务，挂载到 APScheduler。
@@ -210,6 +259,7 @@ def register_quant_loop_jobs(scheduler: AsyncIOScheduler):
       ④ 22:00 cron  — 自适应优化   （不受时段限制）
       ⑤ interval/15m— 持仓监控扫描（止损/止盈/超龄，市场时段守卫）
       ⑥ interval/60m— 持仓再平衡扫描（REDUCE/SELL建议转信号，市场时段守卫）
+            ⑦ interval/Nm — 券商订单对账（手动撤单/成交补偿同步，不受时段限制）
     """
 
     # ① 每日交易周期 — 早上 8:00
@@ -275,6 +325,16 @@ def register_quant_loop_jobs(scheduler: AsyncIOScheduler):
         replace_existing=True,
     )
 
+    # ⑦ 券商订单状态对账 — 每 N 分钟（默认 10 分钟，不受时段限制）
+    scheduler.add_job(
+        run_broker_order_reconcile,
+        trigger="interval",
+        minutes=settings.BROKER_ORDER_SYNC_INTERVAL_MINUTES,
+        id="broker_order_reconcile",
+        name=f"Broker Order Reconcile (every {settings.BROKER_ORDER_SYNC_INTERVAL_MINUTES}m)",
+        replace_existing=True,
+    )
+
     logger.info("✓ Quantitative Trading Loop jobs registered:")
     logger.info("  ① Daily Trading Cycle:       08:00  (Signal Gen + Execute by Autonomy Level)")
     logger.info("  ② Autonomous Decision Cycle: every 30m  (market guard, core auto-trade driver)")
@@ -282,3 +342,4 @@ def register_quant_loop_jobs(scheduler: AsyncIOScheduler):
     logger.info("  ④ Adaptive Optimization:     22:00  (Daily)")
     logger.info(f" ⑤ Position Exit Scan:        every {settings.POSITION_MONITOR_INTERVAL_MINUTES}m  (market guard)")
     logger.info("  ⑥ Position Rebalance Scan:   every 60m  (REDUCE/SELL → Signal, market guard)")
+    logger.info(f"  ⑦ Broker Order Reconcile:    every {settings.BROKER_ORDER_SYNC_INTERVAL_MINUTES}m  (manual-cancel sync)")

@@ -4,11 +4,12 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path
 from pydantic import BaseModel
-from sqlalchemy import select, func, and_
+from sqlalchemy import select, func, and_, update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
 from app.core.config import settings
+from app.broker.factory import make_option_broker_client
 from app.core.runtime_config import (
     get_autonomy_level,
     set_autonomy_level,
@@ -29,19 +30,32 @@ class RevokeRequest(BaseModel):
     reason: str = "手动撤销"
 
 
+async def _resolve_account_id() -> str:
+    """优先解析 Tiger 实际账户号，避免 settings.TIGER_ACCOUNT 与真实账户不一致。"""
+    try:
+        broker = make_option_broker_client()
+        real_acc = await broker.get_account_id()
+        if real_acc:
+            return str(real_acc)
+    except Exception:
+        pass
+    return settings.TIGER_ACCOUNT
+
+
 @router.get("/status")
 async def get_autonomy_status(
     session: AsyncSession = Depends(get_session),
     current_user: str = Depends(get_current_user),
 ):
     """获取 AI 自主运行状态 (V10)，包含实时信号流水线统计"""
+    account_id = await _resolve_account_id()
     today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
 
     # 今日已执行交易数
     exec_result = await session.execute(
         select(func.count(TradingSignal.id)).where(
             and_(
-                TradingSignal.account_id == settings.TIGER_ACCOUNT,
+                TradingSignal.account_id == account_id,
                 TradingSignal.status == SignalStatus.EXECUTED,
                 TradingSignal.executed_at >= today,
             )
@@ -54,7 +68,7 @@ async def get_autonomy_status(
         select(TradingSignal.status, func.count(TradingSignal.id))
         .where(
             and_(
-                TradingSignal.account_id == settings.TIGER_ACCOUNT,
+                TradingSignal.account_id == account_id,
                 TradingSignal.created_at >= today - timedelta(days=1),
             )
         )
@@ -66,7 +80,7 @@ async def get_autonomy_status(
     fail_result = await session.execute(
         select(func.count(TradingSignal.id)).where(
             and_(
-                TradingSignal.account_id == settings.TIGER_ACCOUNT,
+                TradingSignal.account_id == account_id,
                 TradingSignal.status == SignalStatus.FAILED,
                 TradingSignal.created_at >= today,
             )
@@ -173,14 +187,29 @@ async def get_signal_pipeline(
     current_user: str = Depends(get_current_user),
 ):
     """查看近期信号流水线：展示信号从生成到执行的完整状态链"""
+    account_id = await _resolve_account_id()
     from sqlalchemy import text
     result = await session.execute(
         select(TradingSignal)
-        .where(TradingSignal.account_id == settings.TIGER_ACCOUNT)
+        .where(TradingSignal.account_id == account_id)
         .order_by(TradingSignal.created_at.desc())
         .limit(limit)
     )
     signals = result.scalars().all()
+
+    # 获取这些信号对应的执行意图（用于备注显示拒绝原因）
+    from app.models.execution_intent import AutonomousExecutionIntent
+    intent_map = {}
+    if signals:
+        signal_ids = [s.signal_id for s in signals]
+        intent_result = await session.execute(
+            select(AutonomousExecutionIntent.signal_id, AutonomousExecutionIntent.reason)
+            .where(AutonomousExecutionIntent.signal_id.in_(signal_ids))
+        )
+        for sid, reason in intent_result:
+            if sid and reason:
+                intent_map[sid] = reason
+
     return {
         "signals": [
             {
@@ -190,9 +219,9 @@ async def get_signal_pipeline(
                 "status": s.status.value,
                 "direction": s.direction,
                 "quantity": s.suggested_quantity,
-                "strength": round(s.signal_strength, 3),
+                "strength": round(s.confidence, 4) if s.confidence is not None else 0.0,  # 修复置信度显示：保留4位精度(前端*100后含2位小数)
                 "priority": s.priority,
-                "notes": s.notes,
+                "notes": intent_map.get(s.signal_id) or s.notes,
                 "order_id": s.order_id,
                 "executed_at": s.executed_at.isoformat() if s.executed_at else None,
                 "created_at": s.created_at.isoformat() if s.created_at else None,
@@ -208,26 +237,57 @@ async def trigger_rebalance_scan(
     current_user: str = Depends(get_current_user),
 ):
     """手动触发一次持仓再平衡扫描（将 AI 减仓/卖出建议转为信号）"""
+    account_id = await _resolve_account_id()
     from app.engine.position_rebalance_monitor import PositionRebalanceMonitor
     monitor = PositionRebalanceMonitor(session)
-    result = await monitor.scan(account_id=settings.TIGER_ACCOUNT)
+    result = await monitor.scan(account_id=account_id)
     return {"success": True, "result": result}
 
 
 @router.post("/trigger-decision-cycle")
 async def trigger_decision_cycle(
+    rescue_queued: bool = True,
+    rescue_queued_minutes: int = 3,
     session: AsyncSession = Depends(get_session),
     current_user: str = Depends(get_current_user),
 ):
     """手动触发一次自主决策周期（处理待执行信号）"""
     if not autonomous_engine.is_running:
         raise HTTPException(status_code=409, detail="AutonomousEngine 当前已暂停")
+    account_id = await _resolve_account_id()
+
+    rescued_count = 0
+    if rescue_queued:
+        rescue_cutoff = datetime.now(timezone.utc) - timedelta(minutes=max(1, rescue_queued_minutes))
+        try:
+            rescue_stmt = (
+                sa_update(TradingSignal)
+                .where(
+                    and_(
+                        TradingSignal.account_id == account_id,
+                        TradingSignal.status == SignalStatus.QUEUED,
+                        TradingSignal.created_at <= rescue_cutoff,
+                    )
+                )
+                .values(status=SignalStatus.VALIDATED)
+            )
+            rescue_result = await session.execute(rescue_stmt)
+            rescued_count = int(getattr(rescue_result, "rowcount", 0) or 0)
+            await session.commit()
+        except Exception:
+            try:
+                await session.rollback()
+            except Exception:
+                pass
+
     results = await autonomous_engine.run_decision_cycle(
-        account_id=settings.TIGER_ACCOUNT,
+        account_id=account_id,
         db=session
     )
     return {
         "success": True,
+        "account_id": account_id,
+        "rescued_queued": rescued_count,
         "decisions": len(results),
         "executed": sum(1 for r in results if r.get("order_id")),
         "details": results,

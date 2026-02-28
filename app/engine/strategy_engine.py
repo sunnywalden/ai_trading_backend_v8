@@ -99,6 +99,9 @@ class StrategyEngine:
             # 保存信号到数据库
             signal_count = 0
             for signal_data in signals:
+                raw_weight = float(signal_data.get("weight", 0.2) or 0.2)
+                qty_pct = raw_weight if raw_weight <= 1.0 else raw_weight / 100.0
+                qty_pct = max(0.01, min(qty_pct, 1.0))
                 signal = TradingSignal(
                     signal_id=str(uuid4()),
                     signal_type=SignalType.ENTRY,
@@ -110,6 +113,9 @@ class StrategyEngine:
                     signal_strength=signal_data.get("strength", 50),
                     confidence=signal_data.get("weight", 0.7),
                     risk_score=signal_data.get("risk_score", 50),
+                    suggested_quantity=qty_pct,
+                    quantity_mode="PCT_EQUITY",
+                    quantity_value=qty_pct,
                     suggested_price=signal_data.get("target_price"),
                     stop_loss=signal_data.get("stop_loss"),
                     extra_metadata=signal_data.get("metadata", {}),
