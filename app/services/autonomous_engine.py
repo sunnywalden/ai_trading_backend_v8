@@ -342,6 +342,10 @@ class AutonomousEngine:
                         await self._create_plan_for_executed_signal(
                             db, account_id, signal, decision, order_id
                         )
+                        # 执行成功后，同步写入 TradeJournal（避免“活跃计划有、交易日志无”）
+                        await self._create_journal_for_executed_signal(
+                            db, account_id, signal, decision
+                        )
                     else:
                         # 下单失败时释放锁，允许尽快重试（仍受 DB 冷却防护约束）
                         await self._release_symbol_order_lock(lock_key)
@@ -1032,6 +1036,7 @@ class AutonomousEngine:
         try:
             from decimal import Decimal
             from app.models.trading_plan import TradingPlan
+            from app.models.fsm_transition_log import FsmTransitionLog
 
             direction = (decision.get("action") or "BUY").upper()
             # 优先级: signal.price > signal.suggested_price > decision.ref_price > 占位值 1.0
@@ -1080,6 +1085,15 @@ class AutonomousEngine:
                 stage_entered_at=datetime.now(timezone.utc),
             )
             db.add(plan)
+            await db.flush()
+            db.add(FsmTransitionLog(
+                plan_id=plan.id,
+                fsm_type="PLAN",
+                from_state="UNKNOWN",
+                to_state="STAGE_7",
+                engine="autonomous",
+                trigger_reason=f"Autonomous order submitted: {signal.get('symbol')} order_id={order_id}",
+            ))
             logger.info(
                 f"[AutonomousEngine] TradingPlan created for {signal.get('symbol')} "
                 f"order_id={order_id}"
@@ -1142,6 +1156,48 @@ class AutonomousEngine:
         except Exception as e:
             logger.error(f"Execute order failed: {e}")
             return None
+
+    async def _create_journal_for_executed_signal(
+        self,
+        db: AsyncSession,
+        account_id: str,
+        signal: dict,
+        decision: dict,
+    ) -> None:
+        """为自主执行成功的信号补写交易日志（幂等）。"""
+        try:
+            from sqlalchemy import select
+            from app.models.trade_journal import TradeJournal
+            from app.services.journal_service import JournalService
+
+            signal_ref = str(signal.get("signal_id") or signal.get("id") or "")
+            if signal_ref:
+                # 幂等：同 signal_id 已存在则不重复创建
+                exists_stmt = select(TradeJournal.id).where(TradeJournal.signal_id == signal_ref).limit(1)
+                exists_row = await db.execute(exists_stmt)
+                if exists_row.scalar_one_or_none() is not None:
+                    return
+
+            direction = str(decision.get("action") or signal.get("direction") or "BUY").upper()
+            entry_price = float(
+                decision.get("ref_price")
+                or signal.get("price")
+                or signal.get("suggested_price")
+                or 1.0
+            )
+            qty = float(decision.get("qty") or signal.get("quantity") or signal.get("quantity_value") or 0.0)
+
+            journal_svc = JournalService(db)
+            await journal_svc.create_from_execution(
+                account_id=account_id,
+                symbol=str(signal.get("symbol") or decision.get("symbol") or ""),
+                direction=direction,
+                price=max(entry_price, 0.01),
+                quantity=max(qty, 0.0),
+                signal_id=signal_ref or None,
+            )
+        except Exception as _e:
+            logger.warning(f"[AutonomousEngine] Failed to create TradeJournal entry: {_e}")
 
     async def _schedule_revoke_window(self, account_id: str, order_id: str) -> None:
         """SEMI 模式：记录可撤单窗口（实际撤单由 /autonomy/revoke API 触发）"""

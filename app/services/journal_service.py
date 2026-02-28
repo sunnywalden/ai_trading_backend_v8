@@ -2,9 +2,9 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
-from typing import Optional
+from typing import Optional, Any
 
-from sqlalchemy import select, func, and_, desc
+from sqlalchemy import select, func, and_, desc, or_, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -14,6 +14,15 @@ from app.models.trade_journal import TradeJournal
 class JournalService:
     def __init__(self, session: AsyncSession):
         self.session = session
+
+    @staticmethod
+    def _as_float(value: Any, default: float = 0.0) -> float:
+        try:
+            if value is None:
+                return default
+            return float(value)
+        except (TypeError, ValueError):
+            return default
 
     async def create_journal(self, account_id: str, payload: dict) -> TradeJournal:
         """创建交易日志"""
@@ -49,11 +58,32 @@ class JournalService:
         if status:
             stmt = stmt.where(TradeJournal.journal_status == status)
             count_stmt = count_stmt.where(TradeJournal.journal_status == status)
+        else:
+            # 默认列表去噪：若同 plan_id 已有 COMPLETED，则隐藏该 plan_id 下的 FAILED 重复项
+            completed_plan_ids_subq = (
+                select(TradeJournal.plan_id)
+                .where(
+                    and_(
+                        TradeJournal.account_id == account_id,
+                        TradeJournal.plan_id.is_not(None),
+                        TradeJournal.journal_status == "COMPLETED",
+                    )
+                )
+            )
+            noise_filter = or_(
+                TradeJournal.journal_status != "FAILED",
+                TradeJournal.plan_id.is_(None),
+                TradeJournal.plan_id.notin_(completed_plan_ids_subq),
+            )
+            stmt = stmt.where(noise_filter)
+            count_stmt = count_stmt.where(noise_filter)
 
         total_result = await self.session.execute(count_stmt)
         total = total_result.scalar() or 0
 
-        stmt = stmt.order_by(desc(TradeJournal.created_at)).offset((page - 1) * size).limit(size)
+        # 默认排序策略：优先展示 COMPLETED，随后按时间倒序（同秒再按 id 倒序）
+        completed_first = case((TradeJournal.journal_status == "COMPLETED", 1), else_=0)
+        stmt = stmt.order_by(desc(completed_first), desc(TradeJournal.created_at), desc(TradeJournal.id)).offset((page - 1) * size).limit(size)
         result = await self.session.execute(stmt)
         journals = list(result.scalars().all())
         return journals, total
@@ -108,8 +138,8 @@ class JournalService:
 
         # 构建 AI 复盘 prompt
         review_text = await self._generate_ai_review(journal)
-        journal.ai_review = review_text
-        journal.journal_status = "REVIEWED"
+        journal.ai_review = review_text  # type: ignore[assignment]
+        journal.journal_status = "REVIEWED"  # type: ignore[assignment]
         await self.session.commit()
         return review_text
 
@@ -129,8 +159,8 @@ class JournalService:
         journals = list(result.scalars().all())
 
         total_trades = len(journals)
-        total_pnl = sum(float(j.realized_pnl or 0) for j in journals)
-        wins = sum(1 for j in journals if j.realized_pnl and float(j.realized_pnl) > 0)
+        total_pnl = sum(self._as_float(getattr(j, "realized_pnl", None), 0.0) for j in journals)
+        wins = sum(1 for j in journals if self._as_float(getattr(j, "realized_pnl", None), 0.0) > 0)
         win_rate = wins / max(total_trades, 1)
 
         report = await self._generate_weekly_report(journals, total_trades, total_pnl, win_rate)
@@ -156,7 +186,7 @@ class JournalService:
 入场日期：{journal.entry_date}  出场日期：{journal.exit_date}
 入场价：{journal.entry_price}  出场价：{journal.exit_price}
 数量：{journal.quantity}
-已实现盈亏：${float(journal.realized_pnl or 0):.2f}
+已实现盈亏：${self._as_float(getattr(journal, "realized_pnl", None), 0.0):.2f}
 交易者自评执行质量：{journal.execution_quality}/5
 交易者情绪：{journal.emotion_state}
 交易者标注的错误：{journal.mistake_tags}
@@ -190,9 +220,10 @@ class JournalService:
 
     def _rule_based_review(self, journal: TradeJournal) -> str:
         """规则降级复盘"""
-        pnl = float(journal.realized_pnl or 0)
-        emotion = journal.emotion_state or "unknown"
-        mistakes = journal.mistake_tags or []
+        pnl = self._as_float(getattr(journal, "realized_pnl", None), 0.0)
+        emotion = str(getattr(journal, "emotion_state", None) or "unknown")
+        mistakes_raw = getattr(journal, "mistake_tags", None)
+        mistakes = mistakes_raw if isinstance(mistakes_raw, list) else []
 
         lines = []
         if pnl > 0:
@@ -210,7 +241,8 @@ class JournalService:
         if "no_plan" in mistakes:
             lines.append("📌 无计划入场：建议每笔交易前制定明确的交易计划。")
 
-        quality = journal.execution_quality or 3
+        quality_raw = getattr(journal, "execution_quality", None)
+        quality = int(quality_raw) if quality_raw is not None else 3
         if quality <= 2:
             lines.append("🔧 执行质量较低，建议严格按计划执行。")
 
@@ -222,7 +254,7 @@ class JournalService:
             from app.services.ai_client_manager import call_ai_with_fallback
 
             trades_summary = "\n".join([
-                f"- {j.symbol} {j.direction} PnL=${float(j.realized_pnl or 0):.2f} 情绪:{j.emotion_state}"
+                f"- {j.symbol} {j.direction} PnL=${self._as_float(getattr(j, 'realized_pnl', None), 0.0):.2f} 情绪:{j.emotion_state}"
                 for j in journals
             ])
 
