@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from sqlalchemy import and_, desc, distinct, func, select, update
+from sqlalchemy import and_, desc, distinct, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.models.strategy  # noqa: F401  # 预加载关系，避免 TradingSignal mapper 解析 Strategy 失败
@@ -105,13 +105,15 @@ async def reconcile_broker_order_status(
         from app.models.trading_plan import TradingPlan
         from app.models.fsm_transition_log import FsmTransitionLog
 
-        # 查寻所有处于 7 (下单执行) 或 8 (算法执行) 阶段的活跃计划
+        # 查寻所有处于活跃或异常中间态的计划 (S7, S8, S12)
         plans_res = await session.execute(
             select(TradingPlan).where(
                 and_(
                     TradingPlan.account_id == real_account_id,
-                    TradingPlan.pipeline_stage.in_([7, 8]),
-                    TradingPlan.plan_status.in_(["ACTIVE", "EXECUTED"]),
+                    or_(
+                        TradingPlan.pipeline_stage.in_([7, 8, 12]),
+                        TradingPlan.plan_status.in_(["ACTIVE", "EXECUTED", "AUTO_EXECUTING"])
+                    )
                 )
             )
         )
@@ -136,7 +138,12 @@ async def reconcile_broker_order_status(
                 new_stage = 16  # 已完成
                 new_status = "REVOKED"
 
-            if new_stage is not None and new_stage != plan.pipeline_stage:
+            # 【重要】如果计划已成交（EXECUTED），哪怕处于 Stage 12，如果订单实际上已撤单，也需同步改为已撤销
+            if sig.status in (SignalStatus.CANCELLED, SignalStatus.FAILED, SignalStatus.VALIDATED) and plan.plan_status == "EXECUTED":
+                new_stage = 16
+                new_status = "REVOKED"
+
+            if new_stage is not None and (new_stage != plan.pipeline_stage or new_status != plan.plan_status):
                 old_stage = plan.pipeline_stage
                 plan.pipeline_stage = new_stage
                 plan.stage_entered_at = datetime.now(timezone.utc)
@@ -147,9 +154,9 @@ async def reconcile_broker_order_status(
                 session.add(FsmTransitionLog(
                     plan_id=plan.id,
                     fsm_type="PLAN",
-                    from_state=f"STAGE_{old_stage}",
+                    from_state=f"STAGE_{old_stage}" if old_stage is not None else "UNKNOWN",
                     to_state=f"STAGE_{new_stage}",
-                    trigger_reason="Broker status sync (Manual Cancel/Fill)",
+                    trigger_reason="Broker status sync (Manual Cancel/Fill Sync)",
                 ))
 
     await session.commit()
