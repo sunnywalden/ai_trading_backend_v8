@@ -16,6 +16,8 @@ async def main() -> None:
     print(f"sync_executing.updates={result['sync_executing']['updates']}")
     print(f"cancelled_synced={result['cancelled_synced']}")
     print(f"filled_synced={result['filled_synced']}")
+    print(f"orphan_signals_fixed={result.get('orphan_signals_fixed', 0)}")
+    print(f"journal_entries_created={result.get('journal_entries_created', 0)}")
     print(f"remaining_EXECUTING={result['remaining_EXECUTING']}")
     print(f"signals_with_order_id={result['signals_with_order_id']}")
     print(f"audit_revoked_marked={result['audit_revoked_marked']}")
