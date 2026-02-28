@@ -212,14 +212,35 @@ async def reconcile_broker_order_status(
         if (existing_check.scalar() or 0) == 0:
             try:
                 from datetime import date as _date
+                from app.models.trading_plan import TradingPlan as _TradingPlan
                 direction = "BUY" if audit_row.decision_type in ("BUY", "LONG") else "SELL"
+
+                # 查最近一条 AI 自主计划，取真实建仓价和仓位大小
+                plan_lookup_res = await session.execute(
+                    select(_TradingPlan)
+                    .where(
+                        and_(
+                            _TradingPlan.account_id == real_account_id,
+                            _TradingPlan.symbol == audit_row.symbol,
+                            _TradingPlan.source == "AI_AUTONOMOUS",
+                        )
+                    )
+                    .order_by(desc(_TradingPlan.created_at))
+                    .limit(1)
+                )
+                related_plan = plan_lookup_res.scalar_one_or_none()
+                actual_entry = float(related_plan.entry_price) if related_plan and related_plan.entry_price else 0.0
+                actual_qty   = float(related_plan.target_position) if related_plan and related_plan.target_position else 0.0
+                actual_plan_id = related_plan.id if related_plan else None
+
                 j = TradeJournal(
                     account_id=real_account_id,
                     symbol=audit_row.symbol,
                     direction=direction,
                     entry_date=_date.today(),
-                    entry_price=0.0,
-                    quantity=0.0,
+                    entry_price=actual_entry,
+                    quantity=actual_qty,
+                    plan_id=actual_plan_id,
                     journal_status="FAILED",
                     lesson_learned=f"自主交易撤单: {audit_row.revoke_reason or 'Manual Cancel at Broker'}",
                 )

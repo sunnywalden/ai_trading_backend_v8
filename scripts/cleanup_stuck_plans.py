@@ -26,7 +26,7 @@ async def fix():
             session.add(FsmTransitionLog(
                 plan_id=p.id,
                 fsm_type='PLAN',
-                from_state=f'STAGE_{old_stage}',
+                from_state=f'STAGE_{old_stage}' if old_stage is not None else 'UNKNOWN',
                 to_state='STAGE_12',
                 trigger_reason='Manual cleanup: move finished plans to Stage 12'
             ))

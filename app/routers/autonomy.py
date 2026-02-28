@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import get_current_user
 from app.core.config import settings
 from app.broker.factory import make_option_broker_client
+from app.models.trading_plan import TradingPlan
 from app.core.runtime_config import (
     get_autonomy_level,
     set_autonomy_level,
@@ -89,6 +90,45 @@ async def get_autonomy_status(
     )
     failed_today = fail_result.scalar() or 0
 
+    # 活跃冷却标的：查询过去 cooldown_min 分钟内由 AI_AUTONOMOUS 成交的计划
+    cooldown_min = int(getattr(settings, "AUTONOMOUS_ORDER_COOLDOWN_MINUTES", 120) or 120)
+    cooldown_cutoff = datetime.now(timezone.utc) - timedelta(minutes=cooldown_min)
+    cooldown_result = await session.execute(
+        select(
+            TradingPlan.symbol,
+            TradingPlan.direction,
+            TradingPlan.created_at,
+        )
+        .where(
+            and_(
+                TradingPlan.account_id == account_id,
+                TradingPlan.source == "AI_AUTONOMOUS",
+                TradingPlan.created_at >= cooldown_cutoff,
+                TradingPlan.plan_status.in_(["EXECUTED", "ACTIVE"]),
+            )
+        )
+        .order_by(TradingPlan.created_at.desc())
+    )
+    cooldown_rows = cooldown_result.fetchall()
+    cooldown_symbols = []
+    for row in cooldown_rows:
+        executed_at = row.created_at
+        if executed_at and executed_at.tzinfo is None:
+            executed_at = executed_at.replace(tzinfo=timezone.utc)
+        expires_at = executed_at + timedelta(minutes=cooldown_min) if executed_at else None
+        remaining_min = (
+            int((expires_at - datetime.now(timezone.utc)).total_seconds() / 60)
+            if expires_at and expires_at > datetime.now(timezone.utc)
+            else 0
+        )
+        cooldown_symbols.append({
+            "symbol": row.symbol,
+            "direction": row.direction,
+            "executed_at": executed_at.isoformat() if executed_at else None,
+            "expires_at": expires_at.isoformat() if expires_at else None,
+            "remaining_minutes": max(0, remaining_min),
+        })
+
     return {
         "level": await get_autonomy_level(),
         "paused": not autonomous_engine.is_running,
@@ -98,6 +138,8 @@ async def get_autonomy_status(
         "revoke_window_minutes": settings.REVOKE_WINDOW_MINUTES,
         "signal_pipeline": pipeline,
         "failed_trades_today": failed_today,
+        "cooldown_symbols": cooldown_symbols,
+        "cooldown_minutes": cooldown_min,
     }
 
 
@@ -141,7 +183,8 @@ async def get_audit_log(
     result = await session.execute(
         text(
             "SELECT id, autonomy_level, decision_type, symbol, confidence_score, "
-            "risk_gate_passed, order_id, revoked_at, circuit_breaker_triggered, created_at "
+            "risk_gate_passed, order_id, revoked_at, circuit_breaker_triggered, created_at, "
+            "ai_reasoning "
             "FROM autonomy_audit_log ORDER BY created_at DESC LIMIT :limit"
         ),
         {"limit": limit},
@@ -160,6 +203,7 @@ async def get_audit_log(
                 "revoked_at": r[7].isoformat() if r[7] else None,
                 "circuit_breaker": bool(r[8]),
                 "created_at": r[9].isoformat() if r[9] else None,
+                "ai_reasoning": r[10] if len(r) > 10 else None,
             }
             for r in rows
         ]
@@ -291,5 +335,49 @@ async def trigger_decision_cycle(
         "rescued_queued": rescued_count,
         "decisions": len(results),
         "executed": sum(1 for r in results if r.get("order_id")),
+        "details": results,
+    }
+
+
+@router.post("/trigger-full-cycle")
+async def trigger_full_cycle(
+    session: AsyncSession = Depends(get_session),
+    current_user: str = Depends(get_current_user),
+):
+    """
+    手动触发完整交易周期（信号生成 + 验证 + 执行）。
+    与定时任务 run_daily_trading_cycle 逻辑相同，但跳过市场时段守卫，
+    适合在非标准时段调试或补跑当日周期。
+    """
+    if not autonomous_engine.is_running:
+        raise HTTPException(status_code=409, detail="AutonomousEngine 当前已暂停")
+
+    from app.core.runtime_config import get_autonomy_level
+    from app.engine.quant_trading_loop import QuantTradingLoop
+
+    level = await get_autonomy_level()
+    account_id = await _resolve_account_id()
+    should_execute = level in ("FULL", "SEMI")
+
+    loop = QuantTradingLoop(session)
+    results = await loop.run_full_cycle(
+        account_id=account_id,
+        execute_trades=should_execute,
+        optimize=False,
+    )
+
+    phases = results.get("phases", {})
+    sig_gen   = phases.get("signal_generation", {}).get("total_signals_generated", 0)
+    sig_val   = phases.get("signal_validation", {}).get("validated_signals", 0)
+    exec_info = phases.get("trade_execution", {})
+    executed  = exec_info.get("executed", 0)
+
+    return {
+        "success": True,
+        "account_id": account_id,
+        "autonomy_level": level,
+        "signals_generated": sig_gen,
+        "signals_validated": sig_val,
+        "executed": executed,
         "details": results,
     }
