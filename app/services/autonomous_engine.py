@@ -212,18 +212,76 @@ class AutonomousEngine:
         import json
         from app.core.config import settings as cfg
 
+        symbol = signal.get("symbol", "")
+
+        # -------------------------------
+        # 仓位比例 → 参考股数换算
+        # signal["quantity"] 存储的是仓位比例（0.05~0.30），不是股票数量。
+        # 尝试从 positions 中获取当前价格，换算出参考股数供 AI 参考。
+        # -------------------------------
+        qty_pct: float = signal.get("quantity", 0.10)  # 默认 10% 仓位
+        if qty_pct > 1.0:
+            qty_pct = qty_pct / 100.0  # 兼容已存为百分比整数（如 17 → 0.17）
+
+        # ① 优先从持仓字典取价格
+        pos_info = positions.get(symbol, {})
+        current_price: float = 0.0
+        if isinstance(pos_info, dict):
+            current_price = float(pos_info.get("market_price") or pos_info.get("avg_cost") or 0)
+        elif hasattr(pos_info, "market_price"):
+            current_price = float(getattr(pos_info, "market_price", 0) or 0)
+
+        # ② 持仓无价格时，调用 DataHub 获取最新报价
+        #    Tiger get_stock_briefs 返回的 latest_price 在盘前/盘中/盘后均有值（非实时，但是当日最后成交价）
+        if current_price <= 0:
+            try:
+                from app.data.hub import DataHub
+                hub = DataHub()
+                quote = await hub.get_quote(symbol)
+                current_price = float(quote.get("price") or quote.get("last_price") or 0)
+                if current_price > 0:
+                    logger.info(
+                        f"[AutonomousEngine._ai_decide] Got fallback price for {symbol} "
+                        f"from DataHub: ${current_price}"
+                    )
+            except Exception as _qe:
+                logger.warning(f"[AutonomousEngine._ai_decide] DataHub quote failed for {symbol}: {_qe}")
+
+        # 参考股数 = 账户净值 × 仓位比例 / 当前价格
+        # 港股取整，美股保留2位小数（fractional shares）
+        from app.broker.factory import is_hk_stock as _is_hk_ref
+        if current_price > 0:
+            _raw_ref = equity * qty_pct / current_price
+            ref_qty: float = float(int(round(_raw_ref))) if _is_hk_ref(symbol) else round(_raw_ref, 2)
+        else:
+            ref_qty = 0.0
+
+        price_label = f"${current_price:.2f}（最新可用价，含盘后）" if current_price > 0 else "未知"
+        from app.broker.factory import is_hk_stock as _is_hk_prompt
+        _qty_rule = "港股必须为正整数（手数取整）" if _is_hk_prompt(symbol) else "美股支持小数股（fractional shares），可保留最多2位小数"
+        from app.core.market_hours import is_symbol_market_active
+        _market_active = is_symbol_market_active(symbol)
+        _algo_rule = "当前为正常交易时段，可选 TWAP/VWAP/MKT" if _market_active else "当前为非交易时段（盘前/盘后/休市），必须选 LMT 或 MKT，禁止选 TWAP/VWAP"
+
         # 构造提示词
         prompt = f"""你是顶级量化交易 AI。基于以下信号做出交易决策。
 
-信号: {json.dumps(signal, ensure_ascii=False)}
+信号: {json.dumps({**signal, "quantity_pct_of_portfolio": round(qty_pct * 100, 1)}, ensure_ascii=False)}
 当前持仓: {json.dumps({k: v for k, v in positions.items()}, ensure_ascii=False)}
 账户净值: ${equity:,.2f}
 允许标的类型: {cfg.ALLOWED_ASSET_TYPES}
+参考：信号建议仓位比例={qty_pct*100:.1f}%，参考价格={price_label}，对应参考股数={ref_qty if ref_qty > 0 else '请根据市价自行估算'}
+
+注意：
+1. qty 规则：{_qty_rule}。
+2. 如果决策是 HOLD，qty 输出 0。
+3. 对于 BUY/SELL，参考上方参考股数，结合市价估算合理数量。
+4. 算法规则：{_algo_rule}。
 
 请输出 JSON 格式决策:
 {{
   "action": "BUY|SELL|HOLD",
-  "symbol": "AAPL",
+  "symbol": "{symbol}",
   "qty": 50,
   "algo": "TWAP|VWAP|MKT",
   "confidence": 0.85,
@@ -231,6 +289,38 @@ class AutonomousEngine:
 }}
 
 只输出 JSON，不要其他文字。"""
+
+        # 高置信度信号兜底：AI 返回 HOLD/qty=0 时，避免整批信号都不执行
+        def _rule_based_fallback(reason: str) -> dict:
+            sig_type = str(signal.get("signal_type") or "").upper()
+            sig_dir = str(signal.get("direction") or "").upper()
+            sig_conf = float(signal.get("confidence") or 0.0)
+
+            # 仅对高置信度开仓/加仓信号兜底，避免误触发 EXIT/REDUCE
+            if sig_type in ("ENTRY", "ADD") and sig_conf >= 0.85 and ref_qty > 0:
+                fallback_action = "BUY" if sig_dir in ("LONG", "BUY") else "SELL" if sig_dir in ("SHORT", "SELL") else None
+                if fallback_action:
+                    logger.warning(
+                        f"[AutonomousEngine._ai_decide] Fallback triggered for {symbol}: "
+                        f"action={fallback_action}, qty={ref_qty}, reason={reason}"
+                    )
+                    return {
+                        "action": fallback_action,
+                        "symbol": symbol,
+                        "qty": ref_qty,
+                        "algo": "MKT",
+                        "confidence": max(0.7, sig_conf),
+                        "reasoning": f"rule-based fallback: {reason}",
+                        "ref_price": current_price if current_price > 0 else None,
+                    }
+
+            return {
+                "action": "HOLD",
+                "symbol": symbol,
+                "qty": 0,
+                "confidence": 0.0,
+                "reasoning": reason,
+            }
 
         try:
             decision = await self._call_ai(prompt, model_type="complex")
@@ -242,18 +332,54 @@ class AutonomousEngine:
                         decision = json.loads(m.group())
                     except Exception:
                         pass
-            
+
             if not isinstance(decision, dict):
-                return {"action": "HOLD", "symbol": signal.get("symbol", ""), "qty": 0, "confidence": 0.0, "reasoning": "Parse failed"}
+                return _rule_based_fallback("Parse failed")
 
-            # 如果 AI 未给出数量，回退到信号原始建议量，防止 qty=0 触发 RiskGate 拦截
-            if not decision.get("qty") and signal.get("quantity", 0) > 0:
-                decision["qty"] = signal["quantity"]
+            action = str(decision.get("action", "HOLD")).upper()
+            raw_qty = float(decision.get("qty") or 0)
 
+            if action == "HOLD" or raw_qty <= 0:
+                logger.info(
+                    f"[AutonomousEngine._ai_decide] Model returned HOLD/qty<=0 for {symbol}. "
+                    f"reasoning={str(decision.get('reasoning') or '')[:200]}"
+                )
+                return _rule_based_fallback(str(decision.get("reasoning") or "Model returned HOLD/qty<=0"))
+
+            # 判断是否为港股（必须整数）；美股支持小数股（fractional shares）
+            from app.broker.factory import is_hk_stock as _is_hk
+            _hk = _is_hk(symbol)
+
+            # 后置兜底：若 BUY/SELL 但 qty 过小，换算为实际股数
+            # 港股阈值 < 1（不允许小数），美股阈值 < 0.001（防止 AI 返回纯百分比如 0.15）
+            _qty_min_threshold = 1.0 if _hk else 0.001
+            if action in ("BUY", "SELL") and raw_qty < _qty_min_threshold:
+                if raw_qty > 0 and equity > 0:
+                    # AI 返回的可能是仓位比例（如 0.15 = 15%），用净值换算
+                    price_hint = current_price if current_price > 0 else 100.0
+                    derived = equity * raw_qty / price_hint
+                    raw_qty = max(1.0, round(derived)) if _hk else max(0.001, round(derived, 4))
+                    logger.info(
+                        f"[AutonomousEngine._ai_decide] qty<{_qty_min_threshold} detected for {symbol}, "
+                        f"derived qty={raw_qty} from equity={equity:.0f}×pct/{price_hint} (hk={_hk})"
+                    )
+                elif ref_qty > 0:
+                    raw_qty = float(ref_qty)
+                else:
+                    # 完全无法推算，回退 HOLD
+                    logger.warning(f"[AutonomousEngine._ai_decide] Cannot derive qty for {symbol}, fallback HOLD")
+                    return _rule_based_fallback("qty derivation failed")
+
+            # 港股取整；美股保留最多 4 位小数（fractional shares）
+            decision["qty"] = int(round(raw_qty)) if _hk else round(raw_qty, 4)
+            decision["action"] = action
+            # 注入参考价格，_execute_order 降级 LMT 时使用，避免重复 fetch
+            if current_price > 0:
+                decision.setdefault("ref_price", current_price)
             return decision
         except Exception as e:
             logger.error(f"AI decide failed: {e}, using HOLD fallback")
-            return {"action": "HOLD", "symbol": signal.get("symbol", ""), "qty": 0, "confidence": 0.0, "reasoning": f"AI error: {e}"}
+            return _rule_based_fallback(f"AI error: {e}")
 
     async def _call_ai(self, prompt: str, model_type: str = "lightweight") -> Any:
         """
@@ -468,17 +594,54 @@ class AutonomousEngine:
             logger.warning(f"[AutonomousEngine] Failed to auto-create TradingPlan: {_e}")
 
     async def _execute_order(self, account_id: str, decision: dict, db: AsyncSession) -> Optional[str]:
-        """通过 OrderService 执行订单"""
+        """通过 OrderService 执行订单。
+        TWAP/VWAP 算法单只能在正常交易时段提交；非交易时段自动降级为 LMT（有参考价）或 MKT。
+        """
         try:
             from app.services.order_service import OrderService
+            from app.core.market_hours import is_symbol_market_active
+            from app.broker.factory import is_hk_stock as _is_hk
+
+            symbol = decision["symbol"]
+            raw_algo = (decision.get("algo") or "MARKET").upper()
+            # MKT 是我们内部简写，映射为 MARKET
+            if raw_algo == "MKT":
+                raw_algo = "MARKET"
+
+            # TWAP/VWAP 只能在正常交易时段使用；非交易时段降级
+            if raw_algo in ("TWAP", "VWAP") and not is_symbol_market_active(symbol):
+                # 优先用 LMT（需要价格），价格未知时用 MKT
+                ref_price = float(decision.get("price") or decision.get("ref_price") or 0)
+                if ref_price <= 0:
+                    # 尝试从 DataHub 再取一次价格
+                    try:
+                        from app.data.hub import DataHub
+                        q = await DataHub().get_quote(symbol)
+                        ref_price = float(q.get("price") or q.get("last_price") or 0)
+                    except Exception:
+                        pass
+                fallback_algo = "LMT" if ref_price > 0 else "MARKET"
+                logger.info(
+                    f"[AutonomousEngine._execute_order] {symbol} market inactive, "
+                    f"downgrading {raw_algo} → {fallback_algo} (price={ref_price or 'N/A'})"
+                )
+                raw_algo = fallback_algo
+                if raw_algo == "LMT":
+                    decision = {**decision, "ref_price": ref_price}
+
+            # Tiger API 用 LONG/SHORT，不是 BUY/SELL
+            _action = decision["action"].upper()
+            tiger_direction = "LONG" if _action == "BUY" else "SHORT"
 
             order_svc = OrderService(db)
             payload = {
-                "symbol": decision["symbol"],
-                "direction": decision["action"],
+                "symbol": symbol,
+                "direction": tiger_direction,
                 "quantity": float(decision.get("qty", 0)),
-                "order_type": decision.get("algo", "MARKET") if decision.get("algo") != "MKT" else "MARKET",
-                "strategy_tag": "Autonomous"
+                "order_type": raw_algo,
+                # OrderService.submit_order 读 limit_price 并传给 broker
+                "limit_price": decision.get("ref_price") if raw_algo == "LMT" else None,
+                "strategy_tag": "Autonomous",
             }
             result = await order_svc.submit_order(account_id, payload)
             return result.order_id
@@ -510,15 +673,39 @@ class AutonomousEngine:
         signal_db_id: int,
         new_status: Any,
     ) -> None:
-        """更新 TradingSignal 状态，捕获异常以免中断主流程。"""
-        try:
-            from sqlalchemy import update as _upd
-            from app.models.trading_signal import TradingSignal as _TS
-            await db.execute(
-                _upd(_TS).where(_TS.id == signal_db_id).values(status=new_status)
-            )
-        except Exception as e:
-            logger.warning(f"[AutonomousEngine] Failed to update signal {signal_db_id} status: {e}")
+        """
+        更新 TradingSignal 状态，捕获异常以免中断主流程。
+        每次 UPDATE 后立即 commit，避免行锁悬挂导致并发事务 Lock wait timeout。
+        遇到锁超时自动重试一次（等待 1s）。
+        """
+        import asyncio
+        from sqlalchemy import update as _upd
+        from app.models.trading_signal import TradingSignal as _TS
+
+        stmt = _upd(_TS).where(_TS.id == signal_db_id).values(status=new_status)
+        for attempt in (1, 2):
+            try:
+                await db.execute(stmt)
+                await db.commit()
+                return
+            except Exception as e:
+                err_str = str(e)
+                if attempt == 1 and ("1205" in err_str or "Lock wait timeout" in err_str):
+                    logger.warning(
+                        f"[AutonomousEngine] Lock timeout updating signal {signal_db_id}, "
+                        f"retrying in 1s…"
+                    )
+                    await db.rollback()
+                    await asyncio.sleep(1)
+                else:
+                    try:
+                        await db.rollback()
+                    except Exception:
+                        pass
+                    logger.warning(
+                        f"[AutonomousEngine] Failed to update signal {signal_db_id} status: {e}"
+                    )
+                    return
 
     async def _notify_circuit_breaker(self, account_id: str, daily_pnl: float, equity: float) -> None:
         """熔断触发：推送紧急通知"""
