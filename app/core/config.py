@@ -96,7 +96,7 @@ class Settings(BaseSettings):
     DEEPSEEK_API_BASE: str = "https://api.deepseek.com"
     DEEPSEEK_MODEL: str = "deepseek-chat"  # 或 "deepseek-reasoner" (思考模式)
     DEEPSEEK_ENABLED: bool = True  # 是否启用 DeepSeek 作为兜底
-    DEEPSEEK_TIMEOUT_SECONDS: int = 30  # DeepSeek 超时时间（reasoner 模式需要更长时间）
+    DEEPSEEK_TIMEOUT_SECONDS: int = 90  # DeepSeek 超时时间（reasoner 模式需要更长时间）
 
     # AI 提供商策略配置
     # 可用的提供商列表，逗号分隔
