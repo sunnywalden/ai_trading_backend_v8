@@ -1034,9 +1034,12 @@ class AutonomousEngine:
             from app.models.trading_plan import TradingPlan
 
             direction = (decision.get("action") or "BUY").upper()
-            # 优先使用信号建议价；没有则用极小占位值（仅满足 NOT NULL 约束，不影响已执行计划）
+            # 优先级: signal.price > signal.suggested_price > decision.ref_price > 占位值 1.0
             entry = float(
-                signal.get("price") or signal.get("suggested_price") or 1.0
+                signal.get("price")
+                or signal.get("suggested_price")
+                or decision.get("ref_price")
+                or 1.0
             )
             entry = max(entry, 0.01)
 
