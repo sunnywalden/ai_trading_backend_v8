@@ -58,25 +58,6 @@ class JournalService:
         if status:
             stmt = stmt.where(TradeJournal.journal_status == status)
             count_stmt = count_stmt.where(TradeJournal.journal_status == status)
-        else:
-            # 默认列表去噪：若同 plan_id 已有 COMPLETED，则隐藏该 plan_id 下的 FAILED 重复项
-            completed_plan_ids_subq = (
-                select(TradeJournal.plan_id)
-                .where(
-                    and_(
-                        TradeJournal.account_id == account_id,
-                        TradeJournal.plan_id.is_not(None),
-                        TradeJournal.journal_status == "COMPLETED",
-                    )
-                )
-            )
-            noise_filter = or_(
-                TradeJournal.journal_status != "FAILED",
-                TradeJournal.plan_id.is_(None),
-                TradeJournal.plan_id.notin_(completed_plan_ids_subq),
-            )
-            stmt = stmt.where(noise_filter)
-            count_stmt = count_stmt.where(noise_filter)
 
         total_result = await self.session.execute(count_stmt)
         total = total_result.scalar() or 0
