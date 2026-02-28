@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from sqlalchemy import and_, distinct, func, select, update
+from sqlalchemy import and_, desc, distinct, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.models.strategy  # noqa: F401  # 预加载关系，避免 TradingSignal mapper 解析 Strategy 失败
@@ -99,6 +99,58 @@ async def reconcile_broker_order_status(
         elif status == "FILLED":
             await executor.monitor_order_status(real_account_id, oid)
             filled_synced += 1
+
+    # 3) 【关键修正】同步 TradingPlan 的 Pipeline 阶段 (针对 V10.3 看板)
+    if cancelled_synced > 0 or filled_synced > 0:
+        from app.models.trading_plan import TradingPlan
+        from app.models.fsm_transition_log import FsmTransitionLog
+
+        # 查寻所有处于 7 (下单执行) 或 8 (算法执行) 阶段的活跃计划
+        plans_res = await session.execute(
+            select(TradingPlan).where(
+                and_(
+                    TradingPlan.account_id == real_account_id,
+                    TradingPlan.pipeline_stage.in_([7, 8]),
+                    TradingPlan.plan_status.in_(["ACTIVE", "EXECUTED"]),
+                )
+            )
+        )
+        for plan in plans_res.scalars().all():
+            # 查找该计划发出的最新信号
+            sig_res = await session.execute(
+                select(TradingSignal)
+                .where(TradingSignal.account_id == real_account_id)
+                .where(TradingSignal.symbol == plan.symbol)
+                .where(TradingSignal.order_id.is_not(None))
+                .order_by(desc(TradingSignal.created_at))
+                .limit(1)
+            )
+            sig = sig_res.scalar_one_or_none()
+            if not sig: continue
+
+            new_stage = None
+            new_status = None
+            if sig.status == SignalStatus.EXECUTED:
+                new_stage = 12  # 订单结算
+            elif sig.status in (SignalStatus.CANCELLED, SignalStatus.FAILED, SignalStatus.VALIDATED):
+                new_stage = 16  # 已完成
+                new_status = "REVOKED"
+
+            if new_stage is not None and new_stage != plan.pipeline_stage:
+                old_stage = plan.pipeline_stage
+                plan.pipeline_stage = new_stage
+                plan.stage_entered_at = datetime.now(timezone.utc)
+                if new_status:
+                    plan.plan_status = new_status
+                
+                # 记录 FSM 日志
+                session.add(FsmTransitionLog(
+                    plan_id=plan.id,
+                    fsm_type="PLAN",
+                    from_state=f"STAGE_{old_stage}",
+                    to_state=f"STAGE_{new_stage}",
+                    trigger_reason="Broker status sync (Manual Cancel/Fill)",
+                ))
 
     await session.commit()
 
