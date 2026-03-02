@@ -158,6 +158,31 @@ async def _warm_up_caches() -> None:
     logger.info("[WarmUp] Cache pre-warming complete.")
 
 
+async def _bootstrap_market_universe() -> None:
+    """服务启动后异步全量拉取 US/HK 股票池并入库缓存。"""
+    # 避免与启动阶段其他初始化竞争连接池
+    await asyncio.sleep(3)
+
+    try:
+        from app.broker.factory import get_tiger_client
+        if not get_tiger_client():
+            logger.info("[MarketUniverseBootstrap] Tiger client unavailable, skip startup sync")
+            return
+    except Exception as e:
+        logger.warning(f"[MarketUniverseBootstrap] tiger check failed: {e}")
+        return
+
+    try:
+        from app.services.market_universe_service import MarketUniverseService
+
+        async with SessionLocal() as session:
+            svc = MarketUniverseService(session)
+            result = await svc.refresh_all_markets()
+            logger.info(f"[MarketUniverseBootstrap] startup sync done: {result}")
+    except Exception as e:
+        logger.warning(f"[MarketUniverseBootstrap] startup sync failed: {e}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理：启动时初始化调度器，关闭时清理"""
@@ -251,6 +276,9 @@ async def lifespan(app: FastAPI):
 
     # 异步预热关键缓存（非阻塞 fire-and-forget）
     asyncio.create_task(_warm_up_caches())
+
+    # 启动即异步全量同步市场标的（DB + 缓存）
+    asyncio.create_task(_bootstrap_market_universe())
 
     yield
     
