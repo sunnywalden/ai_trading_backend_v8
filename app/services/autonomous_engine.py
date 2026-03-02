@@ -397,6 +397,9 @@ class AutonomousEngine:
         from app.core.config import settings as cfg
 
         symbol = signal.get("symbol", "")
+        sig_type = str(signal.get("signal_type") or "").upper()
+        sig_dir = str(signal.get("direction") or "LONG").upper()
+        sig_conf = float(signal.get("confidence") or 0.0)
 
         # -------------------------------
         # 数量语义标准化（V10.3.2）
@@ -418,10 +421,18 @@ class AutonomousEngine:
         # ① 优先从持仓字典取价格
         pos_info = positions.get(symbol, {})
         current_price: float = 0.0
+        current_position_qty: float = 0.0
         if isinstance(pos_info, dict):
-            current_price = float(pos_info.get("market_price") or pos_info.get("avg_cost") or 0)
+            current_price = float(
+                pos_info.get("current_price")
+                or pos_info.get("market_price")
+                or pos_info.get("avg_cost")
+                or 0
+            )
+            current_position_qty = float(pos_info.get("qty") or 0)
         elif hasattr(pos_info, "market_price"):
             current_price = float(getattr(pos_info, "market_price", 0) or 0)
+            current_position_qty = float(getattr(pos_info, "qty", 0) or 0)
 
         # ② 持仓无价格时，调用 DataHub 获取最新报价
         #    Tiger get_stock_briefs 返回的 latest_price 在盘前/盘中/盘后均有值（非实时，但是当日最后成交价）
@@ -461,6 +472,54 @@ class AutonomousEngine:
         _market_active = is_symbol_market_active(symbol)
         _algo_rule = "当前为正常交易时段，可选 TWAP/VWAP/MKT" if _market_active else "当前为非交易时段（盘前/盘后/休市），必须选 LMT 或 MKT，禁止选 TWAP/VWAP"
 
+        # 对于 REDUCE/EXIT，不走 AI 自由裁量，直接按持仓与信号数量执行（防止被误判为 HOLD）
+        def _build_reduce_exit_decision(reason: str) -> dict:
+            held_abs = abs(float(current_position_qty or 0.0))
+            desired_abs = 0.0
+            if target_abs_qty is not None and target_abs_qty > 0:
+                desired_abs = float(target_abs_qty)
+            elif ref_qty > 0:
+                desired_abs = float(ref_qty)
+
+            if sig_type == "EXIT":
+                qty_abs = held_abs if held_abs > 0 else desired_abs
+            else:
+                # REDUCE: 优先使用信号建议数量，且不超过当前持仓
+                qty_abs = desired_abs if desired_abs > 0 else (held_abs * 0.3)
+                if held_abs > 0:
+                    qty_abs = min(qty_abs, held_abs)
+
+            if qty_abs <= 0:
+                return {
+                    "action": "HOLD",
+                    "symbol": symbol,
+                    "qty": 0,
+                    "confidence": max(0.0, sig_conf),
+                    "reasoning": f"{reason}; no executable qty for {sig_type}",
+                }
+
+            # LONG 持仓减仓/平仓 => SELL；SHORT 持仓减仓/平仓 => BUY（回补）
+            action = "BUY" if sig_dir in ("SHORT", "SELL") else "SELL"
+
+            from app.broker.factory import is_hk_stock as _is_hk_reduce
+            qty_final = int(round(qty_abs)) if _is_hk_reduce(symbol) else round(float(qty_abs), 4)
+            algo = "MKT" if _market_active else ("LMT" if current_price > 0 else "MKT")
+
+            payload = {
+                "action": action,
+                "symbol": symbol,
+                "qty": qty_final,
+                "algo": algo,
+                "confidence": max(0.7, sig_conf),
+                "reasoning": f"rule-based {sig_type}: {reason}; held={held_abs}, desired={desired_abs}",
+            }
+            if current_price > 0:
+                payload["ref_price"] = current_price
+            return payload
+
+        if sig_type in ("REDUCE", "EXIT"):
+            return _build_reduce_exit_decision("rebalance signal deterministic execution")
+
         # 构造提示词
         prompt = f"""你是顶级量化交易 AI。基于以下信号做出交易决策。
 
@@ -490,11 +549,11 @@ class AutonomousEngine:
 
         # 高置信度信号兜底：AI 返回 HOLD/qty=0 时，避免整批信号都不执行
         def _rule_based_fallback(reason: str) -> dict:
-            sig_type = str(signal.get("signal_type") or "").upper()
-            sig_dir = str(signal.get("direction") or "").upper()
-            sig_conf = float(signal.get("confidence") or 0.0)
+            # REDUCE/EXIT 兜底：强制规则执行，避免 no-op(HOLD/qty<=0)
+            if sig_type in ("REDUCE", "EXIT"):
+                return _build_reduce_exit_decision(reason)
 
-            # 仅对高置信度开仓/加仓信号兜底，避免误触发 EXIT/REDUCE
+            # 仅对高置信度开仓/加仓信号兜底
             if sig_type in ("ENTRY", "ADD") and sig_conf >= 0.85 and ref_qty > 0:
                 fallback_action = "BUY" if sig_dir in ("LONG", "BUY") else "SELL" if sig_dir in ("SHORT", "SELL") else None
                 if fallback_action:
