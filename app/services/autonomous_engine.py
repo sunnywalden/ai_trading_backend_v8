@@ -400,6 +400,7 @@ class AutonomousEngine:
         sig_type = str(signal.get("signal_type") or "").upper()
         sig_dir = str(signal.get("direction") or "LONG").upper()
         sig_conf = float(signal.get("confidence") or 0.0)
+        sig_strength = float(signal.get("signal_strength") or 0.0)
 
         # -------------------------------
         # 数量语义标准化（V10.3.2）
@@ -553,14 +554,30 @@ class AutonomousEngine:
             if sig_type in ("REDUCE", "EXIT"):
                 return _build_reduce_exit_decision(reason)
 
-            # 仅对高置信度开仓/加仓信号兜底
-            if sig_type in ("ENTRY", "ADD") and sig_conf >= 0.85 and ref_qty > 0:
+            # 开仓/加仓信号兜底：避免“接近阈值”的优质信号被误判 HOLD 而跳过
+            # 触发条件（满足其一）：
+            #   1) confidence >= 0.80
+            #   2) signal_strength >= 80
+            #   3) 信号显式给出了 ABS_SHARES 数量
+            has_explicit_abs_qty = (target_abs_qty is not None and target_abs_qty > 0)
+            should_fallback_entry_add = (
+                sig_type in ("ENTRY", "ADD")
+                and ref_qty > 0
+                and (
+                    sig_conf >= 0.80
+                    or sig_strength >= 80
+                    or has_explicit_abs_qty
+                )
+            )
+
+            if should_fallback_entry_add:
                 fallback_action = "BUY" if sig_dir in ("LONG", "BUY") else "SELL" if sig_dir in ("SHORT", "SELL") else None
                 if fallback_action:
                     _fallback_algo = "LMT" if current_price > 0 else "MKT"
                     logger.warning(
                         f"[AutonomousEngine._ai_decide] Fallback triggered for {symbol}: "
-                        f"action={fallback_action}, qty={ref_qty}, algo={_fallback_algo}, reason={reason}"
+                        f"action={fallback_action}, qty={ref_qty}, algo={_fallback_algo}, reason={reason}, "
+                        f"sig_conf={sig_conf:.4f}, sig_strength={sig_strength:.2f}, explicit_abs={has_explicit_abs_qty}"
                     )
                     return {
                         "action": fallback_action,
@@ -1068,6 +1085,7 @@ class AutonomousEngine:
                     "signal_id": r.signal_id,
                     "symbol": r.symbol,
                     "signal_type": r.signal_type.value if r.signal_type else "ENTRY",
+                    "signal_strength": float(r.signal_strength or 0),
                     "confidence": float(r.confidence or 0.5),
                     "direction": r.direction or "LONG",
                     "quantity_mode": str(getattr(r, "quantity_mode", None) or "PCT_EQUITY").upper(),
