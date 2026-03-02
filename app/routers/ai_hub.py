@@ -56,19 +56,43 @@ async def list_agent_runs(
 @router.post("/agent-runs")
 async def trigger_agent_run(
     body: AgentRunRequest,
-    db: AsyncSession = Depends(get_session),
     user_id: str = Depends(get_current_user),
 ):
-    """触发一次新的多 Agent 协作，返回完整决策结果。"""
-    result = await multi_agent_orchestrator.run(
-        db,
+    """触发一次新的多 Agent 协作，立即返回 run_id，后台异步执行。"""
+    run_id = await multi_agent_orchestrator.submit(
         user_id=user_id,
         symbol=body.symbol,
         context=body.context or {},
         size_usd=body.size_usd,
     )
-    await db.commit()
-    return result.model_dump()
+    return {"run_id": run_id, "status": "pending", "symbol": body.symbol}
+
+
+@router.get("/agent-runs/{run_id}/status")
+async def get_agent_run_status(
+    run_id: str,
+    db: AsyncSession = Depends(get_session),
+    user_id: str = Depends(get_current_user),
+):
+    """轮询 run 执行状态：pending / running / completed / failed。
+    completed 时直接返回完整结果。
+    """
+    state = multi_agent_orchestrator.get_run_status(run_id)
+    if state is None:
+        # 不在内存则查 DB（进程重启后）
+        messages = await multi_agent_orchestrator.get_run_summary(db, run_id)
+        if messages:
+            return {"run_id": run_id, "status": "completed", "messages": messages}
+        raise HTTPException(status_code=404, detail="Agent run not found")
+
+    if state.get("user_id") != user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    if state["status"] == "completed":
+        return {"run_id": run_id, "status": "completed", **state.get("result", {})}
+    if state["status"] == "failed":
+        return {"run_id": run_id, "status": "failed", "error": state.get("error", "unknown")}
+    return {"run_id": run_id, "status": state["status"]}
 
 
 @router.get("/agent-runs/{run_id}")
@@ -78,10 +102,30 @@ async def get_agent_run(
     user_id: str = Depends(get_current_user),
 ):
     """返回指定 run_id 的完整消息序列。"""
+    # 先检查内存状态（completed 时有缓存结果）
+    state = multi_agent_orchestrator.get_run_status(run_id)
+    if state and state.get("user_id") != user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    if state and state["status"] == "completed" and "result" in state:
+        res = state["result"]
+        return {
+            "run_id": run_id,
+            "status": "completed",
+            "symbol": res.get("symbol"),
+            "final_decision": res.get("final_decision"),
+            "final_confidence": res.get("final_confidence"),
+            "orchestrator_summary": res.get("orchestrator_summary"),
+            "challenge_points": res.get("challenge_points", []),
+            "messages": res.get("messages", []),
+            "latency_ms": res.get("latency_ms"),
+        }
+    if state and state["status"] in ("pending", "running"):
+        return {"run_id": run_id, "status": state["status"], "messages": []}
+
+    # 从 DB 查
     messages = await multi_agent_orchestrator.get_run_summary(db, run_id)
     if not messages:
         raise HTTPException(status_code=404, detail="Agent run not found")
-    # 基本权限校验：确保属于当前用户
     from sqlalchemy import select
     from app.models.agent_communication_log import AgentCommunicationLog
     stmt = select(AgentCommunicationLog.user_id).where(
@@ -90,7 +134,7 @@ async def get_agent_run(
     row = (await db.execute(stmt)).first()
     if row and row.user_id != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
-    return {"run_id": run_id, "messages": messages}
+    return {"run_id": run_id, "status": "completed", "messages": messages}
 
 
 @router.get("/agent-runs/{run_id}/challenge")

@@ -25,6 +25,10 @@ from app.models.agent_communication_log import AgentCommunicationLog
 
 logger = logging.getLogger(__name__)
 
+# ---------- 内存状态表（用于 pending/running/completed/failed 快速查询）----------
+# key: run_id  value: dict with status + partial result
+_run_status: dict[str, dict] = {}
+
 
 # ─── Pydantic Schema ──────────────────────────────────────────────────────────
 
@@ -42,6 +46,7 @@ class OrchestratorResult(BaseModel):
     """一次 Orchestration 运行结果。"""
     run_id: str
     symbol: str
+    status: str = "completed"      # pending / running / completed / failed
     final_decision: str            # BUY / SELL / HOLD
     final_confidence: float
     orchestrator_summary: str
@@ -241,6 +246,35 @@ class MultiAgentOrchestrator:
         self.researcher = ResearchAgent()
         self.orchestrator_agent = OrchestratorAgent()
 
+    async def submit(
+        self,
+        user_id: str,
+        symbol: str,
+        context: dict | None = None,
+        size_usd: float = 10000.0,
+    ) -> str:
+        """立即返回 run_id，在后台 asyncio.Task 中执行完整流程。"""
+        run_id = str(uuid.uuid4())
+        _run_status[run_id] = {"status": "pending", "user_id": user_id, "symbol": symbol}
+
+        async def _bg():
+            _run_status[run_id]["status"] = "running"
+            try:
+                from app.models.db import get_session_ctx  # 独立 session
+                async with get_session_ctx() as db:
+                    result = await self._execute(db, run_id, user_id, symbol, context or {}, size_usd)
+                    await db.commit()
+                _run_status[run_id].update({
+                    "status": "completed",
+                    "result": result.model_dump(),
+                })
+            except Exception as e:
+                logger.exception("MultiAgentOrchestrator background task failed: run_id=%s", run_id)
+                _run_status[run_id].update({"status": "failed", "error": str(e)})
+
+        asyncio.create_task(_bg())
+        return run_id
+
     async def run(
         self,
         db: AsyncSession,
@@ -249,10 +283,22 @@ class MultiAgentOrchestrator:
         context: dict | None = None,
         size_usd: float = 10000.0,
     ) -> OrchestratorResult:
-        """执行完整的五智能体协作流程。"""
+        """执行完整的五智能体协作流程（同步等待，保持向下兼容）。"""
         run_id = str(uuid.uuid4())
+        result = await self._execute(db, run_id, user_id, symbol, context or {}, size_usd)
+        return result
+
+    async def _execute(
+        self,
+        db: AsyncSession,
+        run_id: str,
+        user_id: str,
+        symbol: str,
+        context: dict,
+        size_usd: float,
+    ) -> OrchestratorResult:
+        """执行完整的五智能体协作流程。"""
         t_start = time.time()
-        context = context or {}
         all_messages: list[AgentMessage] = []
 
         logger.info("MultiAgentOrchestrator: run_id=%s symbol=%s", run_id, symbol)
@@ -296,6 +342,7 @@ class MultiAgentOrchestrator:
         return OrchestratorResult(
             run_id=run_id,
             symbol=symbol,
+            status="completed",
             final_decision=final_decision,
             final_confidence=final_confidence,
             orchestrator_summary=orch_msg.content[:1000],
@@ -303,6 +350,10 @@ class MultiAgentOrchestrator:
             messages=all_messages,
             latency_ms=latency_ms,
         )
+
+    def get_run_status(self, run_id: str) -> dict | None:
+        """从内存状态表中查询 run 进度（pending/running/completed/failed）。"""
+        return _run_status.get(run_id)
 
     async def get_run_summary(
         self, db: AsyncSession, run_id: str
@@ -331,7 +382,9 @@ class MultiAgentOrchestrator:
     async def list_runs(
         self, db: AsyncSession, user_id: str, limit: int = 20
     ) -> list[dict[str, Any]]:
-        """列出历史 run，每个 run 只返回 orchestrator 最终决策行。"""
+        """列出历史 run，每个 run 只返回 orchestrator 最终决策行。
+        先查 DB（已完成的），再合并内存中尚未入库的 pending/running。
+        """
         from sqlalchemy import select
         stmt = (
             select(AgentCommunicationLog)
@@ -343,17 +396,37 @@ class MultiAgentOrchestrator:
             .limit(limit)
         )
         rows = (await db.execute(stmt)).scalars().all()
-        return [
+        db_run_ids = {r.run_id for r in rows}
+
+        result = [
             {
                 "run_id": r.run_id,
                 "symbol": r.symbol,
-                "decision": (r.structured_output or {}).get("decision", "HOLD"),
+                "status": "completed",
+                "final_recommendation": (r.structured_output or {}).get("decision", "HOLD"),
                 "confidence": r.confidence,
                 "latency_ms": r.latency_ms,
                 "created_at": r.created_at.isoformat() if r.created_at else None,
             }
             for r in rows
         ]
+
+        # 补充内存中 pending/running （属于该 user）
+        for rid, state in list(_run_status.items()):
+            if rid in db_run_ids:
+                continue
+            if state.get("user_id") != user_id:
+                continue
+            result.insert(0, {
+                "run_id": rid,
+                "symbol": state.get("symbol", ""),
+                "status": state.get("status", "pending"),
+                "final_recommendation": None,
+                "confidence": None,
+                "latency_ms": None,
+                "created_at": None,
+            })
+        return result
 
 
 async def _persist_messages(
