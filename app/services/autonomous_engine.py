@@ -53,6 +53,28 @@ class AutonomousEngine:
         except Exception:
             pass
 
+    def _classify_noop_reason(self, decision: dict) -> str:
+        """将 HOLD/qty<=0 的 no-op 细分为可观测原因码。"""
+        code = str(decision.get("noop_reason") or "").strip().lower()
+        if code:
+            return code
+
+        reasoning = str(decision.get("reasoning") or "").lower()
+        action = str(decision.get("action") or "").upper()
+        qty = float(decision.get("qty") or 0)
+
+        if "qty derivation failed" in reasoning:
+            return "qty-derive-failed"
+        if "parse failed" in reasoning:
+            return "ai-parse-failed"
+        if "ai error" in reasoning:
+            return "ai-error"
+        if "no executable qty" in reasoning:
+            return "no-executable-qty"
+        if action == "HOLD" or qty <= 0:
+            return "ai-hold"
+        return "unknown-noop"
+
     async def restore_state(self) -> None:
         """应用启动时从 Redis 恢复暂停状态，防止重启丢失互斥状态。"""
         try:
@@ -174,6 +196,8 @@ class AutonomousEngine:
             elif gate.passed:
                 # 检查交易数量，如果为 0 则视为 HOLD 决策，更新为 SKIPPED（语义化区分“已执行”）
                 if decision["action"] == "HOLD" or float(decision.get("qty", 0)) <= 0:
+                    noop_code = self._classify_noop_reason(decision)
+                    skip_reason = f"no-op({noop_code})"
                     logger.info(f"[AutonomousEngine] Decision for {decision['symbol']} is HOLD or qty=0, skipping execution.")
                     execution_intent_id = await self._create_execution_intent(
                         db=db,
@@ -181,7 +205,7 @@ class AutonomousEngine:
                         signal=signal,
                         decision=decision,
                         status="SKIPPED",
-                        reason="no-op(HOLD/qty<=0)",
+                        reason=skip_reason,
                     )
                     await self._update_signal_status(db, signal["id"], _SS.SKIPPED)
                     results.append(
@@ -191,7 +215,7 @@ class AutonomousEngine:
                             "gate_passed": True,
                             "order_id": None,
                             "execution_intent_id": execution_intent_id,
-                            "reason": "no-op(HOLD/qty<=0)",
+                            "reason": skip_reason,
                         }
                     )
                     continue
@@ -497,6 +521,7 @@ class AutonomousEngine:
                     "qty": 0,
                     "confidence": max(0.0, sig_conf),
                     "reasoning": f"{reason}; no executable qty for {sig_type}",
+                    "noop_reason": "no-executable-qty",
                 }
 
             # LONG 持仓减仓/平仓 => SELL；SHORT 持仓减仓/平仓 => BUY（回补）
@@ -549,7 +574,7 @@ class AutonomousEngine:
 只输出 JSON，不要其他文字。"""
 
         # 高置信度信号兜底：AI 返回 HOLD/qty=0 时，避免整批信号都不执行
-        def _rule_based_fallback(reason: str) -> dict:
+        def _rule_based_fallback(reason: str, hold_reason: str = "ai-hold") -> dict:
             # REDUCE/EXIT 兜底：强制规则执行，避免 no-op(HOLD/qty<=0)
             if sig_type in ("REDUCE", "EXIT"):
                 return _build_reduce_exit_decision(reason)
@@ -595,6 +620,7 @@ class AutonomousEngine:
                 "qty": 0,
                 "confidence": 0.0,
                 "reasoning": reason,
+                "noop_reason": hold_reason,
             }
 
         def _parse_ai_json(raw: str) -> Optional[dict]:
@@ -690,7 +716,7 @@ class AutonomousEngine:
                     decision = parsed
 
             if not isinstance(decision, dict):
-                return _rule_based_fallback("Parse failed")
+                return _rule_based_fallback("Parse failed", hold_reason="ai-parse-failed")
 
             action = str(decision.get("action", "HOLD")).upper()
             raw_qty = float(decision.get("qty") or 0)
@@ -700,7 +726,10 @@ class AutonomousEngine:
                     f"[AutonomousEngine._ai_decide] Model returned HOLD/qty<=0 for {symbol}. "
                     f"reasoning={str(decision.get('reasoning') or '')[:200]}"
                 )
-                return _rule_based_fallback(str(decision.get("reasoning") or "Model returned HOLD/qty<=0"))
+                return _rule_based_fallback(
+                    str(decision.get("reasoning") or "Model returned HOLD/qty<=0"),
+                    hold_reason="ai-hold",
+                )
 
             # 判断是否为港股（必须整数）；美股支持小数股（fractional shares）
             from app.broker.factory import is_hk_stock as _is_hk
@@ -724,7 +753,7 @@ class AutonomousEngine:
                 else:
                     # 完全无法推算，回退 HOLD
                     logger.warning(f"[AutonomousEngine._ai_decide] Cannot derive qty for {symbol}, fallback HOLD")
-                    return _rule_based_fallback("qty derivation failed")
+                    return _rule_based_fallback("qty derivation failed", hold_reason="qty-derive-failed")
 
             # 港股取整；美股保留最多 4 位小数（fractional shares）
             decision["qty"] = int(round(raw_qty)) if _hk else round(raw_qty, 4)
@@ -735,7 +764,7 @@ class AutonomousEngine:
             return decision
         except Exception as e:
             logger.error(f"AI decide failed: {e}, using HOLD fallback")
-            return _rule_based_fallback(f"AI error: {e}")
+            return _rule_based_fallback(f"AI error: {e}", hold_reason="ai-error")
 
     async def _call_ai(self, prompt: str, model_type: str = "lightweight") -> Any:
         """
