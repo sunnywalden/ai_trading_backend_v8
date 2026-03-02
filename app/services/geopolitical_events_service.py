@@ -13,6 +13,7 @@
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 from enum import Enum
+import asyncio
 import re
 import time
 import logging
@@ -56,6 +57,10 @@ class SeverityLevel(str, Enum):
 
 class GeopoliticalEventsService:
     """地缘政治事件服务"""
+
+    # News API 免费版历史回溯边界较严格（且可能受时区/时分秒边界影响）
+    # 保守使用 29 天，避免卡在“刚好 30 天”导致 parameterInvalid。
+    NEWS_API_SAFE_LOOKBACK_DAYS = 29
     
     # 事件分类关键词
     CATEGORY_KEYWORDS = {
@@ -110,6 +115,17 @@ class GeopoliticalEventsService:
         self.news_api = NewsApiClient(api_key=settings.NEWS_API_KEY) if settings.NEWS_API_KEY else None
         self.cache_ttl_hours = settings.CACHE_TTL_GEOPOLITICAL_HOURS
 
+    def _safe_news_from_date(self, days: int) -> str:
+        """计算 News API 安全可用的 from_param 日期（YYYY-MM-DD）。"""
+        lookback = max(1, min(days, self.NEWS_API_SAFE_LOOKBACK_DAYS))
+        return (datetime.utcnow() - timedelta(days=lookback)).date().isoformat()
+
+    @staticmethod
+    def _extract_oldest_allowed_date(error_text: str) -> Optional[str]:
+        """从 News API parameterInvalid 文案中提取可接受的最早日期。"""
+        m = re.search(r"as far back as (\d{4}-\d{2}-\d{2})", error_text)
+        return m.group(1) if m else None
+
     async def fetch_recent_events(
         self, 
         days: int = 7, 
@@ -147,7 +163,7 @@ class GeopoliticalEventsService:
                 await session.commit()
                 
                 # 返回所有事件（包括新旧）
-                return await self._get_cached_events(session, days)
+                return await self._get_cached_events(session, days) or []
             
             return []
 
@@ -223,9 +239,9 @@ class GeopoliticalEventsService:
         
         # 计算各项指标
         event_count = len(events)
-        severities = [self._severity_to_number(e.severity) for e in events]
+        severities = [self._severity_to_number(str(getattr(e, "severity", "MEDIUM"))) for e in events]
         avg_severity = sum(severities) / len(severities)
-        impacts = [e.market_impact_score for e in events]
+        impacts = [float(getattr(e, "market_impact_score", 0.0) or 0.0) for e in events]
         avg_impact = sum(impacts) / len(impacts)
         
         # 评分逻辑（分数越高风险越低）
@@ -277,7 +293,8 @@ class GeopoliticalEventsService:
 
     async def fetch_external_events(self, query: str, days: int = 7) -> List[GeopoliticalEvent]:
         """公开发布的获取外部事件方法，支持自定义查询词"""
-        if not self.news_api:
+        client = self.news_api
+        if not client:
             return []
             
         gate = await api_monitor.can_call_provider(APIProvider.NEWS_API)
@@ -285,10 +302,10 @@ class GeopoliticalEventsService:
             return []
 
         try:
-            from_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+            from_date = self._safe_news_from_date(days)
             articles = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: self.news_api.get_everything(
+                lambda: client.get_everything(
                     q=query,
                     from_param=from_date,
                     language='en',
@@ -336,21 +353,46 @@ class GeopoliticalEventsService:
         success = False
         error_msg = None
         events = []
+        client = self.news_api
+        if not client:
+            return []
         
         try:
-            from_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+            from_date = self._safe_news_from_date(days)
             
             # 搜索关键词
             keywords = "war OR conflict OR sanctions OR crisis OR terror OR coup OR trade dispute"
             
             # 调用News API
-            articles = self.news_api.get_everything(
-                q=keywords,
-                from_param=from_date,
-                language='en',
-                sort_by='relevancy',
-                page_size=50
-            )
+            try:
+                articles = client.get_everything(
+                    q=keywords,
+                    from_param=from_date,
+                    language='en',
+                    sort_by='relevancy',
+                    page_size=50
+                )
+            except Exception as first_err:
+                # 免费版常见边界错误：parameterInvalid（请求日期过旧）
+                err_text = str(first_err)
+                oldest = self._extract_oldest_allowed_date(err_text)
+                if "parameterInvalid" in err_text and oldest:
+                    # 再向前收紧 1 天，避免“等于边界日”仍被拒绝
+                    retry_from = (datetime.strptime(oldest, "%Y-%m-%d") + timedelta(days=1)).date().isoformat()
+                    logger.warning(
+                        "News API date boundary hit, retry with safer from_param: %s -> %s",
+                        from_date,
+                        retry_from,
+                    )
+                    articles = client.get_everything(
+                        q=keywords,
+                        from_param=retry_from,
+                        language='en',
+                        sort_by='relevancy',
+                        page_size=50
+                    )
+                else:
+                    raise
             
             for article in articles.get('articles', []):
                 event = self._article_to_event(article)
@@ -471,8 +513,8 @@ class GeopoliticalEventsService:
             is_duplicate = False
             for existing in existing_events:
                 similarity = self._calculate_title_similarity(
-                    new_event.title, 
-                    existing.title
+                    str(getattr(new_event, "title", "")), 
+                    str(getattr(existing, "title", ""))
                 )
                 if similarity > 0.8:
                     is_duplicate = True
@@ -496,7 +538,7 @@ class GeopoliticalEventsService:
         if max(category_scores.values()) == 0:
             return EventCategory.OTHER
         
-        return max(category_scores, key=category_scores.get)
+        return max(category_scores, key=lambda c: category_scores[c])
 
     def _assess_severity(self, text: str) -> int:
         """
@@ -622,11 +664,13 @@ class GeopoliticalEventsService:
     
     def _event_to_dict(self, event: GeopoliticalEvent) -> Dict[str, Any]:
         """将GeopoliticalEvent对象转换为字典（用于Redis缓存）"""
+        event_date = getattr(event, "event_date", None)
+        event_date_iso = event_date.isoformat() if isinstance(event_date, datetime) else None
         return {
             "event_type": event.event_type,
             "title": event.title,
             "description": event.description,
-            "event_date": event.event_date.isoformat() if event.event_date else None,
+            "event_date": event_date_iso,
             "news_source": event.news_source,
             "category": event.category,
             "severity": event.severity,
