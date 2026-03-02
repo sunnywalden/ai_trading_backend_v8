@@ -5,6 +5,9 @@ import logging
 import random
 from datetime import datetime, timezone
 from typing import List, Optional
+from zoneinfo import ZoneInfo
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.db import SessionLocal
 from app.models.strategy import (
@@ -14,6 +17,7 @@ from app.models.strategy import (
     HistoricalStrategyRun,
     StrategyNotification,
 )
+from app.services.market_universe_service import MarketUniverseService
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +31,7 @@ UNIVERSE_MAPPING = {
 }
 
 DEFAULT_SYMBOLS = UNIVERSE_MAPPING["US_LARGE_MID_TECH"]
+AUTO_UNIVERSE_KEY = "AUTO_MARKET_TIME"
 
 PHASES = [
     ("signal_collection", "Collecting signals"),
@@ -40,7 +45,94 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _sample_assets(count: int, strategy_name: str = "", universe_symbols: List[str] = None) -> List[dict]:
+def _is_us_market_hours(ts_utc: datetime) -> bool:
+    ny = ts_utc.astimezone(ZoneInfo("America/New_York"))
+    if ny.weekday() >= 5:
+        return False
+    hhmm = ny.hour * 60 + ny.minute
+    return 9 * 60 + 30 <= hhmm <= 16 * 60
+
+
+def _is_hk_market_hours(ts_utc: datetime) -> bool:
+    hk = ts_utc.astimezone(ZoneInfo("Asia/Hong_Kong"))
+    if hk.weekday() >= 5:
+        return False
+    hhmm = hk.hour * 60 + hk.minute
+    # 09:30-12:00, 13:00-16:00
+    morning = 9 * 60 + 30 <= hhmm <= 12 * 60
+    afternoon = 13 * 60 <= hhmm <= 16 * 60
+    return morning or afternoon
+
+
+def _resolve_market_by_runtime(ts_utc: datetime) -> str:
+    """根据策略运行时刻选择市场。
+
+    规则：
+      1) 美股时段 -> US
+      2) 港股时段 -> HK
+      3) 其余时段 -> US（默认）
+    """
+    if _is_us_market_hours(ts_utc):
+        return "US"
+    if _is_hk_market_hours(ts_utc):
+        return "HK"
+    return "US"
+
+
+async def _select_universe_symbols(session: AsyncSession, run: StrategyRun) -> tuple[str, List[str]]:
+    """解析并获取本次 run 的 symbol universe。"""
+    raw_key = (run.target_universe or AUTO_UNIVERSE_KEY).strip().upper()
+
+    # 兼容历史默认值：此前默认是 US_LARGE_MID_TECH，现迁移为“按交易时段自动市场”
+    if raw_key == "US_LARGE_MID_TECH":
+        raw_key = AUTO_UNIVERSE_KEY
+
+    # 兼容历史固定股票池
+    if raw_key in UNIVERSE_MAPPING:
+        return raw_key, UNIVERSE_MAPPING.get(raw_key, DEFAULT_SYMBOLS)
+
+    svc = MarketUniverseService(session)
+
+    async def _get_local_market_symbols(market: str) -> List[str]:
+        try:
+            symbols = await svc.get_local_universe_symbols(market)
+        except Exception as e:
+            logger.warning("Read local market universe failed (%s): %s", market, e)
+            symbols = []
+        if symbols:
+            return symbols
+        # 本地为空时尝试即时拉取一次
+        try:
+            await svc.refresh_market_universe(market)
+            symbols = await svc.get_local_universe_symbols(market)
+            if symbols:
+                return symbols
+        except Exception as e:
+            logger.warning("Refresh local market universe failed (%s): %s", market, e)
+        return []
+
+    # 显式全量池
+    if raw_key in ("US_ALL", "US_ALL_LOCAL"):
+        symbols = await _get_local_market_symbols("US")
+        return "US_ALL_LOCAL", symbols or DEFAULT_SYMBOLS
+    if raw_key in ("HK_ALL", "HK_ALL_LOCAL"):
+        symbols = await _get_local_market_symbols("HK")
+        return "HK_ALL_LOCAL", symbols or DEFAULT_SYMBOLS
+
+    # 自动按扫描时间选择市场
+    runtime = run.started_at if run.started_at else datetime.now(timezone.utc)
+    market = _resolve_market_by_runtime(runtime)
+    symbols = await _get_local_market_symbols(market)
+
+    # 若港股池为空，回退到美股全量池；若仍为空，回退默认样本池
+    if not symbols and market != "US":
+        symbols = await _get_local_market_symbols("US")
+        market = "US"
+
+    return f"{market}_ALL_LOCAL", symbols or DEFAULT_SYMBOLS
+
+
+def _sample_assets(count: int, strategy_name: str = "", universe_symbols: Optional[List[str]] = None) -> List[dict]:
     if not universe_symbols:
         universe_symbols = DEFAULT_SYMBOLS
     symbols = random.sample(universe_symbols, min(count, len(universe_symbols)))
@@ -157,9 +249,8 @@ async def execute_strategy_run_job(run_id: str, task_id: Optional[str] = None) -
                 await asyncio.sleep(0.1)
                 timeline[phase_key]["end"] = datetime.now(timezone.utc).isoformat()
 
-            # 根据 target_universe 选择股票池
-            universe_key = run.target_universe or "US_LARGE_MID_TECH"
-            universe_symbols = UNIVERSE_MAPPING.get(universe_key, DEFAULT_SYMBOLS)
+            # 根据 target_universe / 扫描时间 选择股票池（本地全量优先）
+            universe_key, universe_symbols = await _select_universe_symbols(session, run)
             
             logger.info("Executing strategy with universe: %s, symbols count: %d", universe_key, len(universe_symbols))
             
@@ -190,8 +281,8 @@ async def execute_strategy_run_job(run_id: str, task_id: Optional[str] = None) -
             history = HistoricalStrategyRun(
                 strategy_run_id=run.id,
                 hits=candidate_count,
-                scanned_total=100,
-                hit_rate=round(candidate_count / 100, 4),
+                scanned_total=len(universe_symbols),
+                hit_rate=round(candidate_count / max(1, len(universe_symbols)), 4),
                 avg_signal_strength=round(avg_strength, 2),
                 assets=sampled,
                 timeline=timeline,
