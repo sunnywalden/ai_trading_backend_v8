@@ -174,39 +174,78 @@ async def resume_autonomy(current_user: str = Depends(get_current_user)):
 @router.get("/audit-log")
 async def get_audit_log(
     limit: int = 20,
+    offset: int = 0,
     session: AsyncSession = Depends(get_session),
     current_user: str = Depends(get_current_user),
 ):
     """获取 AI 自主决策审计日志"""
-    from sqlalchemy import text
+    safe_limit = max(1, min(int(limit or 20), 200))
+    safe_offset = max(0, int(offset or 0))
+
+    # 总数（用于前端分页）
+    total_res = await session.execute(select(func.count(AutonomyAuditLog.id)))
+    total = int(total_res.scalar() or 0)
 
     result = await session.execute(
-        text(
-            "SELECT id, autonomy_level, decision_type, symbol, confidence_score, "
-            "risk_gate_passed, order_id, revoked_at, circuit_breaker_triggered, created_at, "
-            "ai_reasoning "
-            "FROM autonomy_audit_log ORDER BY created_at DESC LIMIT :limit"
-        ),
-        {"limit": limit},
+        select(AutonomyAuditLog)
+        .order_by(AutonomyAuditLog.created_at.desc())
+        .offset(safe_offset)
+        .limit(safe_limit)
     )
-    rows = result.fetchall()
+    rows = result.scalars().all()
+
+    # 通过 order_id 回填数量语义（若可关联到 trading_signals）
+    order_ids = [str(r.order_id) for r in rows if getattr(r, "order_id", None)]
+    signal_map: dict[str, TradingSignal] = {}
+    if order_ids:
+        sig_result = await session.execute(
+            select(TradingSignal)
+            .where(TradingSignal.order_id.in_(order_ids))
+            .order_by(TradingSignal.created_at.desc())
+        )
+        for sig in sig_result.scalars().all():
+            oid = str(getattr(sig, "order_id", "") or "")
+            if oid and oid not in signal_map:
+                signal_map[oid] = sig
+
     return {
         "logs": [
             {
-                "id": r[0],
-                "autonomy_level": r[1],
-                "decision_type": r[2],
-                "symbol": r[3],
-                "confidence_score": float(r[4]) if r[4] else None,
-                "risk_gate_passed": bool(r[5]),
-                "order_id": r[6],
-                "revoked_at": r[7].isoformat() if r[7] else None,
-                "circuit_breaker": bool(r[8]),
-                "created_at": r[9].isoformat() if r[9] else None,
-                "ai_reasoning": r[10] if len(r) > 10 else None,
+                "id": r.id,
+                "autonomy_level": r.autonomy_level,
+                "decision_type": r.decision_type,
+                "symbol": r.symbol,
+                "direction": r.decision_type if r.decision_type in ("BUY", "SELL") else None,
+                "confidence_score": float(r.confidence_score) if r.confidence_score is not None else None,
+                "risk_gate_passed": bool(r.risk_gate_passed),
+                "order_id": r.order_id,
+                "revoked_at": r.revoked_at.isoformat() if r.revoked_at else None,
+                "circuit_breaker": bool(r.circuit_breaker_triggered),
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+                "ai_reasoning": r.ai_reasoning,
+                "quantity": (
+                    signal_map[str(r.order_id)].quantity_value
+                    if r.order_id and str(r.order_id) in signal_map and signal_map[str(r.order_id)].quantity_value is not None
+                    else (
+                        signal_map[str(r.order_id)].suggested_quantity
+                        if r.order_id and str(r.order_id) in signal_map
+                        else None
+                    )
+                ),
+                "quantity_mode": (
+                    signal_map[str(r.order_id)].quantity_mode
+                    if r.order_id and str(r.order_id) in signal_map
+                    else None
+                ),
+                "quantity_value": (
+                    signal_map[str(r.order_id)].quantity_value
+                    if r.order_id and str(r.order_id) in signal_map
+                    else None
+                ),
             }
             for r in rows
-        ]
+        ],
+        "total": total,
     }
 
 
