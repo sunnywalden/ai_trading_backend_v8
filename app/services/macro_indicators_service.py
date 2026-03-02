@@ -10,7 +10,7 @@
 """
 
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 import yfinance as yf
 from fredapi import Fred
 from sqlalchemy import select, and_
@@ -186,7 +186,7 @@ class MacroIndicatorsService:
                 "last_updated": datetime.now()
             }
 
-    async def refresh_all_indicators(self) -> Dict[str, int]:
+    async def refresh_all_indicators(self) -> Dict[str, Any]:
         """
         刷新所有宏观指标（定时任务调用）
         
@@ -241,7 +241,8 @@ class MacroIndicatorsService:
         cached = await self._get_cached_indicator(session, indicator_name)
         if cached:
             cutoff_time = datetime.now() - timedelta(hours=self.cache_ttl_hours)
-            if cached.timestamp >= cutoff_time:
+            cached_ts = getattr(cached, "timestamp", None)
+            if isinstance(cached_ts, datetime) and cached_ts >= cutoff_time:
                 return self._extract_indicator_from_db(cached, indicator_name)
         
         # 获取新数据
@@ -315,6 +316,11 @@ class MacroIndicatorsService:
                 # 获取最新值
                 latest_value = float(series.iloc[-1])
                 latest_date = series.index[-1]
+
+                # pandas.Timestamp 不能直接 JSON 序列化；统一转为 ISO 字符串
+                latest_date_iso = (
+                    latest_date.isoformat() if hasattr(latest_date, "isoformat") else str(latest_date)
+                )
                 
                 # 计算变化
                 change_1m = self._calculate_change(series, 30)
@@ -323,12 +329,12 @@ class MacroIndicatorsService:
                 
                 result = {
                     "value": latest_value,
-                    "date": latest_date,
+                    "date": latest_date_iso,
                     "change_1m": change_1m,
                     "change_3m": change_3m,
                     "change_1y": change_1y,
                     "unit": self._get_unit(indicator_name),
-                    "timestamp": datetime.now()
+                    "timestamp": datetime.now().isoformat()
                 }
                 
                 # 缓存到Redis（6小时TTL）
@@ -556,7 +562,7 @@ class MacroIndicatorsService:
         else:
             return "OTHER"
 
-    def _extract_indicator_from_db(self, db_indicator: MacroIndicator, indicator_name: str) -> Dict[str, Any]:
+    def _extract_indicator_from_db(self, db_indicator: MacroIndicator, indicator_name: str) -> Optional[Dict[str, Any]]:
         """从数据库对象提取指标数据"""
         # 根据指标名称从MacroIndicator对象提取对应字段
         value_map = {
@@ -594,24 +600,28 @@ class MacroIndicatorsService:
             timestamp=datetime.now()
         )
         
-        # 根据指标名称设置对应字段
-        value = indicator_data.get("value")
-        if indicator_name == "fed_funds_rate":
-            macro_indicator.fed_rate = value
-        elif indicator_name == "cpi":
-            macro_indicator.inflation_rate = value
-        elif indicator_name == "m2_money_supply":
-            macro_indicator.m2_growth_rate = indicator_data.get("change_1y", 0)
-        elif indicator_name == "gdp":
-            macro_indicator.gdp_growth = indicator_data.get("change_1y", 0)
-        elif indicator_name == "unemployment":
-            macro_indicator.unemployment_rate = value
-        elif indicator_name == "industrial_production":
-            macro_indicator.pmi_index = value
-        elif indicator_name == "consumer_sentiment":
-            macro_indicator.vix_index = value
-        elif indicator_name == "10y_treasury":
-            macro_indicator.yield_curve_2y10y = value
+        def _to_float(v: Any, default: float = 0.0) -> float:
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return default
+
+        # 根据指标名称设置对应字段（使用 setattr 避免 ORM 字段类型推断告警）
+        field_map: Dict[str, tuple[str, str]] = {
+            "fed_funds_rate": ("fed_rate", "value"),
+            "cpi": ("inflation_rate", "value"),
+            "m2_money_supply": ("m2_growth_rate", "change_1y"),
+            "gdp": ("gdp_growth", "change_1y"),
+            "unemployment": ("unemployment_rate", "value"),
+            "industrial_production": ("pmi_index", "value"),
+            "consumer_sentiment": ("vix_index", "value"),
+            "10y_treasury": ("yield_curve_2y10y", "value"),
+        }
+
+        mapping = field_map.get(indicator_name)
+        if mapping:
+            field_name, source_key = mapping
+            setattr(macro_indicator, field_name, _to_float(indicator_data.get(source_key, 0.0), 0.0))
         
         session.add(macro_indicator)
 
