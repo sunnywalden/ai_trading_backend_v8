@@ -264,6 +264,8 @@ async def get_signal_pipeline(
                 "status": s.status.value,
                 "direction": s.direction,
                 "quantity": s.suggested_quantity,
+                "quantity_mode": s.quantity_mode,
+                "quantity_value": s.quantity_value,
                 "strength": round(s.confidence, 4) if s.confidence is not None else 0.0,  # 修复置信度显示：保留4位精度(前端*100后含2位小数)
                 "priority": s.priority,
                 "notes": intent_map.get(s.signal_id) or s.notes,
