@@ -1,6 +1,7 @@
 """V10: AI 自主控制路由"""
 from datetime import datetime, timezone, timedelta
 from typing import Optional
+import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException, Path
 from pydantic import BaseModel
@@ -44,6 +45,96 @@ async def _resolve_account_id() -> str:
     return settings.TIGER_ACCOUNT
 
 
+def _coerce_dt(value) -> Optional[datetime]:
+    """尽力将 Tiger 订单时间字段转换为 timezone-aware UTC datetime。"""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if isinstance(value, (int, float)):
+        # 兼容秒/毫秒时间戳
+        ts = float(value)
+        if ts > 1e12:
+            ts = ts / 1000.0
+        return datetime.fromtimestamp(ts, tz=timezone.utc)
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        try:
+            # 兼容 ISO 8601（含 Z）
+            s2 = s.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(s2)
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except Exception:
+            return None
+    return None
+
+
+def _get_order_dt(order) -> Optional[datetime]:
+    """从 Tiger 订单对象上提取最可能的成交/更新时间。"""
+    for attr in (
+        "trade_time",
+        "filled_time",
+        "updated_at",
+        "update_time",
+        "created_at",
+        "create_time",
+        "order_time",
+        "time",
+    ):
+        dt = _coerce_dt(getattr(order, attr, None))
+        if dt is not None:
+            return dt.astimezone(timezone.utc)
+    return None
+
+
+def _get_order_status(order) -> str:
+    raw = getattr(order, "status", None)
+    if raw is None:
+        return ""
+    if hasattr(raw, "name"):
+        return str(raw.name).upper()
+    s = str(raw).upper()
+    if "." in s:
+        s = s.split(".")[-1]
+    return s
+
+
+async def _count_broker_filled_today(account_id: str) -> Optional[int]:
+    """统计券商侧“今日已成交”订单笔数（用于展示口径对齐）。"""
+    try:
+        broker = make_option_broker_client()
+        trade_client = getattr(broker, "trade_client", None)
+        if trade_client is None:
+            return None
+
+        def _fetch_orders():
+            try:
+                return trade_client.get_orders(account=account_id, limit=500)
+            except TypeError:
+                return trade_client.get_orders(account=account_id)
+
+        orders = await asyncio.to_thread(_fetch_orders)
+        if not orders:
+            return 0
+
+        today_utc = datetime.now(timezone.utc).date()
+        filled = 0
+        for o in orders:
+            status = _get_order_status(o)
+            if status != "FILLED":
+                continue
+            odt = _get_order_dt(o)
+            if odt is None:
+                continue
+            if odt.date() == today_utc:
+                filled += 1
+        return filled
+    except Exception:
+        return None
+
+
 @router.get("/status")
 async def get_autonomy_status(
     session: AsyncSession = Depends(get_session),
@@ -64,6 +155,7 @@ async def get_autonomy_status(
         )
     )
     daily_trades = exec_result.scalar() or 0
+    broker_filled_today = await _count_broker_filled_today(account_id)
 
     # 信号流水线各状态数量（今日）
     pipeline_result = await session.execute(
@@ -134,6 +226,8 @@ async def get_autonomy_status(
         "paused": not autonomous_engine.is_running,
         "circuit_breaker_triggered": failed_today >= 3,
         "daily_trades_today": daily_trades,
+        "daily_trades_today_autonomous": daily_trades,
+        "daily_trades_today_broker": broker_filled_today,
         "max_daily_trades": settings.MAX_DAILY_TRADES,
         "revoke_window_minutes": settings.REVOKE_WINDOW_MINUTES,
         "signal_pipeline": pipeline,
