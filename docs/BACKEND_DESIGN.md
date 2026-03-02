@@ -1,8 +1,10 @@
 # 后端架构设计文档
 
 > **AI量化交易闭环系统** - Backend Design  
-> 版本：V10.3 | 更新日期：2026-03-15
-> 
+> 版本：V10.3.3 | 更新日期：2026-03-02
+>
+> **V10.3.3 变更摘要**：**可观测性 2.0**——`ExecutionMicroscopeService`（IS 四分解：delay/impact/opportunity/timing cost，写入 `execution_quality_log`）+ `SignalIntelligenceService`（六维 IC 滚动序列 + Alpha 半衰期 + 拥挤度检测）+ `RiskObservabilityService`（五因子敞口 5 分钟快照写入 `portfolio_factor_exposure` + ES@97.5% + 相关性骤升告警）；**AI 中枢 2.0**——`MultiAgentOrchestrator`（五专职 Agent 协作框架，`AgentMessage` 写入 `agent_communication_log`，`RiskChallengerAgent` 强制反驳 BUY）+ `ConfidenceCalibrationService`（置信度 bucket→胜率映射，Brier/ECE，写入 `confidence_calibration_snapshot`，ECE>0.12 触发降评）+ `AdaptiveFactorWeightingService`（Kalman Filter 在线权重更新，写入 `signal_weight_history`）+ `DecisionPostMortemService`（平仓后反事实三路径剖析，写入 `decision_post_mortems`，自动反哺 InsightService）；**War Room**——`WarRoomService`（P&L Ticker 聚合 + Intelligence Feed urgency 排序 + 组合敞口 + SmartAlertService AI分级聚合）；3 个新 API 路由组（`/observability` 11 端点 / `/ai-hub` 9 端点 / `/war-room` 8 端点）；6 张新增 DB 表；每日 08:15 校准 Job + 每日收盘 Kalman 权重更新 Job。
+>
 > **V10.2-M2~M8 变更摘要**：EventCalendar 事件日历（盈利/FOMC/CPI/NFP）、EarningsFence 盈利围栏（50%仓位上限）、PositionStateMachine 动态仓位生命周期（加仓/减仓/移动止损）、SignalFusionEngine 六维加权融合信号（tech 25%/fundamental 20%/macro 15%/vol 15%/opt 15%/sent 10%）、TradeAttributionEngine 三层归因（Alpha源/执行质量/仓位管理）、InsightService + ABTestEngine AI洞察进化（deepseek-reasoner 周报 + scipy t-test A/B实验）、CopilotPartnerService 深度研究引擎（多步 deep-research）、4张新增 DB 表、17个新增 API 端点、2个新增定时 Job。
 >
 > **V10.2-M1 变更摘要**：EventBus 异步事件总线（Topics.REGIME_CHANGED/SIGNAL_GENERATED）、MarketRegime 数据模型、RegimeClassifier（五维评分+6类体制+3日确认）、StrategyWeightAllocator（订阅 REGIME_CHANGED 更新 TaskConfig）、RiskGate VaR 体制自适应倍数、审计日志 regime_at_decision 列、/api/v1/regime 4 个端点、每日 08:00 体制分类 Job。

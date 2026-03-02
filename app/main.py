@@ -65,6 +65,10 @@ from app.routers import insights        # V10.2-M6: AI 洞察
 
 from app.routers import lifecycle       # V10.3: 交易生命周期中心
 from app.routers import order_book      # V10.3: 智能订单簿
+# V10.3.3 新路由
+from app.routers import observability   # V10.3.3: 可观测性 2.0
+from app.routers import ai_hub          # V10.3.3: AI 中枢 2.0
+from app.routers import war_room        # V10.3.3: 战情室
 # V9 routers
 from app.routers import dashboard as v9_dashboard
 from app.routers import dashboard_v2  # V10: 全新Dashboard
@@ -196,6 +200,17 @@ async def lifespan(app: FastAPI):
             register_insight_jobs(scheduler)    # V10.2-M6: 每周 AI 洞察
         except ImportError:
             pass
+        # V10.3.3 任务注册
+        try:
+            from app.jobs.observability_jobs import register_observability_jobs
+            register_observability_jobs(scheduler)  # V10.3.3: 因子敞口快照 (5min)
+        except ImportError:
+            pass
+        try:
+            from app.jobs.ai_hub_jobs import register_ai_hub_jobs
+            register_ai_hub_jobs(scheduler)         # V10.3.3: 置信度校准 (08:15) + 权重更新 (EOD)
+        except ImportError:
+            pass
         start_scheduler()
         logger.info("Scheduler started with periodic tasks")
 
@@ -315,6 +330,10 @@ app.include_router(attribution.router, dependencies=[Depends(get_current_user)])
 app.include_router(insights.router, dependencies=[Depends(get_current_user)])             # M6: AI 洞察
 app.include_router(lifecycle.router, dependencies=[Depends(get_current_user)])            # V10.3: 交易生命周期中心
 app.include_router(order_book.router, dependencies=[Depends(get_current_user)])           # V10.3: 智能订单簿
+# V10.3.3 新路由注册
+app.include_router(observability.router, dependencies=[Depends(get_current_user)])        # V10.3.3: 可观测性 2.0
+app.include_router(ai_hub.router, dependencies=[Depends(get_current_user)])               # V10.3.3: AI 中枢 2.0
+app.include_router(war_room.router, dependencies=[Depends(get_current_user)])             # V10.3.3: 战情室
 
 
 @app.get("/health")

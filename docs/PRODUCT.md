@@ -1,7 +1,8 @@
 # 产品需求文档 (PRD)
 
 > **AI量化交易闭环系统** - 个人美港股智能交易平台  
-> 版本：V10.3.2 | 更新日期：2026-02-28  
+> 版本：V10.3.3 | 更新日期：2026-03-02  
+> 变更摘要（V10.3.3）：**P0 可观测性 2.0（Observability 2.0）**——Execution Microscope 执行显微镜（IS 成本四分解：迟延成本/市场冲击/机会成本/时机成本）+ Signal Intelligence Observatory 信号情报观察站（Alpha Decay Monitor 信号半衰期曲线 + Factor Correlation Matrix + Crowding Detector）+ Risk Observability Cluster（实时因子敞口条 + Tail Risk ES 仪表 + 相关性骤升告警）；**P1 AI中枢 2.0（AI Hub 2.0）**——Multi-Agent Orchestration 五智能体协作框架（市场分析 / 风险挑战 / 执行优化 / 深度研究 / Orchestrator 总协调）+ AI Confidence Calibration 置信度校准系统（Reliability Diagram + 自适应降评）+ Adaptive Factor Framework 自适应因子框架（Kalman Filter实时权重更新 + 因子拥挤度检测）+ Decision Post-Mortem Engine 决策事后剖析（反事实分析 + 洞察反哺 InsightService）；**P2 指挥室演进（War Room Dashboard）**——War Room Mode 全屏六格指挥视图 + real-time P&L Ticker + Intelligence Feed AI情报流 + Portfolio Exposure Center 组合敞口中枢 + Smart Alert Center 智能告警分级中枢
 > 变更摘要（V10.3.2）：**P0 执行幂等主键（Execution Intent）**——新增 `autonomous_execution_intent` 表与 `idempotency_key` 唯一约束，确保同一信号同一动作只受理一次；**P1 统一执行入口强化**——`AutonomousEngine.run_decision_cycle` 内统一进入 execution-intent 状态机（PENDING/EXECUTING/SUCCESS/FAILED/SKIPPED/REJECTED），并补齐 RiskGate/CircuitBreaker 拒绝分支的 intent 落库；**P2 语义一致性升级**——交易信号新增 `quantity_mode + quantity_value`（`PCT_EQUITY` / `ABS_SHARES`）并在自主决策链路标准化解析，且补齐策略引擎/快捷交易/交易计划/持仓监控等入口写入，`HOLD/qty<=0` 由 `EXECUTED` 语义纠偏为 `SKIPPED`。
 > 变更摘要（V10.3）：**交易全链路可观测性（Full Trade Observability）**——Trade Lifecycle Center（交易生命周期中枢）双维度可视化（计划生命周期状态机 + 持仓生命周期状态机）+ 实时甘特泳道图；**智能订单簿（Intelligent Order Book）**——统一交易列表（标的/方向/价位/17阶段进度/AI简述/实时P&L/风险标记），替代分散的 AI Advisor + Journal 孤岛视图；**AI 决策溯源面板（Decision Provenance）**——从原始信号到最终执行的完整因果链可视化；**系统态势感知栏（System Situational Awareness Bar）**——全局粘性状态栏，实时聚合体制/VaR水位/事件围栏/活跃阶段/执行队列等关键状态  
 > 变更摘要（V10.2-M2~M8）：**事件驱动风控**——EventCalendarService 盈利/FOMC/CPI/NFP 日历同步 + EarningsFenceService 盈利围栏（盈利前1天50%仓位上限）；**动态仓位生命周期**——PositionStateMachine 三引擎（ScaleIn/ScaleOut/TrailingStop）；**信号融合**——SignalFusionEngine 六维加权评分（tech 25%/fundamental 20%/macro 15%/vol 15%/opt 15%/sentiment 10%）+ 体制倍数；**交易归因**——TradeAttributionEngine 三层分析（Alpha源/执行质量/仓位管理）+ AttributionPage 可视化；**AI 进化**——InsightService 自动周报（deepseek-reasoner Sunday 22:00 ET）+ ABTestEngine（scipy t-test p<0.05）+ EvolutionPage；**Copilot Partner**——DeepResearchEngine 多步深度研究 + ProactiveIntelligenceService 主动推送  
@@ -10,7 +11,71 @@
 
 > 历史版本：V10.0（2026-02-24）变更摘要见下方历史记录节
 
-### V10.3.2 验收标准（新增）
+### V10.3.3 验收标准（新增）
+
+#### 一、可观测性 2.0 (Observability 2.0)
+
+**P0 — Execution Microscope（执行显微镜）**
+- [ ] `ExecutionMicroscopeService` 计算 Implementation Shortfall (IS) 四分解：`delay_cost + market_impact_cost + opportunity_cost + timing_cost`，每笔 intent 完成后写入 `execution_quality_log` 表。
+- [ ] `GET /api/v1/observability/execution-quality` 返回按时段/标的聚合的 Fill Rate、IS 分解、vs VWAP deviation 三组指标。
+- [ ] Dashboard 执行质量面板：Execution Alpha（到达价 vs 实际成交价）色码热力图，实时 P95 滑点数值。
+
+**P1 — Signal Intelligence Observatory（信号情报观察站）**
+- [ ] `SignalIntelligenceService` 维护每个信号维度的 Information Coefficient (IC) 滚动序列（近5/20/60日），并推断 `alpha_halflife_days`（alpha 半衰期）。
+- [ ] `GET /api/v1/observability/signal-intelligence` 返回六维 IC 曲线、半衰期、拥挤度评分（Crowding Score）。
+- [ ] 信号拥挤度超阈值（`SIGNAL_CROWDING_WARN=0.75`）时，写入感知栏告警并降低该维度融合权重。
+
+**P2 — Risk Observability Cluster（风险可观测集群）**
+- [ ] 实时计算五个主因子敞口（Market / HML / SMB / MOM / QMJ）并写入 `portfolio_factor_exposure` 快照，频率 5分钟/次。
+- [ ] `GET /api/v1/observability/risk-cluster` 返回因子敞口条、实时期望损失（ES@97.5%）、组合内相关性均值。
+- [ ] 组合内相关性均值骤升超 `CORRELATION_SPIKE_THRESHOLD=0.65` 时触发 `CORRELATION_SPIKE` 告警事件。
+
+#### 二、AI 中枢 2.0 (AI Hub 2.0)
+
+**P0 — Multi-Agent Orchestration（五智能体协作框架）**
+- [ ] `MultiAgentOrchestrator` 协调五个专职 Agent：`MarketAnalystAgent` / `RiskChallengerAgent` / `ExecutionOptimizerAgent` / `ResearchAgent` / `OrchestratorAgent`，每次决策周期通过结构化消息传递完成任务分工与冲突裁决。
+- [ ] Agent 间通信通过 `AgentMessage(agent_id, role, content, confidence, timestamp)` Pydantic schema 传递，全量写入 `agent_communication_log` 表以供溯源。
+- [ ] `RiskChallengerAgent` 必须对每个 BUY 信号输出反驳理由（`challenge_points: list[str]`），Orchestrator 最终综合裁决。
+
+**P1 — AI Confidence Calibration（置信度校准系统）**
+- [ ] `ConfidenceCalibrationService` 每日 08:15 运行：将过去 90 日 `[confidence_bucket → actual_win_rate]` 映射写入 `confidence_calibration_snapshot` 表，计算 Brier Score 和 ECE（Expected Calibration Error）。
+- [ ] 当整体 ECE > `ECE_WARN_THRESHOLD=0.12` 时，在 AI 决策输出上自动叠加 `calibration_adjustment_factor`（向 0.5 方向收敛），并将校准状态写入感知栏。
+- [ ] `GET /api/v1/ai-hub/calibration` 返回分体制 Reliability Diagram 数据点、Brier Score 趋势、当前校准因子。
+
+**P2 — Adaptive Factor Framework（自适应因子框架）**
+- [ ] `AdaptiveFactorWeightingService` 使用 Kalman Filter 对六维信号权重进行在线更新（观测值 = 最近5日 IC，过程噪声 Q=0.001，观测噪声 R=0.01），更新频率：每日收盘后。
+- [ ] 因子动量加成：近20日 IC 排名前两位的因子权重额外 +5%，排名末位因子权重 -5%，总权重归一化至100%。
+- [ ] 权重历史写入 `signal_weight_history`；`GET /api/v1/ai-hub/factor-weights` 返回当前权重与历史曲线。
+
+**P3 — Decision Post-Mortem Engine（决策事后剖析引擎）**
+- [ ] `DecisionPostMortemService`：每笔持仓完全平仓后（`position_status=CLOSED`），自动触发 `deepseek-reasoner` 生成结构化复盘，包含：`factual_summary / counterfactual_buy / counterfactual_hold / counterfactual_sell / key_lessons / improvement_suggestions`。
+- [ ] 事后剖析结果写入 `decision_post_mortems` 表，并自动提炼1条 LESSON 型洞察推入 `ai_insight_repository`（`source=POST_MORTEM`）。
+- [ ] `GET /api/v1/ai-hub/post-mortems/{trade_id}` 返回完整剖析报告；`GET /api/v1/ai-hub/post-mortems` 支持分页浏览。
+
+#### 三、指挥室演进 (War Room Dashboard)
+
+**P0 — War Room Mode（全屏六格指挥视图）**
+- [ ] 新增 `/war-room` 路由，全屏 6 面板网格布局可由用户自由配置（拖拽 + 尺寸调整），面板类型含：P&L Ticker / Intelligence Feed / Portfolio Heatmap / Risk Gauges / Signal Pulse / Execution Queue Monitor。
+- [ ] 顶部实时 P&L Ticker：每5秒推送 `{ total_pnl, pnl_change_1h, top_contributor, top_detractor, vs_spy_alpha }`，支持归因下钻。
+- [ ] 全局键盘快捷键：`W` 进入 War Room / `Esc` 退出 / ` `` ` 全局 Copilot / 数字键 1-6 聚焦对应面板。
+
+**P1 — Intelligence Feed（AI情报流）**
+- [ ] `IntelligenceFeedService` 聚合以下事件流并按 `urgency_score` 排序：Agent 决策摘要 / 告警事件 / 事件日历倒计时 / 因子异常 / Copilot 主动推送。
+- [ ] `GET /api/v1/war-room/intelligence-feed?limit=50` 返回带 urgency_score（0-100）、category（DECISION/RISK/EVENT/SIGNAL）、action_required 标记的事件列表。
+- [ ] WebSocket 推送：`ws://…/ws/intelligence-feed`，实时追加新事件，前端滚动展示。
+
+**P2 — Portfolio Exposure Center（组合敞口中枢）**
+- [ ] `GET /api/v1/war-room/exposure` 返回：行业敞口分布（sector → net_exposure_pct）+ 五因子当前偏差（factor → z_score）+ 地理敞口（US/HK/Global）+ 持仓间相关矩阵。
+- [ ] 行业热力图：每格显示板块净敞口%、当日 P&L、对 SPY 的 Beta，Color scale：红（空头）→ 绿（多头）。
+
+**P3 — Smart Alert Center（智能告警分级中枢）**
+- [ ] `SmartAlertService` 对原始告警进行 AI 分级（CRITICAL/HIGH/MEDIUM/LOW）+ 相似告警聚合（cosine similarity > 0.85 自动合并）+ 自动生成建议行动（`recommended_action_text`）。
+- [ ] Dashboard 告警中枢面板：按优先级排序列表 + 已读/忽略/采纳行动三种处理状态，采纳行动时触发 Copilot confirm 流程。
+- [ ] `GET /api/v1/war-room/alerts` 支持按 `severity / category / status` 筛选；`PATCH /api/v1/war-room/alerts/{alert_id}` 更新处理状态。
+
+---
+
+### V10.3.2 验收标准（归档）
 
 - [x] 同一 `account_id + signal_id + symbol + action` 重复触发时，仅首个 execution intent 入库成功，后续被幂等拒绝。
 - [x] 自主执行链路包含 execution intent 状态流转：`PENDING → EXECUTING → SUCCESS/FAILED`，以及 `SKIPPED/REJECTED` 分支。
@@ -176,7 +241,16 @@ ALLOWED_ASSET_TYPES=STOCK,ETF,OPTION   # 开启期权（需谨慎）
 - **AI 进化引擎** ★ V10.2-M6：InsightService 自动抽取洞察（每周日 deepseek-reasoner）、ABTestEngine 策略 A/B 实验（scipy t-test 显著性检验，p<0.05 自动结论）
 - **Copilot Partner** ★ V10.2-M7：DeepResearchEngine 多步深度研究报告（市场情绪→基本面→风险因素→综合评级）、ProactiveIntelligenceService 主动推送重大事件摘要
 
----
+#### E. 可观测性 2.0 层 ★ V10.3.3 新增
+- **Execution Microscope（执行显微镜）**：Implementation Shortfall 四分解（迟延成本/市场冲击成本/机会成本/时机成本），执行 Alpha 衡量（到达价 vs 实际成交价），按时段/标的热力图可视化
+- **Signal Intelligence Observatory（信号情报观察站）**：IC 滚动序列（近5/20/60日），Alpha 半衰期估算，六维因子相关矩阵，信号拥挤度评分（Crowding Score > 0.75 自动降权）
+- **Risk Observability Cluster（风险可观测集群）**：五因子实时敞口（Market/HML/SMB/MOM/QMJ），期望损失 ES@97.5% 实时仪表，组合内相关性骤升检测
+
+#### F. AI 中枢 2.0 层 ★ V10.3.3 新增
+- **Multi-Agent Orchestration（五智能体协作）**：MarketAnalystAgent / RiskChallengerAgent / ExecutionOptimizerAgent / ResearchAgent / OrchestratorAgent，结构化 `AgentMessage` 传递，全量通信日志溯源
+- **AI Confidence Calibration（置信度校准）**：置信区间 → 实际胜率映射校准曲线，Brier Score + ECE 量化校准误差，自适应降评因子（ECE > 0.12 时自动介入）
+- **Adaptive Factor Framework（自适应因子框架）**：Kalman Filter 在线权重更新，因子动量加成（近20日 IC 前两名 +5%），因子拥挤度检测
+- **Decision Post-Mortem Engine（事后剖析）**：每笔平仓后自动生成反事实分析（BUY/HOLD/SELL 三条路径对比），洞察自动反哺 InsightService（source=POST_MORTEM）
 
 ## 4. 核心功能详述
 
@@ -959,7 +1033,7 @@ AI_COMPLEX_MODEL=deepseek-reasoner    # 复杂分析
 - **TWAP/VWAP 自动路由**（AI 按订单大小自动选择）
 - **期权分析中心**（只读信息工具，不执行）：IV曲面、P/C Ratio、异常成交
 
-### Phase 10: 标的扩展 � V10.1 当前
+### Phase 10: 标的扩展 🚀 V10.1 当前
 - **ETF 正式支持**（`STOCK,ETF` 模式）：行业轮动 + CTA 商品策略真正运行
 - **港股 & 期权行情统一走 Tiger API**：港股（HK 市场）及期权行情数据优先通过老虎证券 API 获取，与美股股票保持一致的 DataHub 路由策略（Tiger → yfinance fallback），不引入 Futu API
 - **Tiger 真实下单（美股 + 港股 + 期权）**：TigerOrderExecutor 完整实现，支持 US / HK 双市场及期权下单，FULL 模式实盘可用
@@ -970,7 +1044,28 @@ AI_COMPLEX_MODEL=deepseek-reasoner    # 复杂分析
 - **Paper→Live 毕业自动化**：定时任务检测 + 自动升级
 - **Dashboard WebSocket**：实时增量推送，降低延迟至 5s
 
-### Phase 11: V11 计划 🔜
+### Phase 11: 全链路可观测性 ✅ V10.3 完成
+- **Trade Lifecycle Center**：17阶段 PipelineKanban + DualFSM 双状态机可视化
+- **Intelligent Order Book**：高密度全量订单列表，统一替代 AI Advisor + Journal 孤岛视图
+- **Decision Provenance Drawer**：信号 → 风控 → 执行完整因果链溯源
+- **Situational Awareness Bar**：全局粘性态势感知栏（体制/VaR/围栏/队列/模式）
+- **执行幂等主键**：`autonomous_execution_intent` + 状态机（V10.3.2）
+- **信号数量语义统一**：`quantity_mode + quantity_value` 标准化（V10.3.2）
+
+### Phase 12: AI可观测性 & 指挥室 🚀 V10.3.3 当前
+- **Execution Microscope**：Implementation Shortfall 四分解（迟延/市场冲击/机会/时机成本）
+- **Signal Intelligence Observatory**：Alpha Decay 信号半衰期 + 因子相关矩阵 + 拥挤度检测
+- **Risk Observability Cluster**：五因子实时敞口 + ES@97.5% 仪表 + 相关性骤升告警
+- **Multi-Agent Orchestration**：五专职 Agent 协作框架（市场/风险/执行/研究/总协调）
+- **AI Confidence Calibration**：Reliability Diagram + Brier/ECE + 自适应降评
+- **Adaptive Factor Framework**：Kalman Filter 在线权重更新 + 因子动量加成
+- **Decision Post-Mortem Engine**：事后剖析（反事实分析）+ 自动洞察反哺
+- **War Room Mode**：全屏六格指挥视图 + 实时 P&L Ticker + 键盘快捷键
+- **Intelligence Feed**：AI情报流（urgency 排序 + WebSocket 实时追加）
+- **Portfolio Exposure Center**：行业/因子/地理敞口 + 相关矩阵
+- **Smart Alert Center**：AI分级 + 告警聚合 + 建议行动
+
+### Phase 13: V11 计划 🔜
 - 期权执行开启（`STOCK,ETF,OPTION` 全模式）
 - 多账户支持
 - LLM Fine-tuning 个人交易风格
@@ -1061,6 +1156,66 @@ GET  /api/v1/regime/strategy-weights     — 当前体制下各策略权重
 POST /api/v1/regime/override             — 人工覆写当前体制（管理员）
 ```
 
+### 8.10 可观测性 2.0（V10.3.3 新增）
+```
+# Execution Microscope — 执行质量
+GET  /api/v1/observability/execution-quality           — 聚合执行质量：IS分解/Fill Rate/vs VWAP偏差
+GET  /api/v1/observability/execution-quality/{intent_id} — 单笔 IS 四分解明细
+GET  /api/v1/observability/fill-heatmap                — 按时段×标的的成交率热力图数据
+
+# Signal Intelligence Observatory — 信号情报
+GET  /api/v1/observability/signal-intelligence         — 六维信号 IC 曲线、半衰期、拥挤度评分
+GET  /api/v1/observability/signal-correlation          — 六维信号相关矩阵（滚动60日）
+GET  /api/v1/observability/crowding-alerts             — 当前触发拥挤告警的信号维度
+
+# Risk Observability Cluster — 风险可观测
+GET  /api/v1/observability/risk-cluster                — 五因子敞口 + ES@97.5% + 组合内相关性均值
+GET  /api/v1/observability/factor-exposure             — 因子敞口历史快照（分页）
+GET  /api/v1/observability/correlation-alerts          — 相关性骤升事件历史
+```
+
+### 8.11 AI 中枢 2.0（V10.3.3 新增）
+```
+# Multi-Agent Orchestration — 多智能体协作
+GET  /api/v1/ai-hub/agent-runs                         — Agent 协作运行记录（分页）
+GET  /api/v1/ai-hub/agent-runs/{run_id}                — 单次运行完整通信日志（AgentMessage 链）
+GET  /api/v1/ai-hub/agent-runs/{run_id}/challenge      — RiskChallengerAgent 反驳摘要
+
+# Confidence Calibration — 置信度校准
+GET  /api/v1/ai-hub/calibration                        — Reliability Diagram 数据 + Brier Score + ECE + 当前校准因子
+GET  /api/v1/ai-hub/calibration/history                — 校准指标历史趋势（按体制分组）
+
+# Adaptive Factor Framework — 自适应因子框架
+GET  /api/v1/ai-hub/factor-weights                     — 当前六维权重（含 Kalman 更新后的权重）
+GET  /api/v1/ai-hub/factor-weights/history             — 权重演变历史曲线
+GET  /api/v1/ai-hub/factor-momentum                    — 各因子近5/20/60日 IC 排名与动量加成状态
+
+# Decision Post-Mortem — 决策事后剖析
+GET  /api/v1/ai-hub/post-mortems                       — 所有已剖析交易列表（分页）
+GET  /api/v1/ai-hub/post-mortems/{trade_id}            — 单笔完整剖析报告（含反事实分析）
+GET  /api/v1/ai-hub/post-mortems/patterns              — 跨剖析归纳的重复模式摘要（AI 提炼）
+```
+
+### 8.12 指挥室（War Room）（V10.3.3 新增）
+```
+# Real-time P&L Ticker
+GET  /api/v1/war-room/pnl-ticker                       — 实时 P&L 快照（total/1h变化/贡献最大/Alpha vs SPY）
+WS   /ws/pnl-ticker                                    — WebSocket 实时 P&L 推送（5s/帧）
+
+# Intelligence Feed — AI情报流
+GET  /api/v1/war-room/intelligence-feed                — 按 urgency_score 排序的情报事件列表（limit/offset）
+WS   /ws/intelligence-feed                             — WebSocket 实时追加新事件
+POST /api/v1/war-room/intelligence-feed/{event_id}/ack — 标记情报已读
+
+# Portfolio Exposure Center — 组合敞口
+GET  /api/v1/war-room/exposure                         — 行业敞口 + 五因子 z-score + 地理敞口 + 相关矩阵
+
+# Smart Alert Center — 智能告警
+GET  /api/v1/war-room/alerts                           — 分级告警列表（severity/category/status 筛选）
+PATCH /api/v1/war-room/alerts/{alert_id}               — 更新告警处理状态（READ/IGNORED/ACTION_TAKEN）
+GET  /api/v1/war-room/alerts/stats                     — 告警统计（按等级/类别/处理状态）
+```
+
 ---
 
 ## 附录
@@ -1089,10 +1244,27 @@ POST /api/v1/regime/override             — 人工覆写当前体制（管理�
 | InsightService | 每周日 AI 自动从历史交易提炼洞察写入知识库的服务 |
 | ABTestEngine | A/B 实验管理（scipy t-test 显著性检验，p<0.05 自动结论）|
 | DeepResearchEngine | Copilot 多步深度研究引擎（4步推理 → 结构化报告）|
+| ImplementationShortfall | 执行成本四分解：迟延成本（Delay Cost）+ 市场冲击成本（Market Impact）+ 机会成本（Opportunity Cost）+ 时机成本（Timing Cost）|
+| AlphaDecay | 信号携带超额收益信息的衰减过程；Alpha 半衰期（Half-Life）越短，信号时效越紧迫 |
+| InformationCoefficient (IC) | 信号预测值与实际收益的 Spearman 相关系数，衡量信号预测质量 |
+| SignalCrowding | 当多数市场参与者持有相同方向信号时，拥挤度过高会降低 Alpha，系统通过 Crowding Score 预警 |
+| FactorExposure | 组合对 Fama-French 五因子（Market/HML/SMB/MOM/QMJ）的净偏度，用 z-score 衡量 |
+| ExpectedShortfall (ES) | ES@97.5%：最坏 2.5% 情景下的平均损失，比 VaR 更保守的尾部风险度量 |
+| MultiAgentOrchestration | 多个专职 AI Agent 协作框架：MarketAnalystAgent / RiskChallengerAgent / ExecutionOptimizerAgent / ResearchAgent / OrchestratorAgent |
+| RiskChallengerAgent | 专门扮演"反方"角色的 Agent，对每笔 BUY 信号生成结构化反驳理由，防止 AI 决策过度自信 |
+| ConfidenceCalibration | 将 AI 置信度（0-100）校准至对应实际胜率的过程；Reliability Diagram / Brier Score / ECE 是核型校准评估工具 |
+| BrierScore | 置信度预测准确性的综合评分（越低越好），= Σ(p_i - o_i)² / N |
+| ECE (Expected Calibration Error) | 期望校准误差，量化预测置信度与实际频率的平均偏差，> 0.12 触发自适应降评 |
+| KalmanFilter | 递归贝叶斯滤波器，用于实时估计动态系统状态（此处用于在线更新六维信号权重）|
+| FactorMomentum | 近期表现强的因子持续表现强的效应，系统通过 IC 排名动态加成 |
+| DecisionPostMortem | 每笔平仓交易后的结构化复盘，含反事实分析（三条路径对比）并自动生成 LESSON 型洞察 |
+| WarRoomMode | Dashboard 全屏指挥视图，六格可配置布局，支持键盘驱动，面向高强度监控场景 |
+| IntelligenceFeed | AI 情报流，聚合 Agent 决策摘要 / 告警 / 事件倒计时 / 因子异常，按 urgency_score 实时排序推送 |
+| SmartAlertCenter | 智能告警分级中枢，AI 自动分级（CRITICAL/HIGH/MEDIUM/LOW）+ 相似告警聚合 + 建议行动生成 |
 
 ### B. 参考文档
 
-- API.md - 接口文档（V10.2 已含 M2-M8 所有端点）
-- BACKEND_DESIGN.md - 后端架构设计（V10.2）
-- FRONTEND_DESIGN.md - 前端 UI/UX 设计（V10.2）
-- docs/RELEASE_NOTES_V10.2.md - V10.2 完整发布说明
+- API.md - 接口文档（V10.3 已含所有端点）
+- BACKEND_DESIGN.md - 后端架构设计（V10.3）
+- FRONTEND_DESIGN.md - 前端 UI/UX 设计（V10.3.3）
+- docs/RELEASE_NOTES_V10.3.md - V10.3 完整发布说明

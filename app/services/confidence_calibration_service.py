@@ -1,0 +1,239 @@
+"""confidence_calibration_service.py — V10.3.3 置信度校准服务
+
+每日 08:15 运行：
+1. 拉取过去 90 天所有信号的置信度 + 实际胜率
+2. 按 bucket (0.0-0.1, 0.1-0.2 … 0.9-1.0) 统计
+3. 计算 Brier Score 和 ECE
+4. ECE > 0.12 → 置信度降评（向 0.5 收缩）
+5. 写入 confidence_calibration_snapshot
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+from datetime import date, datetime, timedelta
+from typing import Any
+
+import numpy as np
+from sqlalchemy import select, desc
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.confidence_calibration_snapshot import ConfidenceCalibrationSnapshot
+
+logger = logging.getLogger(__name__)
+
+ECE_WARN_THRESHOLD: float = 0.12   # ECE 告警阈值
+LOOKBACK_DAYS: int = 90
+BUCKET_SIZE: float = 0.1
+
+
+def _brier_score(predicted: list[float], outcomes: list[float]) -> float:
+    """Brier Score = mean((p - o)^2)，越低越好。"""
+    if not predicted:
+        return 0.0
+    return float(np.mean([(p - o) ** 2 for p, o in zip(predicted, outcomes)]))
+
+
+def _ece(calibration_buckets: list[dict]) -> float:
+    """
+    ECE = sum_b (|bucket| / N) * |predicted_rate_b - actual_rate_b|
+    calibration_buckets: [{count, predicted_rate, actual_rate}]
+    """
+    total = sum(b["count"] for b in calibration_buckets)
+    if total == 0:
+        return 0.0
+    return float(sum(
+        (b["count"] / total) * abs(b["predicted_rate"] - b["actual_rate"])
+        for b in calibration_buckets
+        if b["count"] > 0
+    ))
+
+
+def _calibration_adjustment_factor(ece: float) -> float:
+    """线性从 ECE 映射到收缩因子（ECE→0.12 时收缩 0，ECE→0.3 时收缩 0.3）。"""
+    if ece <= ECE_WARN_THRESHOLD:
+        return 0.0
+    return min(0.5, (ece - ECE_WARN_THRESHOLD) / 0.3)
+
+
+def apply_calibration(confidence: float, adjustment_factor: float) -> float:
+    """向 0.5 收缩置信度：c_adj = c + α * (0.5 - c)"""
+    return confidence + adjustment_factor * (0.5 - confidence)
+
+
+class ConfidenceCalibrationService:
+    """置信度校准系统。"""
+
+    async def run_daily_calibration(
+        self, db: AsyncSession, user_id: str
+    ) -> ConfidenceCalibrationSnapshot:
+        """核心日度任务：计算 Brier/ECE 并写入快照。"""
+        today = date.today()
+
+        # 检查今日是否已运行
+        existing = await self._get_snapshot_by_date(db, user_id, today)
+        if existing:
+            logger.info("CalibrationService: snapshot already exists for %s, skipping", today)
+            return existing
+
+        # 拉取数据
+        predicted, outcomes = await self._fetch_signal_outcomes(db, user_id, LOOKBACK_DAYS)
+
+        if len(predicted) < 20:
+            logger.warning("CalibrationService: insufficient data (%d samples), skipping", len(predicted))
+            snap = ConfidenceCalibrationSnapshot(
+                user_id=user_id,
+                snapshot_date=today,
+                lookback_days=LOOKBACK_DAYS,
+                total_samples=len(predicted),
+                status_note="insufficient_data",
+            ) if hasattr(ConfidenceCalibrationSnapshot, "status_note") else ConfidenceCalibrationSnapshot(
+                user_id=user_id,
+                snapshot_date=today,
+                lookback_days=LOOKBACK_DAYS,
+                total_samples=len(predicted),
+            )
+            db.add(snap)
+            await db.flush()
+            return snap
+
+        # 计算 bucket 映射
+        buckets = _build_calibration_buckets(predicted, outcomes)
+        brier = _brier_score(predicted, outcomes)
+        ece_val = _ece(buckets)
+        overconf = float(np.mean([p - o for p, o in zip(predicted, outcomes)]))
+
+        needs_adj = ece_val > ECE_WARN_THRESHOLD
+        adj_factor = _calibration_adjustment_factor(ece_val) if needs_adj else None
+
+        snap = ConfidenceCalibrationSnapshot(
+            user_id=user_id,
+            snapshot_date=today,
+            brier_score=round(brier, 6),
+            ece=round(ece_val, 6),
+            overconfidence_bias=round(overconf, 6),
+            calibration_buckets=buckets,
+            lookback_days=LOOKBACK_DAYS,
+            total_samples=len(predicted),
+            valid_bucket_count=sum(1 for b in buckets if b["count"] >= 10),
+            needs_adjustment=needs_adj,
+            adjustment_factor=round(adj_factor, 4) if adj_factor else None,
+        )
+        db.add(snap)
+        await db.flush()
+        logger.info(
+            "CalibrationService: date=%s brier=%.4f ece=%.4f needs_adj=%s",
+            today, brier, ece_val, needs_adj,
+        )
+        return snap
+
+    async def get_latest_calibration(
+        self, db: AsyncSession, user_id: str
+    ) -> dict[str, Any] | None:
+        stmt = (
+            select(ConfidenceCalibrationSnapshot)
+            .where(ConfidenceCalibrationSnapshot.user_id == user_id)
+            .order_by(desc(ConfidenceCalibrationSnapshot.snapshot_date))
+            .limit(1)
+        )
+        snap = (await db.execute(stmt)).scalars().first()
+        return _snap_to_dict(snap) if snap else None
+
+    async def get_calibration_history(
+        self, db: AsyncSession, user_id: str, days: int = 30
+    ) -> list[dict[str, Any]]:
+        cutoff = date.today() - timedelta(days=days)
+        stmt = (
+            select(ConfidenceCalibrationSnapshot)
+            .where(
+                ConfidenceCalibrationSnapshot.user_id == user_id,
+                ConfidenceCalibrationSnapshot.snapshot_date >= cutoff,
+            )
+            .order_by(ConfidenceCalibrationSnapshot.snapshot_date)
+        )
+        rows = (await db.execute(stmt)).scalars().all()
+        return [_snap_to_dict(r) for r in rows]
+
+    async def _fetch_signal_outcomes(
+        self, db: AsyncSession, user_id: str, lookback_days: int
+    ) -> tuple[list[float], list[float]]:
+        """从 trading_signal 表拉取置信度 + 实际胜率对。"""
+        from app.models.trading_signal import TradingSignal
+        cutoff = datetime.utcnow() - timedelta(days=lookback_days)
+        try:
+            stmt = (
+                select(TradingSignal.confidence, TradingSignal.actual_return)
+                .where(
+                    TradingSignal.user_id == user_id,
+                    TradingSignal.created_at >= cutoff,
+                    TradingSignal.actual_return.isnot(None),
+                )
+            )
+            rows = (await db.execute(stmt)).all()
+            predicted = [float(r.confidence or 0.5) for r in rows]
+            outcomes = [1.0 if (r.actual_return or 0) > 0 else 0.0 for r in rows]
+            return predicted, outcomes
+        except Exception as e:
+            logger.warning("CalibrationService: fetch failed: %s", e)
+            return [], []
+
+    async def _get_snapshot_by_date(
+        self, db: AsyncSession, user_id: str, snapshot_date: date
+    ) -> ConfidenceCalibrationSnapshot | None:
+        stmt = (
+            select(ConfidenceCalibrationSnapshot)
+            .where(
+                ConfidenceCalibrationSnapshot.user_id == user_id,
+                ConfidenceCalibrationSnapshot.snapshot_date == snapshot_date,
+            )
+        )
+        return (await db.execute(stmt)).scalars().first()
+
+
+def _build_calibration_buckets(
+    predicted: list[float], outcomes: list[float]
+) -> list[dict[str, Any]]:
+    """按 0.1 步长分 bucket，统计预测率 vs 实际率。"""
+    bucket_map: dict[str, list[tuple[float, float]]] = {}
+    for p, o in zip(predicted, outcomes):
+        b_lo = math.floor(p * 10) / 10
+        b_hi = min(1.0, b_lo + BUCKET_SIZE)
+        key = f"{b_lo:.1f}-{b_hi:.1f}"
+        bucket_map.setdefault(key, []).append((p, o))
+
+    result = []
+    for b_lo_f in [i / 10 for i in range(10)]:
+        b_hi_f = min(1.0, b_lo_f + BUCKET_SIZE)
+        key = f"{b_lo_f:.1f}-{b_hi_f:.1f}"
+        pairs = bucket_map.get(key, [])
+        count = len(pairs)
+        pred_rate = float(np.mean([p for p, _ in pairs])) if pairs else (b_lo_f + BUCKET_SIZE / 2)
+        actual_rate = float(np.mean([o for _, o in pairs])) if pairs else 0.0
+        result.append({
+            "bucket": key,
+            "count": count,
+            "predicted_rate": round(pred_rate, 4),
+            "actual_rate": round(actual_rate, 4),
+            "gap": round(pred_rate - actual_rate, 4),
+        })
+    return result
+
+
+def _snap_to_dict(snap: ConfidenceCalibrationSnapshot) -> dict[str, Any]:
+    return {
+        "id": snap.id,
+        "snapshot_date": str(snap.snapshot_date),
+        "brier_score": snap.brier_score,
+        "ece": snap.ece,
+        "overconfidence_bias": snap.overconfidence_bias,
+        "calibration_buckets": snap.calibration_buckets,
+        "total_samples": snap.total_samples,
+        "valid_bucket_count": snap.valid_bucket_count,
+        "needs_adjustment": snap.needs_adjustment,
+        "adjustment_factor": snap.adjustment_factor,
+        "created_at": snap.created_at.isoformat() if snap.created_at else None,
+    }
+
+
+confidence_calibration_service = ConfidenceCalibrationService()
