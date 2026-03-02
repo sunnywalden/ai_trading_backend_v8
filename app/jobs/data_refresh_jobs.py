@@ -1,7 +1,7 @@
 """
 定时数据刷新任务
 
-7个定时任务:
+8个定时任务:
 1. 技术指标刷新 - 每1小时
 2. 基本面数据刷新 - 每天凌晨2点
 3. 宏观指标刷新 - 每天早上9点
@@ -9,6 +9,7 @@
 5. 宏观风险计算 - 每6小时
 6. 旧数据清理 - 每天凌晨3点
 7. 交易计划过期标记 - 每天00:30
+8. 全量美/港股标的同步 - 每周一次
 """
 
 import logging
@@ -24,6 +25,7 @@ from app.services.macro_risk_scoring_service import MacroRiskScoringService
 from app.services.geopolitical_events_service import GeopoliticalEventsService
 from app.models.trading_plan import TradingPlan
 from app.models.fsm_transition_log import FsmTransitionLog
+from app.services.market_universe_service import MarketUniverseService
 from app.broker.factory import make_option_broker_client
 from app.core.config import settings
 
@@ -325,6 +327,31 @@ async def plan_expiration_job():
         logger.error(f"Plan expiration job failed: {str(e)}", exc_info=True)
 
 
+async def refresh_market_universe_weekly_job():
+    """任务8: 每周全量同步美股/港股股票池到本地。
+
+    频率: 每周一次
+    功能: 从 Tiger API 拉取 US/HK 全量股票代码，落库并写入缓存
+    """
+    try:
+        logger.info("Starting weekly market-universe refresh job")
+        start_time = datetime.now()
+
+        async with _get_session() as session:
+            svc = MarketUniverseService(session)
+            result = await svc.refresh_all_markets()
+
+        elapsed = (datetime.now() - start_time).total_seconds()
+        logger.info(
+            "Weekly market-universe refresh completed: US=%s, HK=%s, took %.2fs",
+            result.get("US"),
+            result.get("HK"),
+            elapsed,
+        )
+    except Exception as e:
+        logger.error(f"Weekly market-universe refresh job failed: {str(e)}", exc_info=True)
+
+
 def register_all_jobs(scheduler):
     """注册所有定时任务到调度器
     
@@ -401,6 +428,17 @@ def register_all_jobs(scheduler):
         name='交易计划过期标记(00:30)',
         hour=0,
         minute=30
+    )
+
+    # 任务8: 全量美/港股标的同步 - 每周日 06:00
+    add_job(
+        func=refresh_market_universe_weekly_job,
+        trigger='cron',
+        id='refresh_market_universe_weekly',
+        name='每周同步美港股全量标的',
+        day_of_week='sun',
+        hour=6,
+        minute=0,
     )
     
     logger.info("All scheduled jobs registered successfully")
