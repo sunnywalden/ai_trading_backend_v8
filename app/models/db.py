@@ -49,6 +49,21 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
             await session.close()
 
 
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def get_session_ctx():
+    """独立 session 上下文管理器，供后台任务使用（不依赖 FastAPI DI）。"""
+    async with SessionLocal() as session:
+        try:
+            yield session
+        except Exception:
+            await session.rollback()
+            raise
+        finally:
+            await session.close()
+
+
 async def ensure_mysql_indexes() -> None:
     """启动时检查/创建MySQL索引（仅MySQL生效）。"""
     if settings.DB_TYPE != "mysql":

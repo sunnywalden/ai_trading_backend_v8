@@ -29,6 +29,40 @@ CROWDING_WEIGHT_REDUCE: float = 0.15  # 触发后权重降低幅度
 DIMENSIONS = ["technical", "fundamental", "ml", "sentiment", "macro", "event"]
 
 
+def _sanitize_json_compatible(value: Any) -> Any:
+    """递归清洗 JSON 不兼容值（NaN/Inf/numpy 标量）。"""
+    if value is None:
+        return None
+
+    if isinstance(value, float):
+        return None if (math.isnan(value) or math.isinf(value)) else value
+
+    module_name = type(value).__module__ or ""
+    if module_name == "numpy" or module_name.startswith("numpy."):
+        try:
+            py_value = value.item() if hasattr(value, "item") else value
+            if isinstance(py_value, float) and (math.isnan(py_value) or math.isinf(py_value)):
+                return None
+            return py_value
+        except Exception:
+            try:
+                f = float(value)
+                return None if (math.isnan(f) or math.isinf(f)) else f
+            except Exception:
+                return None
+
+    if isinstance(value, dict):
+        return {k: _sanitize_json_compatible(v) for k, v in value.items()}
+
+    if isinstance(value, list):
+        return [_sanitize_json_compatible(v) for v in value]
+
+    if isinstance(value, tuple):
+        return tuple(_sanitize_json_compatible(v) for v in value)
+
+    return value
+
+
 def _spearman_corr(predicted: list[float], realized: list[float]) -> float:
     """简易 Spearman 相关。requires len >= 3."""
     if len(predicted) < 3:
@@ -166,12 +200,13 @@ class SignalIntelligenceService:
             results.append(dim_data)
 
         crowding_alerts = [r for r in results if r["is_crowded"]]
-        return {
+        payload = {
             "dimensions": results,
             "crowding_alerts": crowding_alerts,
             "crowding_alert_count": len(crowding_alerts),
             "updated_at": datetime.utcnow().isoformat(),
         }
+        return _sanitize_json_compatible(payload)
 
     async def get_crowding_alerts(
         self, db: AsyncSession, user_id: str
@@ -194,7 +229,7 @@ class SignalIntelligenceService:
         from app.models.trading_signal import TradingSignal
         cutoff = datetime.utcnow() - timedelta(days=days)
         stmt = (
-            select(TradingSignal.symbol, TradingSignal.score, TradingSignal.created_at)
+            select(TradingSignal.symbol, TradingSignal.signal_strength, TradingSignal.created_at)
             .where(
                 TradingSignal.user_id == user_id,
                 TradingSignal.created_at >= cutoff,
@@ -209,7 +244,7 @@ class SignalIntelligenceService:
         # 按标的分组
         series: dict[str, list[float]] = {}
         for r in rows:
-            series.setdefault(r.symbol, []).append(float(r.score or 0))
+            series.setdefault(r.symbol, []).append(float(r.signal_strength or 0))
 
         # 只取样本数≥5的标的，最多10个
         filtered = {k: v for k, v in series.items() if len(v) >= 5}
@@ -224,15 +259,38 @@ class SignalIntelligenceService:
         min_len = min(len(filtered[s]) for s in top_symbols)
         arr = np.array([filtered[s][-min_len:] for s in top_symbols], dtype=float)
         try:
-            corr_matrix = np.corrcoef(arr).tolist()
-        except Exception:
-            corr_matrix = []
+            # 某些序列可能标准差为 0，np.corrcoef 会产生 runtime warning（invalid value encountered in divide）
+            # 这里先做零方差识别，并在数值层面显式处理，避免噪音日志。
+            stddev = np.std(arr, axis=1)
+            valid_mask = stddev > 1e-12
 
-        return {
+            with np.errstate(invalid="ignore", divide="ignore"):
+                corr_matrix = np.corrcoef(arr)
+
+            # 对零方差序列对应的行/列统一置为 nan，随后由 _safe 清洗为 None
+            for i, is_valid in enumerate(valid_mask):
+                if not bool(is_valid):
+                    corr_matrix[i, :] = np.nan
+                    corr_matrix[:, i] = np.nan
+
+            # 有效序列的对角线应为 1；无效序列保持 nan
+            for i, is_valid in enumerate(valid_mask):
+                corr_matrix[i, i] = 1.0 if bool(is_valid) else np.nan
+
+            # 将 inf / -inf / nan 替换为 None（JSON 安全）
+            def _safe(v: float):
+                import math
+                return None if (math.isnan(v) or math.isinf(v)) else round(float(v), 4)
+            corr_list = [[_safe(v) for v in row] for row in corr_matrix]
+        except Exception:
+            corr_list = []
+
+        payload = {
             "symbols": top_symbols,
-            "matrix": [[round(v, 4) for v in row] for row in corr_matrix],
+            "matrix": corr_list,
             "updated_at": datetime.utcnow().isoformat(),
         }
+        return _sanitize_json_compatible(payload)
 
 
 signal_intelligence_service = SignalIntelligenceService()

@@ -182,7 +182,7 @@ class SituationalAwarenessService:
                     plan_id=p.id,
                     symbol=p.symbol,
                     algo_type=tags.get("algo_type", ep.get("algo_type", "TWAP")),
-                    fill_pct=ep.get("fill_pct", 0.0),
+                    fill_pct=_safe_float(ep.get("fill_pct", 0.0)),
                 ))
 
             return ActiveExecutionsBlock(count=len(entries), entries=entries)
