@@ -49,6 +49,9 @@ class CopilotService:
 
         prompt = self._build_system_prompt(context)
         messages = [{"role": "system", "content": prompt}]
+        fact_prompt = self._build_portfolio_fact_prompt(message, context)
+        if fact_prompt:
+            messages.append({"role": "system", "content": fact_prompt})
         # 加入最近 10 条历史
         for msg in history[-10:]:
             messages.append({"role": msg["role"], "content": msg["content"]})
@@ -239,12 +242,45 @@ class CopilotService:
                 return {"type": intent_type, "params": {"matched": groups}}
         return None
 
+    def _is_portfolio_assessment_query(self, message: str) -> bool:
+        text = (message or "").strip()
+        if not text:
+            return False
+        keywords = [
+            "持仓", "仓位", "敞口", "因子", "beta", "风险", "组合", "P&L", "盈亏", "暴露",
+            "portfolio", "exposure", "position", "positions", "holding", "holdings", "pnl",
+        ]
+        return any(k.lower() in text.lower() for k in keywords)
+
+    def _build_portfolio_fact_prompt(self, message: str, context: dict[str, Any]) -> Optional[str]:
+        """仅在持仓评估问题时注入结构化事实，减少模型幻觉。"""
+        if not self._is_portfolio_assessment_query(message):
+            return None
+
+        positions_count = int(context.get("positions_count") or 0)
+        positions_preview = context.get("positions_preview") or []
+        factor_exposure = context.get("factor_exposure") or {}
+        pnl_ticker = context.get("pnl_ticker") or {}
+
+        return (
+            "【持仓评估事实快照（必须优先引用）】\n"
+            f"- positions_count: {positions_count}\n"
+            f"- positions_preview: {json.dumps(positions_preview, ensure_ascii=False)}\n"
+            f"- factor_exposure: {json.dumps(factor_exposure, ensure_ascii=False)}\n"
+            f"- pnl_ticker: {json.dumps(pnl_ticker, ensure_ascii=False)}\n"
+            "【回答要求】\n"
+            "1) 先给一句结论，再给 2-4 条基于以上字段的证据。\n"
+            "2) 若 positions_count=0 或 factor_exposure 为空，只能说“当前数据源暂无快照/数据不足”，不得断言账户无持仓。\n"
+            "3) 不得编造未提供的仓位数量、敞口数值或收益率。"
+        )
+
     async def _build_context(self, account_id: str) -> dict:
         """构建增强版账户上下文摘要，为 AI 提供真实决策依据"""
         from app.core.runtime_config import get_autonomy_level as _get_level
         from app.models.db import SessionLocal
         from sqlalchemy import select, desc
         from app.services.regime_classifier import regime_classifier
+        from app.services.war_room_service import war_room_service
         from app.models.trading_signal import TradingSignal, SignalStatus
 
         context = {
@@ -253,6 +289,14 @@ class CopilotService:
             "autonomy_level": await _get_level(),
             "market_regime": "UNKNOWN",
             "top_signals": [],
+            "positions_count": 0,
+            "positions_preview": [],
+            "factor_exposure": None,
+            "pnl_ticker": None,
+            "data_quality": {
+                "positions_source": "unknown",
+                "factor_source": "unknown",
+            },
         }
 
         async with SessionLocal() as db:
@@ -281,6 +325,34 @@ class CopilotService:
                     "reason": s.research_summary[:50] if s.research_summary else "六维指标共振"
                 })
 
+            # 3. 持仓与五因子敞口（与战情室同源，避免 Copilot 与页面口径不一致）
+            try:
+                exposure = await war_room_service.get_portfolio_exposure(db, account_id)
+                positions = exposure.get("positions") or []
+                latest_factor = exposure.get("latest_snapshot")
+
+                context["positions_count"] = len(positions)
+                context["positions_preview"] = [
+                    {
+                        "symbol": p.get("symbol"),
+                        "direction": p.get("direction"),
+                        "quantity": p.get("quantity"),
+                        "unrealized_pnl_pct": p.get("unrealized_pnl_pct"),
+                    }
+                    for p in positions[:8]
+                ]
+                context["factor_exposure"] = latest_factor
+                context["data_quality"]["positions_source"] = "war_room"
+                context["data_quality"]["factor_source"] = "risk_observability"
+            except Exception as exc:
+                logger.debug("Copilot context exposure load failed for %s: %s", account_id, exc)
+
+            # 4. PnL 摘要（给模型额外校验信号）
+            try:
+                context["pnl_ticker"] = await war_room_service.get_pnl_ticker(db, account_id)
+            except Exception as exc:
+                logger.debug("Copilot context pnl load failed for %s: %s", account_id, exc)
+
         return context
 
     def _build_system_prompt(self, context: dict) -> str:
@@ -290,7 +362,9 @@ class CopilotService:
 1. 标的范围仅限【美股】和【港股】，禁止推荐或分析任何 A 股（如 .SZ 或 .SH 结尾的标的）。
 2. 对查询类问题直接回答。
 3. 对操作类请求（下单、止损等），先确认意图再标注"需要确认"。
-4. 所有回复使用中文，简洁、专业、客观。"""
+4. 所有回复使用中文，简洁、专业、客观。
+5. 当 positions_count 为 0 或 factor_exposure 为空时，只能表述为“当前数据源未检索到/暂无快照”，禁止下绝对结论“账户没有持仓”。
+6. 回答持仓评估时，优先引用 positions_preview、pnl_ticker、factor_exposure 的真实字段；字段为空时必须明确“数据不足”。"""
 
     async def _get_history(self, account_id: str, session_id: str, db: Optional[AsyncSession]) -> list:
         if not db:
