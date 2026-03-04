@@ -17,39 +17,25 @@ async def take_factor_exposure_snapshot() -> None:
     try:
         async with SessionLocal() as db:
             async with db.begin():
-                # 需要持仓数据。这里通过 TradingPlan 读取活跃仓位
+                # 需要持仓数据。通过 TradingPlan 读取活跃仓位账户并按用户补快照
                 from app.models.trading_plan import TradingPlan
-                from sqlalchemy import select
+                from sqlalchemy import select, func
                 stmt = select(TradingPlan).where(
-                    TradingPlan.status.in_(["active", "partial"])
+                    func.upper(TradingPlan.plan_status).in_(["ACTIVE", "PARTIAL"])
                 )
                 rows = (await db.execute(stmt)).scalars().all()
 
                 if not rows:
                     return
 
-                # 按用户分组
-                users: dict[str, list] = {}
+                # 按账户（等价 user_id）分组
+                users: set[str] = set()
                 for r in rows:
-                    users.setdefault(r.user_id, []).append(r)
+                    if r.account_id:
+                        users.add(str(r.account_id))
 
-                for user_id, positions in users.items():
-                    symbol_weights = {
-                        p.symbol: float(getattr(p, "market_value", 0) or 0)
-                        for p in positions
-                    }
-                    # 默认 Beta 估算（实际可从 market_data_provider 获取）
-                    factor_betas = {
-                        p.symbol: {"market": 1.0, "hml": 0.0, "smb": 0.0, "mom": 0.0, "qmj": 0.0}
-                        for p in positions
-                    }
-                    await risk_observability_service.take_snapshot(
-                        db,
-                        user_id=user_id,
-                        symbol_weights=symbol_weights,
-                        factor_betas=factor_betas,
-                        returns_history=[],  # 简化：生产中读取历史收益序列
-                    )
+                for user_id in users:
+                    await risk_observability_service.seed_snapshot_from_live_data(db, user_id)
     except Exception as e:
         logger.error("take_factor_exposure_snapshot failed: %s", e)
 
