@@ -3,8 +3,8 @@
 # 产品需求文档 (PRD)
 
 > **AI量化交易闭环系统** - 个人美港股智能交易平台  
-> 版本：V10.4（规划中）| 更新日期：2026-03-04  
-> 变更摘要（V10.4）：**巩固、治理与完整性**——M1 数据闭环治理（actual_return 自动回填 Job + IC 真实化 + 因子快照自动化 + 2026 事件日历 + LLM 降级）；M2 UI 大清洗（47→≤38 页面 + 导航 6→4 组 + 执行三合一 + 双仪表盘合并）；M3 Copilot 全局浮窗（Cmd+K 任意页面唤起 + 页面上下文注入 + 实时系统状态 System Prompt）；M4 自主循环稳定增强（AutonomyHealthMonitor + Job Watchdog + Multi-Agent 真实并发 + 三新熔断 + WebSocket 重连）；M5 移动触达（Dashboard/Alert/Copilot 竖屏可用）；M6 文档重构（PRODUCT.md 拆分为模块化多文件，主文件 ≤300 行）  
+> 版本：V10.4.1（已发布）| 更新日期：2026-03-04  
+> 变更摘要（V10.4.1）：**巩固、治理与完整性**——M1 数据闭环治理（actual_return 自动回填 Job + IC 真实化 + 因子快照自动化 + 2026 事件日历 + LLM 降级）；M2 UI 大清洗（47→≤38 页面 + 导航 6→4 组 + 执行三合一 + 双仪表盘合并）；M3 Copilot 全局浮窗（Cmd+K 任意页面唤起 + 页面上下文注入 + 实时系统状态 System Prompt）；M4 自主循环稳定增强（AutonomyHealthMonitor + Job Watchdog + Multi-Agent 真实并发 + 三新熔断 + WebSocket 重连）；M5 移动触达（Dashboard/Alert/Copilot 竖屏可用）；M6 文档重构（PRODUCT.md 拆分为模块化多文件，主文件 ≤300 行）  
 > 变更摘要（V10.3.4）：**稳定性与冷启动治理（Stability & Cold-Start Governance）**——全服务冷启动双保险（Dashboard / 代理运行状态 / 执行质量记录 / 置信度校准补全零数据占位逻辑，消除前端 404 抖动）；**市场全量股票池（Market Universe Pool）**——新增 `market_universe` 表，支持美股/港股全量标的同步与缓存；**AI 决策深化**——自主引擎支持 REDUCE/EXIT 信号规则执行，`HOLD/qty≤0` 语义纠偏为 SKIPPED（no-op 原因落库），信号管道新增 `quantity_mode/quantity_value` 标准化；**决策事后剖析升级**——从手工录入升级为交易选择驱动；**多账户兼容**——告警/归因/仪表板接口统一账户 ID 解析；**事件去重**——事件表唯一索引 + 重复写入保护  
 > 变更摘要（V10.3.3）：**P0 可观测性 2.0（Observability 2.0）**——Execution Microscope 执行显微镜（IS 成本四分解：迟延成本/市场冲击/机会成本/时机成本）+ Signal Intelligence Observatory 信号情报观察站（Alpha Decay Monitor 信号半衰期曲线 + Factor Correlation Matrix + Crowding Detector）+ Risk Observability Cluster（实时因子敞口条 + Tail Risk ES 仪表 + 相关性骤升告警）；**P1 AI中枢 2.0（AI Hub 2.0）**——Multi-Agent Orchestration 五智能体协作框架（市场分析 / 风险挑战 / 执行优化 / 深度研究 / Orchestrator 总协调）+ AI Confidence Calibration 置信度校准系统（Reliability Diagram + 自适应降评）+ Adaptive Factor Framework 自适应因子框架（Kalman Filter实时权重更新 + 因子拥挤度检测）+ Decision Post-Mortem Engine 决策事后剖析（反事实分析 + 洞察反哺 InsightService）；**P2 指挥室演进（War Room Dashboard）**——War Room Mode 全屏六格指挥视图 + real-time P&L Ticker + Intelligence Feed AI情报流 + Portfolio Exposure Center 组合敞口中枢 + Smart Alert Center 智能告警分级中枢
 > 变更摘要（V10.3.2）：**P0 执行幂等主键（Execution Intent）**——新增 `autonomous_execution_intent` 表与 `idempotency_key` 唯一约束，确保同一信号同一动作只受理一次；**P1 统一执行入口强化**——`AutonomousEngine.run_decision_cycle` 内统一进入 execution-intent 状态机（PENDING/EXECUTING/SUCCESS/FAILED/SKIPPED/REJECTED），并补齐 RiskGate/CircuitBreaker 拒绝分支的 intent 落库；**P2 语义一致性升级**——交易信号新增 `quantity_mode + quantity_value`（`PCT_EQUITY` / `ABS_SHARES`）并在自主决策链路标准化解析，且补齐策略引擎/快捷交易/交易计划/持仓监控等入口写入，`HOLD/qty<=0` 由 `EXECUTED` 语义纠偏为 `SKIPPED`。
@@ -14,11 +14,11 @@
 > 变更摘要（V10.1）：**兑现承诺 + 打磨质量 + 扩展边界**——Tiger 真实下单接入（覆盖美股/港股/期权）、FULL 模式完整自主交易闭环、Copilot 操作指令执行落地、Dashboard 所有 TODO 指标真实化、AI 组合级决策升级（结构化 JSON 输出 + 批量组合决策）、ETF 标的池正式支持、港股支持（Tiger API 统一，无需 Futu）、Paper→Live 毕业自动化、Dashboard WebSocket 实时推送；**本版本明确不含 Telegram 通知，FULL 模式具备完全自主交易能力**
 
 > 历史版本：V10.0（2026-02-24）变更摘要见下方历史记录节  
-> 详细规划：[V10.4 Release Plan](../archived/v10/v10.4/RELEASE_PLAN_V10.4.md)
+> 详细规划：[V10.4.1 Release Plan](../archived/v10/v10.4/RELEASE_PLAN_V10.4.md)
 
 ---
 
-### V10.4 验收标准（规划中）
+### V10.4.1 验收标准（已发布）
 
 > 完整规划详见 [docs/archived/v10/v10.4/RELEASE_PLAN_V10.4.md](../archived/v10/v10.4/RELEASE_PLAN_V10.4.md)
 

@@ -1,7 +1,7 @@
 # 后端架构设计文档
 
 > **AI量化交易闭环系统** - Backend Design  
-> 版本：V10.4 | 更新日期：2026-03-04
+> 版本：V10.4.1 | 更新日期：2026-03-04
 >
 > **V10.4 变更摘要（规划→实现）**：**M1 数据闭环治理**——`ReturnBackfillJob`（每日 21:30 ET，自动回填 `TradingSignal.actual_return`，回填率 ≥95%，触发 IC 增量重算）+ IC `data_quality` 字段全覆盖（`REAL`/`INSUFFICIENT`/`STALE`，移除 expected_return 代理收益）+ 因子敞口零快照（无持仓时写入 positions_count=0 快照，不跳过）+ `LLMCallGuard`（超时30s+指数退避重试+降级返回 degraded=true）+ `LlmCallLog` 表（model/latency/tokens/status 全量记录）；**M3 Copilot 上下文服务**——`GET /api/v1/copilot/context` 返回当前系统快照供浮层注入；**M4 自主循环稳定**——`AutonomyHealthMonitorService`（10分钟8项自检）+ `JobWatchdog`（Job 超时2x触发补跑）+ `register_m4_jobs()` 导入 main.py。
 >
@@ -1624,7 +1624,7 @@ SituationalAwarenessService
 
 ---
 
-## §11. V10.4 — 数据闭环治理 & 系统稳定增强（M1 / M3 / M4）
+## §11. V10.4.1 — 数据闭环治理 & 系统稳定增强（M1 / M3 / M4）
 
 ### 11.1 M1：数据闭环治理（Data Loop Governance）
 
@@ -1770,13 +1770,13 @@ WATCHED_JOBS = {
 # tolerance: 允许超时 interval * tolerance 倍，超出则重新触发补跑
 ```
 
-### 11.4 新增 DB 表汇总（V10.4）
+### 11.4 新增 DB 表汇总（V10.4.1）
 
 | 表名 | 用途 | 迁移脚本 |
 |------|------|---------|
-| `llm_call_log` | LLM 调用全量记录 | `v10.4.0_add_llm_call_log.py` |
+| `llm_call_log` | LLM 调用全量记录 | `upgrade_to_v10_4_1.py` |
 
-### 11.5 新增 API 端点汇总（V10.4）
+### 11.5 新增 API 端点汇总（V10.4.1）
 
 | 端点 | 方法 | 说明 |
 |------|------|------|

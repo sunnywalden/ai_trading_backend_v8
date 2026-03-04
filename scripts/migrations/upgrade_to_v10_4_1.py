@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""upgrade_to_v10_4_0.py — V10.4.0 数据库迁移脚本
+"""upgrade_to_v10_4_1.py — V10.4.1 数据库迁移脚本
 
-差异对比（v10.3.4 → v10.4.0）：
+差异对比（v10.3.4 → v10.4.1）：
 
-  v10.4.0（本脚本）
+  v10.4.1（本脚本）
   ─────────────────────────────────────────────────────
   1. llm_call_log   LLM 调用全量日志（M1 T1.5）
 
 用法：
   cd /path/to/ai_trading_backend_v8
-  python scripts/migrations/upgrade_to_v10_4_0.py
-  python scripts/migrations/upgrade_to_v10_4_0.py --check
-  python scripts/migrations/upgrade_to_v10_4_0.py --rollback
+  python scripts/migrations/upgrade_to_v10_4_1.py
+  python scripts/migrations/upgrade_to_v10_4_1.py --check
+  python scripts/migrations/upgrade_to_v10_4_1.py --rollback
 """
 
 from __future__ import annotations
@@ -124,7 +124,7 @@ async def upgrade(engine, is_mysql: bool) -> None:
     if not prereq:
         print("⚠️  未检测到 v10.3.4 的表（market_universe_symbols）。")
         print("   请先执行：python scripts/migrations/upgrade_to_v10_3_4.py")
-        ans = input("   是否仍然继续执行 v10.4.0？(yes/N): ").strip().lower()
+        ans = input("   是否仍然继续执行 v10.4.1？(yes/N): ").strip().lower()
         if ans != "yes":
             print("已取消。")
             return
@@ -148,10 +148,10 @@ async def upgrade(engine, is_mysql: bool) -> None:
                 await conn.execute(text(idx_sql.strip()))
             print("  ✅ llm_call_log（SQLite）")
 
-    print("\n✅ V10.4.0 迁移完成！")
+    print("\n✅ V10.4.1 迁移完成！")
     print("\n建议执行（记录版本）：")
-    print("  python scripts/migrations/version_manager.py --record v10.4.0 \\")
-    print('      --description "V10.4.0 新增 LLM 调用日志表" --script "upgrade_to_v10_4_0.py"')
+    print("  python scripts/migrations/version_manager.py --record v10.4.1 \\")
+    print('      --description "V10.4.1 新增 LLM 调用日志表" --script "upgrade_to_v10_4_1.py"')
 
 
 async def rollback(engine) -> None:
@@ -166,7 +166,7 @@ async def rollback(engine) -> None:
 
 
 async def main() -> None:
-    parser = argparse.ArgumentParser(description="V10.4.0 数据库迁移")
+    parser = argparse.ArgumentParser(description="V10.4.1 数据库迁移")
     parser.add_argument("--check",    action="store_true", help="仅检查表状态")
     parser.add_argument("--rollback", action="store_true", help="回滚（删除表）")
     args = parser.parse_args()
@@ -176,7 +176,7 @@ async def main() -> None:
     is_mysql = "mysql" in db_url
 
     print("=" * 60)
-    print("V10.4.0 数据库迁移")
+    print("V10.4.1 数据库迁移")
     print("=" * 60)
     print(f"📦 数据库类型: {'MySQL' if is_mysql else 'SQLite'}")
     print(f"🔗 连接: {db_url[:60]}...\n")
