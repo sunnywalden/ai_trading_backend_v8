@@ -4,7 +4,7 @@ import asyncio
 import logging
 import random
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -79,7 +79,7 @@ def _resolve_market_by_runtime(ts_utc: datetime) -> str:
     return "US"
 
 
-async def _select_universe_symbols(session: AsyncSession, run: StrategyRun) -> tuple[str, List[str]]:
+async def _select_universe_symbols(session: AsyncSession, run: StrategyRun) -> tuple[str, List[str], Dict[str, Any]]:
     """解析并获取本次 run 的 symbol universe。"""
     raw_key = (run.target_universe or AUTO_UNIVERSE_KEY).strip().upper()
 
@@ -89,7 +89,12 @@ async def _select_universe_symbols(session: AsyncSession, run: StrategyRun) -> t
 
     # 兼容历史固定股票池
     if raw_key in UNIVERSE_MAPPING:
-        return raw_key, UNIVERSE_MAPPING.get(raw_key, DEFAULT_SYMBOLS)
+        return raw_key, UNIVERSE_MAPPING.get(raw_key, DEFAULT_SYMBOLS), {
+            "selection_mode": "STATIC_MAPPING",
+            "resolved_market": "US" if raw_key.startswith("US") else ("HK" if raw_key.startswith("HK") else "MIXED"),
+            "fallback_to_default_symbols": False,
+            "fallback_reason": None,
+        }
 
     svc = MarketUniverseService(session)
 
@@ -114,22 +119,44 @@ async def _select_universe_symbols(session: AsyncSession, run: StrategyRun) -> t
     # 显式全量池
     if raw_key in ("US_ALL", "US_ALL_LOCAL"):
         symbols = await _get_local_market_symbols("US")
-        return "US_ALL_LOCAL", symbols or DEFAULT_SYMBOLS
+        return "US_ALL_LOCAL", symbols or DEFAULT_SYMBOLS, {
+            "selection_mode": "EXPLICIT_US_ALL",
+            "resolved_market": "US",
+            "fallback_to_default_symbols": not bool(symbols),
+            "fallback_reason": None if symbols else "US_LOCAL_UNIVERSE_EMPTY",
+        }
     if raw_key in ("HK_ALL", "HK_ALL_LOCAL"):
         symbols = await _get_local_market_symbols("HK")
-        return "HK_ALL_LOCAL", symbols or DEFAULT_SYMBOLS
+        return "HK_ALL_LOCAL", symbols or DEFAULT_SYMBOLS, {
+            "selection_mode": "EXPLICIT_HK_ALL",
+            "resolved_market": "HK",
+            "fallback_to_default_symbols": not bool(symbols),
+            "fallback_reason": None if symbols else "HK_LOCAL_UNIVERSE_EMPTY",
+        }
 
     # 自动按扫描时间选择市场
     runtime = run.started_at if run.started_at else datetime.now(timezone.utc)
     market = _resolve_market_by_runtime(runtime)
     symbols = await _get_local_market_symbols(market)
+    fallback_reason = None
 
     # 若港股池为空，回退到美股全量池；若仍为空，回退默认样本池
     if not symbols and market != "US":
+        fallback_reason = "HK_LOCAL_UNIVERSE_EMPTY_FALLBACK_TO_US"
         symbols = await _get_local_market_symbols("US")
         market = "US"
 
-    return f"{market}_ALL_LOCAL", symbols or DEFAULT_SYMBOLS
+    final_symbols = symbols or DEFAULT_SYMBOLS
+    if not symbols and fallback_reason is None:
+        fallback_reason = "US_LOCAL_UNIVERSE_EMPTY_FALLBACK_TO_DEFAULT"
+
+    return f"{market}_ALL_LOCAL", final_symbols, {
+        "selection_mode": "AUTO_MARKET_TIME",
+        "runtime_utc": runtime.isoformat() if runtime else None,
+        "resolved_market": market,
+        "fallback_to_default_symbols": final_symbols == DEFAULT_SYMBOLS and not bool(symbols),
+        "fallback_reason": fallback_reason,
+    }
 
 
 def _sample_assets(count: int, strategy_name: str = "", universe_symbols: Optional[List[str]] = None) -> List[dict]:
@@ -250,7 +277,7 @@ async def execute_strategy_run_job(run_id: str, task_id: Optional[str] = None) -
                 timeline[phase_key]["end"] = datetime.now(timezone.utc).isoformat()
 
             # 根据 target_universe / 扫描时间 选择股票池（本地全量优先）
-            universe_key, universe_symbols = await _select_universe_symbols(session, run)
+            universe_key, universe_symbols, universe_meta = await _select_universe_symbols(session, run)
             
             logger.info("Executing strategy with universe: %s, symbols count: %d", universe_key, len(universe_symbols))
             
@@ -287,7 +314,18 @@ async def execute_strategy_run_job(run_id: str, task_id: Optional[str] = None) -
                 assets=sampled,
                 timeline=timeline,
                 notify_channels=run.notify_channels,
-                status_payload={"status": "COMPLETED" if candidate_count else "FAILED"},
+                status_payload={
+                    "status": "COMPLETED" if candidate_count else "FAILED",
+                    "universe": {
+                        "target_universe": run.target_universe,
+                        "resolved_universe": universe_key,
+                        "resolved_market": universe_meta.get("resolved_market"),
+                        "selection_mode": universe_meta.get("selection_mode"),
+                        "fallback_to_default_symbols": universe_meta.get("fallback_to_default_symbols", False),
+                        "fallback_reason": universe_meta.get("fallback_reason"),
+                        "symbols_count": len(universe_symbols),
+                    },
+                },
             )
             session.add(history)
 

@@ -19,9 +19,11 @@ from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
 from uuid import uuid4
 
+from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.trading_signal import TradingSignal
+from app.models.strategy import Strategy
 from app.engine.signal_engine import SignalEngine
 from app.engine.order_executor import OrderExecutor
 from app.engine.performance_analyzer import PerformanceAnalyzer
@@ -89,12 +91,59 @@ class QuantTradingLoop:
         print("✨ Full cycle completed!")
         
         return cycle_results
+
+    async def _trigger_runtime_strategy_scan(self, account_id: str) -> Dict[str, Any]:
+        """在每轮闭环开始前触发一次按时段自动市场池的策略扫描。"""
+        try:
+            from app.jobs.strategy_jobs import execute_strategy_run_job, AUTO_UNIVERSE_KEY
+
+            strategy_stmt = (
+                select(Strategy)
+                .where(Strategy.is_active.is_(True))
+                .order_by(desc(Strategy.is_builtin), desc(Strategy.updated_at))
+                .limit(1)
+            )
+            strategy_res = await self.session.execute(strategy_stmt)
+            strategy = strategy_res.scalars().first()
+            if not strategy:
+                return {
+                    "triggered": False,
+                    "reason": "NO_ACTIVE_STRATEGY",
+                }
+
+            run = await self.strategy_run_svc.create_run(
+                strategy=strategy,
+                user_id=account_id,
+                account_id=account_id,
+                direction="LONG",
+                target_universe=AUTO_UNIVERSE_KEY,
+                min_score=60,
+                max_results=30,
+                priority=10,
+            )
+
+            await execute_strategy_run_job(run.id, task_id=f"auto_cycle:{run.id}")
+            return {
+                "triggered": True,
+                "run_id": run.id,
+                "strategy_id": strategy.id,
+                "strategy_name": strategy.name,
+                "target_universe": AUTO_UNIVERSE_KEY,
+            }
+        except Exception as e:
+            return {
+                "triggered": False,
+                "reason": "TRIGGER_FAILED",
+                "error": str(e),
+            }
     
     async def _phase_1_signal_generation(
         self,
         account_id: str
     ) -> Dict[str, Any]:
         """阶段1: 从策略运行结果生成交易信号（多策略融合）"""
+
+        runtime_scan = await self._trigger_runtime_strategy_scan(account_id)
         
         # 获取最近完成的策略运行（改为3个，增加多样性）
         from app.models.strategy import StrategyRun
@@ -117,6 +166,7 @@ class QuantTradingLoop:
         
         all_signals = []
         signals_by_strategy = {}
+        strategy_runs_used = []
         
         # 从多个策略运行生成信号
         for run in recent_runs:
@@ -129,6 +179,15 @@ class QuantTradingLoop:
             strategy_name = run.strategy.name if run.strategy else "Unknown"
             signals_by_strategy[strategy_name] = len(signals)
             all_signals.extend(signals)
+            strategy_runs_used.append({
+                "run_id": run.id,
+                "strategy_id": run.strategy_id,
+                "strategy_name": strategy_name,
+                "strategy_version": run.strategy_version,
+                "target_universe": run.target_universe,
+                "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+                "signals_generated": len(signals),
+            })
         
         # 多策略信号去重和聚合（保留每个symbol置信度最高的信号）
         deduplicated_signals = self._deduplicate_signals_by_symbol(all_signals)
@@ -140,7 +199,10 @@ class QuantTradingLoop:
             "total_signals_generated": total_signals,
             "signals_before_dedup": len(all_signals),
             "signals_by_strategy": signals_by_strategy,
-            "strategy_runs_processed": len(recent_runs)
+            "strategy_runs_processed": len(recent_runs),
+            "strategy_scope_note": "最近 3 个 COMPLETED 策略运行（按 finished_at 倒序）",
+            "strategy_runs_used": strategy_runs_used,
+            "runtime_scan": runtime_scan,
         }
     
     def _deduplicate_signals_by_symbol(
