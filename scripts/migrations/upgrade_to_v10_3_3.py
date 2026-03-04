@@ -101,7 +101,7 @@ CREATE_STATEMENTS = [
         structured_output    JSON            NULL,
         tool_calls           JSON            NULL,
         symbol               VARCHAR(20)     NULL,
-        trigger              VARCHAR(64)     NULL,
+        `trigger`            VARCHAR(64)     NULL,
         model_used           VARCHAR(64)     NULL,
         tokens_used          BIGINT          NULL,
         latency_ms           BIGINT          NULL,

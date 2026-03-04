@@ -55,6 +55,10 @@ python scripts/migrations/version_manager.py --record v3.1.1 \
 
 | 版本 | 发布日期 | 主要变更 | 脚本 |
 |------|---------|---------|------|
+| v10.3.4 | 2026-03 | 新增 market_universe_symbols（全量股票池） | upgrade_to_v10_3_4.py |
+| v10.3.3 | 2026-02 | 新增6张分析表：执行质量/因子敞口/多智能体/置信校准/决策剖析/权重历史 | upgrade_to_v10_3_3.py |
+| v10.3   | 2025-12 | trading_plan 新增10列 + fsm_transition_log 表 | upgrade_to_v10_3.py |
+| v10.2   | 2025-10 | V10.2-M1~M8 多张新表 | upgrade_to_v10_2_m1.py / upgrade_to_v10_2_m2_m8.py |
 | v3.1.2 | 2024-02 | 修复联调接口，优化导航，完善迁移工具 | (应用代码逻辑变更) |
 | v3.1.1 | 2024-01 | 添加策略通知、信号性能跟踪、扩展15个策略 | upgrade_to_v3.1.1.py |
 | v2.2.2 | 2023-12 | 基础版本 | - |
