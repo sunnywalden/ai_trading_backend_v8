@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -26,28 +25,15 @@ async def _run_event_calendar_scan() -> None:
         from app.models.db import SessionLocal as AsyncSessionLocal
         from app.services.event_calendar_service import event_calendar_service
 
-        # 假设持仓股票列表从数据库读取（此处演示：读取 positions 表中的唯一 symbol）
         async with AsyncSessionLocal() as db:
-            symbols = await _get_held_symbols(db)
+            symbols = await event_calendar_service.resolve_scan_symbols(db, limit=60)
             if not symbols:
-                logger.info("[EventJob] no held positions, skipping calendar scan")
+                logger.info("[EventJob] no symbols resolved, skipping calendar scan")
                 return
             added = await event_calendar_service.scan_and_upsert(db, symbols=symbols, lookahead_days=5)
             logger.info(f"[EventJob] scan complete: {len(added)} new entries for {len(symbols)} symbols")
     except Exception as e:
         logger.error(f"[EventJob] event_calendar_scan failed: {e}", exc_info=True)
-
-
-async def _get_held_symbols(db: Any) -> list[str]:
-    """从持仓表读取当前持有的唯一 symbol 列表。"""
-    try:
-        from sqlalchemy import text
-
-        result = await db.execute(text("SELECT DISTINCT symbol FROM positions WHERE status = 'open' LIMIT 100"))
-        return [row[0] for row in result.fetchall()]
-    except Exception as e:
-        logger.warning(f"[EventJob] get_held_symbols failed: {e}")
-        return []
 
 
 def register_event_jobs(scheduler: AsyncIOScheduler) -> None:

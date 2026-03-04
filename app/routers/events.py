@@ -48,6 +48,8 @@ async def get_calendar(
 )
 async def get_active_fences(db: AsyncSession = Depends(get_session)):
     """返回当前所有处于围栏保护状态的持仓资产列表。"""
+    # 轻量兜底：确保近期事件已入库，避免前端长期空白
+    await event_calendar_service.ensure_calendar_seeded(db, days=3)
     raw = await earnings_fence_service.get_active_fences(db)
     fences = [
         EarningsFenceStatusResponse(

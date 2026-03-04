@@ -14,38 +14,65 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from sqlalchemy import func, text
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.event_bus import event_bus, Topics
 from app.models.event_calendar import EventCalendarEntry, EventRiskLevel, EventType
+from app.models.trading_signal import TradingSignal
 
 logger = logging.getLogger(__name__)
 
-# ── 宏观事件硬编码日历（2025 年简版，生产中应接 FRED/Refinitiv）────────────────────
-_MACRO_EVENTS_2025: list[dict] = [
-    # FOMC
-    {"date": "2025-01-29", "type": EventType.FOMC, "title": "FOMC Rate Decision Jan 2025", "risk": EventRiskLevel.HIGH},
-    {"date": "2025-03-19", "type": EventType.FOMC, "title": "FOMC Rate Decision Mar 2025", "risk": EventRiskLevel.HIGH},
-    {"date": "2025-05-07", "type": EventType.FOMC, "title": "FOMC Rate Decision May 2025", "risk": EventRiskLevel.HIGH},
-    {"date": "2025-06-18", "type": EventType.FOMC, "title": "FOMC Rate Decision Jun 2025", "risk": EventRiskLevel.HIGH},
-    {"date": "2025-07-30", "type": EventType.FOMC, "title": "FOMC Rate Decision Jul 2025", "risk": EventRiskLevel.HIGH},
-    {"date": "2025-09-17", "type": EventType.FOMC, "title": "FOMC Rate Decision Sep 2025", "risk": EventRiskLevel.HIGH},
-    {"date": "2025-10-29", "type": EventType.FOMC, "title": "FOMC Rate Decision Oct 2025", "risk": EventRiskLevel.EXTREME},
-    {"date": "2025-12-10", "type": EventType.FOMC, "title": "FOMC Rate Decision Dec 2025", "risk": EventRiskLevel.EXTREME},
-    # Non-Farm Payrolls（每月第一个周五，此处列出前 6 个月）
-    {"date": "2025-02-07", "type": EventType.MACRO_DATA, "title": "US Non-Farm Payrolls Feb 2025", "risk": EventRiskLevel.HIGH},
-    {"date": "2025-03-07", "type": EventType.MACRO_DATA, "title": "US Non-Farm Payrolls Mar 2025", "risk": EventRiskLevel.HIGH},
-    {"date": "2025-04-04", "type": EventType.MACRO_DATA, "title": "US Non-Farm Payrolls Apr 2025", "risk": EventRiskLevel.HIGH},
-    {"date": "2025-05-02", "type": EventType.MACRO_DATA, "title": "US Non-Farm Payrolls May 2025", "risk": EventRiskLevel.HIGH},
-    {"date": "2025-06-06", "type": EventType.MACRO_DATA, "title": "US Non-Farm Payrolls Jun 2025", "risk": EventRiskLevel.HIGH},
-    # CPI
-    {"date": "2025-01-15", "type": EventType.MACRO_DATA, "title": "US CPI Jan 2025", "risk": EventRiskLevel.HIGH},
-    {"date": "2025-02-12", "type": EventType.MACRO_DATA, "title": "US CPI Feb 2025", "risk": EventRiskLevel.HIGH},
-    {"date": "2025-03-12", "type": EventType.MACRO_DATA, "title": "US CPI Mar 2025", "risk": EventRiskLevel.HIGH},
-    {"date": "2025-04-10", "type": EventType.MACRO_DATA, "title": "US CPI Apr 2025", "risk": EventRiskLevel.HIGH},
-    {"date": "2025-05-13", "type": EventType.MACRO_DATA, "title": "US CPI May 2025", "risk": EventRiskLevel.HIGH},
-]
+def _nth_weekday_of_month(year: int, month: int, weekday: int, n: int) -> datetime:
+    """返回某年某月第 n 个 weekday（Mon=0 ... Sun=6）的 UTC 日期（00:00）。"""
+    first = datetime(year, month, 1, tzinfo=timezone.utc)
+    delta = (weekday - first.weekday()) % 7
+    day = 1 + delta + (n - 1) * 7
+    return datetime(year, month, day, tzinfo=timezone.utc)
+
+
+def _build_macro_events_for_year(year: int) -> list[dict]:
+    """构建滚动宏观事件（避免年份硬编码导致事件窗口为空）。"""
+    records: list[dict] = []
+
+    # FOMC：按常见开会月份给出近似日期（每月第 3 个周三，18:00 UTC）
+    for month in (1, 3, 5, 6, 7, 9, 11, 12):
+        dt = _nth_weekday_of_month(year, month, 2, 3).replace(hour=18)
+        records.append(
+            {
+                "date": dt,
+                "type": EventType.FOMC.value,
+                "title": f"FOMC Rate Decision {dt.strftime('%b %Y')}",
+                "risk": EventRiskLevel.HIGH.value if month not in (11, 12) else EventRiskLevel.EXTREME.value,
+            }
+        )
+
+    # NFP：每月第一个周五，13:30 UTC
+    for month in range(1, 13):
+        dt = _nth_weekday_of_month(year, month, 4, 1).replace(hour=13, minute=30)
+        records.append(
+            {
+                "date": dt,
+                "type": EventType.MACRO_DATA.value,
+                "title": f"US Non-Farm Payrolls {dt.strftime('%b %Y')}",
+                "risk": EventRiskLevel.HIGH.value,
+            }
+        )
+
+    # CPI：每月第二个周三，13:30 UTC
+    for month in range(1, 13):
+        dt = _nth_weekday_of_month(year, month, 2, 2).replace(hour=13, minute=30)
+        records.append(
+            {
+                "date": dt,
+                "type": EventType.MACRO_DATA.value,
+                "title": f"US CPI {dt.strftime('%b %Y')}",
+                "risk": EventRiskLevel.HIGH.value,
+            }
+        )
+
+    return records
 
 
 class EventCalendarService:
@@ -96,6 +123,112 @@ class EventCalendarService:
 
         logger.info(f"[EventCalendar] scan complete. {len(new_entries)} new entries, symbols={len(symbols)}")
         return new_entries
+
+    async def resolve_scan_symbols(self, db: AsyncSession, limit: int = 60) -> list[str]:
+        """统一解析事件扫描标的：持仓 -> 最近信号 -> 本地全量池（兜底）。"""
+        symbols: list[str] = []
+        seen: set[str] = set()
+
+        def _push(sym: Optional[str]) -> None:
+            if not sym:
+                return
+            s = str(sym).strip().upper()
+            if not s or s in seen:
+                return
+            seen.add(s)
+            symbols.append(s)
+
+        # 1) 持仓口径（兼容不同状态命名）
+        try:
+            held = await db.execute(
+                text(
+                    """
+                    SELECT DISTINCT symbol
+                    FROM positions
+                    WHERE symbol IS NOT NULL
+                      AND (
+                        status IN ('open', 'OPEN', 'active', 'ACTIVE', 'held', 'HELD')
+                        OR COALESCE(quantity, 0) > 0
+                      )
+                    ORDER BY symbol
+                    LIMIT :limit
+                    """
+                ),
+                {"limit": limit},
+            )
+            for row in held.fetchall():
+                _push(row[0])
+        except Exception as e:
+            logger.warning(f"[EventCalendar] resolve symbols from positions failed: {e}")
+
+        # 2) 最近信号（避免持仓为空时完全无扫描）
+        if len(symbols) < limit:
+            try:
+                rem = max(1, limit - len(symbols))
+                cutoff = datetime.now(tz=timezone.utc) - timedelta(days=14)
+                sig_rows = await db.execute(
+                    select(TradingSignal.symbol)
+                    .where(
+                        TradingSignal.symbol.is_not(None),
+                        TradingSignal.generated_at >= cutoff,
+                    )
+                    .group_by(TradingSignal.symbol)
+                    .order_by(func.max(TradingSignal.generated_at).desc())
+                    .limit(rem)
+                )
+                for row in sig_rows.fetchall():
+                    _push(row[0])
+            except Exception as e:
+                logger.warning(f"[EventCalendar] resolve symbols from signals failed: {e}")
+
+        # 3) 本地全量池兜底（优先 US，再 HK）
+        if len(symbols) < limit:
+            try:
+                rem = max(1, limit - len(symbols))
+                uni_rows = await db.execute(
+                    text(
+                        """
+                        SELECT symbol
+                        FROM market_universe_symbols
+                        WHERE is_active = 1
+                        ORDER BY CASE WHEN market = 'US' THEN 0 ELSE 1 END, symbol
+                        LIMIT :limit
+                        """
+                    ),
+                    {"limit": rem},
+                )
+                for row in uni_rows.fetchall():
+                    _push(row[0])
+            except Exception as e:
+                logger.warning(f"[EventCalendar] resolve symbols from market universe failed: {e}")
+
+        # 4) 最终兜底样本，保证链路始终可产出数据
+        if not symbols:
+            for s in ("AAPL", "MSFT", "NVDA", "TSLA", "00700", "9988"):
+                _push(s)
+
+        return symbols[:limit]
+
+    async def ensure_calendar_seeded(self, db: AsyncSession, days: int = 7) -> None:
+        """确保窗口内至少有宏观事件；若数据库空白则触发轻量补扫描。"""
+        now = datetime.now(tz=timezone.utc)
+        horizon = now + timedelta(days=days)
+
+        # 先补宏观事件（非常轻量）
+        await self._upsert_macro_events(db, now, horizon)
+
+        # 再检查是否仍为空；为空则按需触发一次扫描
+        count_stmt = select(EventCalendarEntry.id).where(
+            EventCalendarEntry.event_date >= now,
+            EventCalendarEntry.event_date <= horizon,
+        ).limit(1)
+        has_any = (await db.execute(count_stmt)).scalars().first()
+        if has_any:
+            return
+
+        symbols = await self.resolve_scan_symbols(db, limit=30)
+        if symbols:
+            await self.scan_and_upsert(db, symbols=symbols, lookahead_days=min(max(days, 3), 14))
 
     # ── 内部：yfinance 财报日历 ─────────────────────────────────────────────
 
@@ -169,33 +302,34 @@ class EventCalendarService:
     ) -> list[EventCalendarEntry]:
         """将硬编码宏观日历中落在扫描窗口内的事件写入库（如尚不存在）。"""
         new_entries: list[EventCalendarEntry] = []
-        for rec in _MACRO_EVENTS_2025:
-            try:
-                dt = datetime.strptime(rec["date"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
-                if not (from_dt <= dt <= to_dt):
-                    continue
-                stmt = select(EventCalendarEntry).where(
-                    EventCalendarEntry.event_type == rec["type"].value,
-                    EventCalendarEntry.event_date == dt,
-                    EventCalendarEntry.symbol == "MARKET",
-                )
-                existing = (await db.execute(stmt)).scalars().first()
-                if existing:
-                    continue
-                entry = EventCalendarEntry(
-                    symbol="MARKET",
-                    event_type=rec["type"].value,
-                    event_date=dt,
-                    title=rec["title"],
-                    risk_level=rec["risk"].value,
-                    requires_fence=True,
-                    source="hardcoded",
-                )
-                db.add(entry)
-                await db.flush()
-                new_entries.append(entry)
-            except Exception as e:
-                logger.warning(f"[EventCalendar] macro upsert error: {e}")
+        for year in range(from_dt.year - 1, to_dt.year + 2):
+            for rec in _build_macro_events_for_year(year):
+                try:
+                    dt = rec["date"]
+                    if not (from_dt <= dt <= to_dt):
+                        continue
+                    stmt = select(EventCalendarEntry).where(
+                        EventCalendarEntry.event_type == rec["type"],
+                        EventCalendarEntry.event_date == dt,
+                        EventCalendarEntry.symbol == "MARKET",
+                    )
+                    existing = (await db.execute(stmt)).scalars().first()
+                    if existing:
+                        continue
+                    entry = EventCalendarEntry(
+                        symbol="MARKET",
+                        event_type=rec["type"],
+                        event_date=dt,
+                        title=rec["title"],
+                        risk_level=rec["risk"],
+                        requires_fence=True,
+                        source="hardcoded_dynamic",
+                    )
+                    db.add(entry)
+                    await db.flush()
+                    new_entries.append(entry)
+                except Exception as e:
+                    logger.warning(f"[EventCalendar] macro upsert error: {e}")
         await db.commit()
         return new_entries
 
@@ -206,10 +340,15 @@ class EventCalendarService:
         db: AsyncSession,
         days: int = 7,
         symbol: Optional[str] = None,
+        auto_seed_if_empty: bool = True,
     ) -> list[EventCalendarEntry]:
         """获取未来 days 天内的事件列表，可按 symbol 过滤。"""
         now = datetime.now(tz=timezone.utc)
         horizon = now + timedelta(days=days)
+
+        if auto_seed_if_empty and not symbol:
+            await self.ensure_calendar_seeded(db, days=days)
+
         stmt = select(EventCalendarEntry).where(
             EventCalendarEntry.event_date >= now,
             EventCalendarEntry.event_date <= horizon,
