@@ -12,7 +12,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select, desc, func
+from sqlalchemy import and_, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.decision_post_mortem import DecisionPostMortem
@@ -183,16 +183,47 @@ class DecisionPostMortemService:
         existing_stmt = select(DecisionPostMortem.trade_id).where(DecisionPostMortem.user_id == user_id)
         existing_trade_ids = set((await db.execute(existing_stmt)).scalars().all())
 
+        # 优先按当前 user_id/account_id 查询，避免多用户混淆
+        # 已平仓判定：
+        # 1) realized_pnl 非空；或
+        # 2) entry/exit 价格齐全（可推导收益）
+        closed_predicate = or_(
+            TradeJournal.realized_pnl.is_not(None),
+            and_(
+                TradeJournal.entry_price.is_not(None),
+                TradeJournal.exit_price.is_not(None),
+            ),
+        )
+
         stmt = (
             select(TradeJournal)
             .where(
+                TradeJournal.account_id == user_id,
                 TradeJournal.symbol.isnot(None),
-                TradeJournal.realized_pnl.is_not(None),
+                closed_predicate,
             )
             .order_by(desc(TradeJournal.created_at))
             .limit(max(limit * 3, limit))
         )
         rows = (await db.execute(stmt)).scalars().all()
+
+        # 兼容历史环境：若 account_id 与登录用户不一致（如 admin / sunnywalden），回退全局闭环样本
+        if not rows:
+            fallback_stmt = (
+                select(TradeJournal)
+                .where(
+                    TradeJournal.symbol.isnot(None),
+                    closed_predicate,
+                )
+                .order_by(desc(TradeJournal.created_at))
+                .limit(max(limit * 3, limit))
+            )
+            rows = (await db.execute(fallback_stmt)).scalars().all()
+            logger.warning(
+                "PostMortem: no candidates for user=%s by account_id, fallback to global closed journals, count=%d",
+                user_id,
+                len(rows),
+            )
 
         keyword = (q or "").strip().upper()
         out: list[dict[str, Any]] = []
@@ -207,7 +238,13 @@ class DecisionPostMortemService:
             if trade_id in existing_trade_ids or str(rid) in existing_trade_ids:
                 continue
 
-            realized = _to_float(getattr(r, "realized_pnl", None), 0.0)
+            entry_price = _to_float(getattr(r, "entry_price", None), 0.0)
+            exit_price = _to_float(getattr(r, "exit_price", None), 0.0)
+            quantity = _to_float(getattr(r, "quantity", None), 0.0)
+            realized_raw = getattr(r, "realized_pnl", None)
+            realized = _to_float(realized_raw, 0.0)
+            if realized_raw is None and entry_price > 0 and exit_price > 0 and quantity > 0:
+                realized = (exit_price - entry_price) * quantity
             created_at = getattr(r, "created_at", None)
             hold_days = int(getattr(r, "holding_days", 0) or 0)
 
@@ -218,8 +255,8 @@ class DecisionPostMortemService:
                     "direction": _normalize_direction(getattr(r, "direction", None)),
                     "realized_pnl": realized,
                     "hold_days": hold_days,
-                    "entry_price": _to_float(getattr(r, "entry_price", None), 0.0),
-                    "exit_price": _to_float(getattr(r, "exit_price", None), 0.0),
+                    "entry_price": entry_price,
+                    "exit_price": exit_price,
                     "created_at": created_at.isoformat() if created_at else None,
                     "display": f"{symbol} | PnL {realized:+.2f} | {created_at.date() if created_at else '-'}",
                 }
@@ -227,6 +264,12 @@ class DecisionPostMortemService:
             if len(out) >= limit:
                 break
 
+        logger.info(
+            "PostMortem: list_trade_candidates user=%s q=%s returned=%d",
+            user_id,
+            (q or "").strip(),
+            len(out),
+        )
         return out
 
     async def get_trade_prefill(
