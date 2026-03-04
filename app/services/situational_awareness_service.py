@@ -17,6 +17,7 @@ from app.models.market_regime import MarketRegime
 from app.models.trading_signal import TradingSignal, SignalStatus
 from app.models.event_calendar import EventCalendarEntry
 from app.broker.factory import make_option_broker_client
+from app.core.config import settings
 from app.schemas.situational_awareness import (
     SituationalAwarenessSnapshot,
     RegimeBlock, VarBlock, ActiveFencesBlock, ActiveFenceEntry,
@@ -182,7 +183,8 @@ class SituationalAwarenessService:
                         expires_at=p.valid_until,
                     )
 
-            event_cutoff = datetime.now(timezone.utc) + timedelta(days=1)
+            lookahead_days = max(0, int(getattr(settings, "SA_FENCE_LOOKAHEAD_DAYS", 30) or 30))
+            event_cutoff = datetime.now(timezone.utc) + timedelta(days=lookahead_days)
             event_filters = [
                 EventCalendarEntry.requires_fence.is_(True),
                 EventCalendarEntry.event_date <= event_cutoff,

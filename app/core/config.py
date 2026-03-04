@@ -215,6 +215,12 @@ class Settings(BaseSettings):
     BROKER_ORDER_SYNC_INTERVAL_MINUTES: int = 10
     BROKER_ORDER_SYNC_LOOKBACK_DAYS: int = 3
 
+    # 态势感知栏：围栏统计向前展望天数（默认 30 天）
+    SA_FENCE_LOOKAHEAD_DAYS: int = 30
+
+    # 环境变量示例
+    # SA_FENCE_LOOKAHEAD_DAYS=30
+
     # AI 周报定时（每周一 08:00 生成上周复盘）
     SCHEDULER_WEEKLY_REPORT_DAY: str = "mon"
     SCHEDULER_WEEKLY_REPORT_HOUR: int = 8
