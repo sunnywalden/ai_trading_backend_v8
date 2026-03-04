@@ -14,6 +14,9 @@ from sqlalchemy import select, func, and_
 
 from app.models.trading_plan import TradingPlan
 from app.models.market_regime import MarketRegime
+from app.models.trading_signal import TradingSignal, SignalStatus
+from app.models.event_calendar import EventCalendarEntry
+from app.broker.factory import make_option_broker_client
 from app.schemas.situational_awareness import (
     SituationalAwarenessSnapshot,
     RegimeBlock, VarBlock, ActiveFencesBlock, ActiveFenceEntry,
@@ -58,14 +61,25 @@ VAR_LIMIT_PCT = 2.0
 
 class SituationalAwarenessService:
 
-    async def get_snapshot(self, db: AsyncSession) -> SituationalAwarenessSnapshot:
+    async def _resolve_account_id(self, account_id: Optional[str]) -> Optional[str]:
+        if account_id:
+            return str(account_id)
+        try:
+            broker = make_option_broker_client()
+            resolved = await broker.get_account_id()
+            return str(resolved) if resolved else None
+        except Exception:
+            return None
+
+    async def get_snapshot(self, db: AsyncSession, account_id: Optional[str] = None) -> SituationalAwarenessSnapshot:
         now = datetime.now(timezone.utc)
+        resolved_account_id = await self._resolve_account_id(account_id)
 
         regime_block    = await self._get_regime_block(db)
-        var_block       = await self._get_var_block(db)
-        fences_block    = await self._get_fences_block(db)
-        executions_block = await self._get_executions_block(db)
-        confirms_block  = await self._get_confirms_block(db)
+        var_block       = await self._get_var_block(db, resolved_account_id)
+        fences_block    = await self._get_fences_block(db, resolved_account_id)
+        executions_block = await self._get_executions_block(db, resolved_account_id)
+        confirms_block  = await self._get_confirms_block(db, resolved_account_id)
         autonomy_block  = await self._get_autonomy_block()
 
         return SituationalAwarenessSnapshot(
@@ -106,14 +120,15 @@ class SituationalAwarenessService:
             logger.warning(f"[SA] Failed to get regime block: {e}")
             return RegimeBlock()
 
-    async def _get_var_block(self, db: AsyncSession) -> VarBlock:
+    async def _get_var_block(self, db: AsyncSession, account_id: Optional[str]) -> VarBlock:
         """从 Redis 或 plan_tags 估算当前组合 VaR%。
         简化实现：统计已执行计划的 target_position 之和作为代理指标。
         """
         try:
-            stmt = select(func.sum(TradingPlan.target_position)).where(
-                TradingPlan.plan_status.in_(["ACTIVE", "AUTO_EXECUTING", "EXECUTED"])
-            )
+            filters: list[Any] = [TradingPlan.plan_status.in_(["ACTIVE", "AUTO_EXECUTING", "EXECUTED"])]
+            if account_id:
+                filters.append(TradingPlan.account_id == account_id)
+            stmt = select(func.sum(TradingPlan.target_position)).where(and_(*filters))
             total_pos = (await db.execute(stmt)).scalar() or 0
             # 粗略：每1%仓位对应约0.1%的VaR（仅示意）
             current_pct = _safe_float(min(float(total_pos) * 0.1, 5.0))
@@ -136,48 +151,98 @@ class SituationalAwarenessService:
             logger.warning(f"[SA] Failed to get var block: {e}")
             return VarBlock()
 
-    async def _get_fences_block(self, db: AsyncSession) -> ActiveFencesBlock:
+    async def _get_fences_block(self, db: AsyncSession, account_id: Optional[str]) -> ActiveFencesBlock:
         """查询具有盈利围栏的活跃计划。"""
         try:
-            # fence_applied 在 event_calendar_entries 中；通过 plan_tags 也有标记
-            stmt = select(TradingPlan).where(
-                and_(
-                    TradingPlan.plan_status.in_(["ACTIVE", "AUTO_EXECUTING"]),
-                    # 通过 plan_tags JSON 查找（SQLite/MySQL 均支持 JSON_CONTAINS 方式）
-                )
-            ).limit(20)
-            result = await db.execute(stmt)
-            plans = result.scalars().all()
+            entries_map: dict[str, ActiveFenceEntry] = {}
 
-            entries: list[ActiveFenceEntry] = []
+            plan_filters: list[Any] = [TradingPlan.plan_status.in_(["ACTIVE", "AUTO_EXECUTING", "EXECUTED"])]
+            if account_id:
+                plan_filters.append(TradingPlan.account_id == account_id)
+
+            stmt = (
+                select(TradingPlan)
+                .where(and_(*plan_filters))
+                .order_by(TradingPlan.updated_at.desc())
+                .limit(50)
+            )
+            plans = (await db.execute(stmt)).scalars().all()
+
             for p in plans:
                 tags = p.plan_tags or {}
-                if tags.get("earnings_fence_active"):
-                    entries.append(ActiveFenceEntry(
+                if (
+                    tags.get("earnings_fence_active")
+                    or tags.get("fence_applied")
+                    or tags.get("fence_active")
+                    or tags.get("earnings_fence_pending")
+                ):
+                    entries_map[p.symbol] = ActiveFenceEntry(
                         symbol=p.symbol,
                         fence_type="EARNINGS",
                         expires_at=p.valid_until,
-                    ))
+                    )
+
+            event_cutoff = datetime.now(timezone.utc) + timedelta(days=1)
+            event_filters = [
+                EventCalendarEntry.requires_fence.is_(True),
+                EventCalendarEntry.event_date <= event_cutoff,
+                EventCalendarEntry.fence_overridden.is_(False),
+            ]
+            event_stmt = (
+                select(EventCalendarEntry)
+                .where(and_(*event_filters))
+                .order_by(EventCalendarEntry.event_date.asc())
+                .limit(50)
+            )
+            events = (await db.execute(event_stmt)).scalars().all()
+            for ev in events:
+                if not ev.symbol or ev.symbol == "MARKET":
+                    continue
+                entries_map[ev.symbol] = ActiveFenceEntry(
+                    symbol=ev.symbol,
+                    fence_type=str(ev.event_type or "EARNINGS"),
+                    expires_at=ev.event_date,
+                )
+
+            entries = list(entries_map.values())
 
             return ActiveFencesBlock(count=len(entries), entries=entries[:5])
         except Exception as e:
             logger.warning(f"[SA] Failed to get fences block: {e}")
             return ActiveFencesBlock()
 
-    async def _get_executions_block(self, db: AsyncSession) -> ActiveExecutionsBlock:
-        """查询当前处于算法执行阶段（pipeline_stage == 8）的计划。"""
+    async def _get_executions_block(self, db: AsyncSession, account_id: Optional[str]) -> ActiveExecutionsBlock:
+        """查询当前处于算法执行阶段的计划。"""
         try:
-            stmt = select(TradingPlan).where(
-                TradingPlan.pipeline_stage == 8
-            ).limit(10)
-            result = await db.execute(stmt)
-            plans = result.scalars().all()
+            filters: list[Any] = [
+                TradingPlan.plan_status.in_(["AUTO_EXECUTING", "ACTIVE"]),
+            ]
+            if account_id:
+                filters.append(TradingPlan.account_id == account_id)
+
+            stmt = (
+                select(TradingPlan)
+                .where(and_(*filters))
+                .order_by(TradingPlan.stage_entered_at.desc(), TradingPlan.updated_at.desc())
+                .limit(20)
+            )
+            plans = (await db.execute(stmt)).scalars().all()
 
             entries: list[ActiveExecutionEntry] = []
             for p in plans:
                 tags = p.plan_tags or {}
                 snapshot = p.provenance_snapshot or {}
                 ep = snapshot.get("exec_progress", {})
+
+                is_executing = (
+                    str(p.plan_status or "").upper() == "AUTO_EXECUTING"
+                    or int(p.pipeline_stage or 0) >= 7
+                    or str(p.autonomy_action or "").upper() == "AUTO_EXECUTE"
+                    or str(p.source or "").upper() == "AI_AUTONOMOUS"
+                )
+                if not is_executing:
+                    continue
+
                 entries.append(ActiveExecutionEntry(
                     plan_id=p.id,
                     symbol=p.symbol,
@@ -185,22 +250,69 @@ class SituationalAwarenessService:
                     fill_pct=_safe_float(ep.get("fill_pct", 0.0)),
                 ))
 
+            if not entries and account_id:
+                recent_cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+                sig_stmt = (
+                    select(TradingSignal.symbol, TradingSignal.signal_id)
+                    .where(
+                        and_(
+                            TradingSignal.account_id == account_id,
+                            TradingSignal.status.in_([SignalStatus.EXECUTING, SignalStatus.QUEUED, SignalStatus.EXECUTED]),
+                            TradingSignal.created_at >= recent_cutoff,
+                        )
+                    )
+                    .order_by(TradingSignal.created_at.desc())
+                    .limit(10)
+                )
+                sig_rows = (await db.execute(sig_stmt)).all()
+                for i, row in enumerate(sig_rows):
+                    entries.append(ActiveExecutionEntry(
+                        plan_id=-(i + 1),
+                        symbol=row.symbol,
+                        algo_type="ALGO",
+                        fill_pct=0.0,
+                    ))
+
             return ActiveExecutionsBlock(count=len(entries), entries=entries)
         except Exception as e:
             logger.warning(f"[SA] Failed to get executions block: {e}")
             return ActiveExecutionsBlock()
 
-    async def _get_confirms_block(self, db: AsyncSession) -> PendingConfirmsBlock:
-        """查询 PENDING_CONFIRM 状态的计划数量。"""
+    async def _get_confirms_block(self, db: AsyncSession, account_id: Optional[str]) -> PendingConfirmsBlock:
+        """查询待确认数量（优先计划，其次待执行信号）。"""
         try:
-            stmt = select(TradingPlan).where(
-                TradingPlan.plan_status == "PENDING_CONFIRM"
-            ).order_by(TradingPlan.created_at.desc()).limit(5)
-            result = await db.execute(stmt)
-            plans = result.scalars().all()
+            filters: list[Any] = [
+                (TradingPlan.plan_status == "PENDING_CONFIRM") | (TradingPlan.autonomy_action == "PENDING_CONFIRM")
+            ]
+            if account_id:
+                filters.append(TradingPlan.account_id == account_id)
+
+            stmt = (
+                select(TradingPlan)
+                .where(and_(*filters))
+                .order_by(TradingPlan.created_at.desc())
+                .limit(20)
+            )
+            plans = (await db.execute(stmt)).scalars().all()
 
             count = len(plans)
-            symbols = list({p.symbol for p in plans})[:3]
+            symbols = list({p.symbol for p in plans if p.symbol})[:3]
+
+            if count == 0 and account_id:
+                sig_stmt = (
+                    select(TradingSignal.symbol)
+                    .where(
+                        and_(
+                            TradingSignal.account_id == account_id,
+                            TradingSignal.status.in_([SignalStatus.VALIDATED, SignalStatus.QUEUED]),
+                        )
+                    )
+                    .order_by(TradingSignal.created_at.desc())
+                    .limit(20)
+                )
+                sig_rows = (await db.execute(sig_stmt)).all()
+                count = len(sig_rows)
+                symbols = list(dict.fromkeys([r.symbol for r in sig_rows if r.symbol]))[:3]
 
             return PendingConfirmsBlock(
                 count=count,
