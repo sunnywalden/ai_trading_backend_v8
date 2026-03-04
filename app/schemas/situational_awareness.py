@@ -51,6 +51,8 @@ class ActiveExecutionEntry(BaseModel):
 class ActiveExecutionsBlock(BaseModel):
     model_config = _SAFE_CFG
     count: int = 0
+    running_count: int = 0
+    recent_executed_count: int = 0
     entries: list[ActiveExecutionEntry] = Field(default_factory=list)
 
 
