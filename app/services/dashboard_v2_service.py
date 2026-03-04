@@ -1153,7 +1153,24 @@ class DashboardV2Service:
         snapshots = list(result.scalars().all())
         
         if not snapshots:
-            return []
+            # 冷启动兜底：无快照时用当前权益生成平坦曲线，避免前端“暂无数据”
+            current_eq = await self._get_current_equity(account_id)
+            if current_eq <= 0:
+                return []
+
+            generated: List[PerformanceTrend] = []
+            points = max(2, min(int(days), 7))
+            for offset in range(points - 1, -1, -1):
+                d = end_date - timedelta(days=offset)
+                generated.append(
+                    PerformanceTrend(
+                        date=d.isoformat(),
+                        equity=float(current_eq),
+                        pnl=0.0,
+                        return_pct=0.0,
+                    )
+                )
+            return generated
         
         first_equity = float(snapshots[0].total_equity)
         
