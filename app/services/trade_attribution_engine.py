@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.trade_attribution import AttributionCategory, TradeAttributionEntry
@@ -311,7 +311,7 @@ class TradeAttributionEngine:
         dry_run: bool = False,
     ) -> dict:
         """将 trade_journal 历史记录回填到 trade_attribution_entries（幂等）。"""
-        stmt = select(TradeJournal).where(TradeJournal.realized_pnl.is_not(None))
+        stmt = select(TradeJournal).where(self._journal_closed_predicate())
         if days and days > 0:
             since = datetime.now(tz=timezone.utc) - timedelta(days=days)
             stmt = stmt.where(TradeJournal.created_at >= since)
@@ -372,7 +372,7 @@ class TradeAttributionEngine:
         days: Optional[int] = None,
     ) -> tuple[list[dict], int]:
         """当主归因表为空时，从 trade_journal 生成可展示归因视图。"""
-        stmt = select(TradeJournal).where(TradeJournal.realized_pnl.is_not(None))
+        stmt = select(TradeJournal).where(self._journal_closed_predicate())
 
         if symbol:
             stmt = stmt.where(TradeJournal.symbol == symbol)
@@ -401,7 +401,7 @@ class TradeAttributionEngine:
         stmt = (
             select(TradeJournal)
             .where(
-                TradeJournal.realized_pnl.is_not(None),
+                self._journal_closed_predicate(),
                 TradeJournal.created_at >= since,
             )
             .order_by(TradeJournal.created_at.desc())
@@ -448,12 +448,31 @@ class TradeAttributionEngine:
         except Exception:
             return default
 
+    @staticmethod
+    def _journal_closed_predicate():
+        """trade_journal 已平仓判定。
+
+        兼容两类数据源：
+        1) 已回写 realized_pnl
+        2) 尚未回写 realized_pnl，但 entry/exit 价格已具备（可推导 pnl_pct）
+        """
+        return or_(
+            TradeJournal.realized_pnl.is_not(None),
+            and_(
+                TradeJournal.entry_price.is_not(None),
+                TradeJournal.exit_price.is_not(None),
+            ),
+        )
+
     def _journal_to_attribution_item(self, row: TradeJournal) -> dict:
         """将 TradeJournal 映射为 Attribution API item。"""
         entry_price = self._safe_float(getattr(row, "entry_price", None), 0.0)
         exit_price = self._safe_float(getattr(row, "exit_price", None), 0.0)
         quantity = self._safe_float(getattr(row, "quantity", None), 0.0)
-        realized_pnl = self._safe_float(getattr(row, "realized_pnl", None), 0.0)
+        realized_raw = getattr(row, "realized_pnl", None)
+        realized_pnl = self._safe_float(realized_raw, 0.0)
+        if realized_raw is None and entry_price > 0 and exit_price > 0 and quantity > 0:
+            realized_pnl = (exit_price - entry_price) * quantity
         base = entry_price * quantity
 
         if base > 0:
