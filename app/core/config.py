@@ -236,6 +236,16 @@ class Settings(BaseSettings):
     # 每日体制分类 Job 触发小时（UTC+0 系统时间，默认 08:00 港股/美股开盘前）
     REGIME_CLASSIFICATION_HOUR: int = 8
 
+    # ==================== 宏观风险建议参数化配置 ====================
+    # RISK_OFF 场景下风险资产仓位上限（相对常态）建议区间
+    MACRO_RISK_OFF_POSITION_CAP_MIN: float = 0.50
+    MACRO_RISK_OFF_POSITION_CAP_MAX: float = 0.70
+    # RISK_OFF 场景下止损收紧比例（相对常态）
+    MACRO_RISK_OFF_STOP_TIGHTEN_PCT: float = 0.20
+    # CAUTIOUS 场景下建议保留现金比例区间
+    MACRO_CAUTIOUS_CASH_BUFFER_MIN: float = 0.10
+    MACRO_CAUTIOUS_CASH_BUFFER_MAX: float = 0.20
+
     model_config = SettingsConfigDict(
         env_file=str(ENV_FILE) if ENV_FILE else ".env",
         env_file_encoding="utf-8",

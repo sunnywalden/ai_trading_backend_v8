@@ -57,6 +57,35 @@ class MacroRiskScoringService:
         self.request_delay = 1.0  # 请求间延迟（秒）
         self.retry_backoff_cap = 20.0  # 重试最大等待（秒）
         self.jitter_ratio = 0.3  # 抖动比例
+        self._last_market_shock_snapshot: Optional[Dict[str, Any]] = None
+
+    async def get_market_shock_snapshot(self) -> Dict[str, Any]:
+        """获取市场体感校准快照（用于前端解释展示）。"""
+        if self._last_market_shock_snapshot:
+            return self._last_market_shock_snapshot
+
+        penalty = await self._calculate_with_retry(
+            self._calculate_market_shock_penalty,
+            "market_shock_penalty_snapshot",
+            0.0,
+            provider=APIProvider.YAHOO_FINANCE
+        )
+
+        if self._last_market_shock_snapshot:
+            return self._last_market_shock_snapshot
+
+        return {
+            "enabled": True,
+            "window": "5d",
+            "penalty": round(float(penalty or 0.0), 2),
+            "regime": "NEUTRAL",
+            "factors": {
+                "vix_change_pct": 0.0,
+                "oil_change_pct": 0.0,
+                "dxy_change_pct": 0.0,
+            },
+            "drivers": [],
+        }
     
     async def calculate_macro_risk_score(self, use_cache: bool = True) -> MacroRiskScore:
         """
@@ -288,6 +317,19 @@ class MacroRiskScoringService:
             cached.sentiment_score if cached else 65.0,
             provider=APIProvider.YAHOO_FINANCE
         )
+
+        # 市场体感校准层：当跨资产出现同步风险冲击时，温和下调相关维度评分
+        shock_penalty = await self._calculate_with_retry(
+            self._calculate_market_shock_penalty,
+            "market_shock_penalty",
+            0.0,
+            provider=APIProvider.YAHOO_FINANCE
+        )
+
+        if shock_penalty > 0:
+            monetary = max(0.0, monetary - shock_penalty * 0.5)
+            geopolitical = max(0.0, geopolitical - shock_penalty * 0.35)
+            market_sentiment = max(0.0, market_sentiment - shock_penalty * 0.7)
         
         return {
             "monetary_policy": monetary,
@@ -296,6 +338,158 @@ class MacroRiskScoringService:
             "economic_cycle": economic_cycle,
             "market_sentiment": market_sentiment
         }
+
+    async def _calculate_market_shock_penalty(self) -> float:
+        """
+        计算市场冲击惩罚项（0-20）。
+
+        目的：在“战争升级/避险升温/降息预期降温”这类快速再定价阶段，
+        让宏观评分更贴近盘面体感。
+
+        使用代理指标：
+        - VIX（^VIX）5日变化：恐慌上升
+        - 原油（CL=F）5日变化：地缘与通胀再抬头风险
+        - 美元指数（DX-Y.NYB）5日变化：全球避险与流动性收紧压力
+        """
+        start_time = datetime.now()
+        success = False
+        error_msg = None
+        try:
+            vix = yf.Ticker("^VIX")
+            oil = yf.Ticker("CL=F")
+            dxy = yf.Ticker("DX-Y.NYB")
+
+            vix_data = vix.history(period="10d")
+            oil_data = oil.history(period="10d")
+            dxy_data = dxy.history(period="10d")
+
+            if vix_data.empty and oil_data.empty and dxy_data.empty:
+                self._last_market_shock_snapshot = {
+                    "enabled": False,
+                    "window": "5d",
+                    "penalty": 0.0,
+                    "regime": "NEUTRAL",
+                    "factors": {
+                        "vix_change_pct": 0.0,
+                        "oil_change_pct": 0.0,
+                        "dxy_change_pct": 0.0,
+                    },
+                    "drivers": [],
+                }
+                return 0.0
+
+            vix_change = self._safe_pct_change(vix_data)
+            oil_change = self._safe_pct_change(oil_data)
+            dxy_change = self._safe_pct_change(dxy_data)
+
+            penalty = 0.0
+            drivers: List[str] = []
+
+            # VIX 冲击：风险偏好急降的核心信号
+            if vix_change > 20:
+                penalty += 10.0
+                drivers.append("VIX近5日大幅上行，风险偏好显著下降")
+            elif vix_change > 12:
+                penalty += 6.0
+                drivers.append("VIX近5日明显抬升，市场避险需求上升")
+            elif vix_change > 6:
+                penalty += 3.0
+                drivers.append("VIX温和上行，情绪转向谨慎")
+
+            # 原油冲击：地缘风险与通胀再定价
+            if oil_change > 10:
+                penalty += 6.0
+                drivers.append("原油近5日急涨，地缘与通胀压力上行")
+            elif oil_change > 6:
+                penalty += 4.0
+                drivers.append("原油持续上行，通胀再定价风险升温")
+            elif oil_change > 3:
+                penalty += 2.0
+                drivers.append("原油小幅上行，对风险资产形成边际压制")
+
+            # 美元指数上行：流动性偏紧 / 风险资产承压
+            if dxy_change > 2.0:
+                penalty += 4.0
+                drivers.append("美元指数明显走强，全球流动性环境趋紧")
+            elif dxy_change > 1.0:
+                penalty += 2.5
+                drivers.append("美元指数上行，风险资产估值承压")
+            elif dxy_change > 0.5:
+                penalty += 1.0
+                drivers.append("美元指数温和走强，避险资金流入美元")
+
+            # 同步共振：至少两项同时显著上行，额外惩罚
+            active_shocks = 0
+            if vix_change > 12:
+                active_shocks += 1
+            if oil_change > 6:
+                active_shocks += 1
+            if dxy_change > 1.0:
+                active_shocks += 1
+            if active_shocks >= 2:
+                penalty += 3.0
+                drivers.append("跨资产风险信号共振，市场进入risk-off状态")
+
+            final_penalty = round(max(0.0, min(20.0, penalty)), 2)
+            if final_penalty >= 12:
+                regime = "RISK_OFF"
+            elif final_penalty >= 6:
+                regime = "CAUTIOUS"
+            else:
+                regime = "NEUTRAL"
+
+            self._last_market_shock_snapshot = {
+                "enabled": True,
+                "window": "5d",
+                "penalty": final_penalty,
+                "regime": regime,
+                "factors": {
+                    "vix_change_pct": round(vix_change, 2),
+                    "oil_change_pct": round(oil_change, 2),
+                    "dxy_change_pct": round(dxy_change, 2),
+                },
+                "drivers": drivers,
+            }
+
+            success = True
+            return final_penalty
+        except Exception as e:
+            error_msg = str(e)
+            if not self._is_rate_limit_error(error_msg):
+                logger.warning(f"Error calculating market shock penalty: {e}")
+            self._last_market_shock_snapshot = {
+                "enabled": False,
+                "window": "5d",
+                "penalty": 0.0,
+                "regime": "NEUTRAL",
+                "factors": {
+                    "vix_change_pct": 0.0,
+                    "oil_change_pct": 0.0,
+                    "dxy_change_pct": 0.0,
+                },
+                "drivers": [],
+            }
+            return None
+        finally:
+            await self._record_yahoo_call("macro:market_shock", success, error_msg, start_time)
+
+    @staticmethod
+    def _safe_pct_change(data) -> float:
+        """计算最近约5个交易日涨跌幅百分比，异常时返回0。"""
+        try:
+            if data is None or data.empty:
+                return 0.0
+            closes = data["Close"]
+            if len(closes) < 2:
+                return 0.0
+            start_idx = -6 if len(closes) >= 6 else 0
+            start = float(closes.iloc[start_idx])
+            end = float(closes.iloc[-1])
+            if abs(start) < 1e-9:
+                return 0.0
+            return (end - start) / abs(start) * 100.0
+        except Exception:
+            return 0.0
     
     async def _calculate_monetary_policy_risk(self) -> float:
         """
