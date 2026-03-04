@@ -47,10 +47,14 @@ async def list_attribution_trades(
     total_stmt = select(func.count()).select_from(stmt.subquery())
     total = (await db.execute(total_stmt)).scalar_one_or_none() or 0
 
-    if total == 0 and auto_backfill:
-        # 冷启动：将 journal 历史数据正式回填到归因主表
-        await trade_attribution_engine.backfill_from_journal(db, days=days, limit=2000, dry_run=False)
-        total = (await db.execute(total_stmt)).scalar_one_or_none() or 0
+    if auto_backfill:
+        # 冷启动检查：用全局空表（不加 days 过滤）判断是否需要回填，避免因窗口太窄误判
+        global_total_stmt = select(func.count(TradeAttributionEntry.id))
+        global_total = (await db.execute(global_total_stmt)).scalar_one_or_none() or 0
+        if global_total == 0:
+            # 回填全量历史（days=None），不限制时间窗口，确保冷启动时能写入所有 journal 数据
+            await trade_attribution_engine.backfill_from_journal(db, days=None, limit=2000, dry_run=False)
+            total = (await db.execute(total_stmt)).scalar_one_or_none() or 0
 
     if total > 0:
         rows = list((await db.execute(stmt.limit(limit).offset(offset))).scalars().all())
