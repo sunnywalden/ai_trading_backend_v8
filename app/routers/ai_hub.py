@@ -190,7 +190,18 @@ async def get_calibration(
     """返回最新置信度校准快照。"""
     result = await confidence_calibration_service.get_latest_calibration(db, user_id)
     if not result:
-        return {"message": "No calibration data available yet. Run daily calibration first."}
+        # 懒初始化：首次访问时自动尝试跑一次，避免页面长时间空白
+        snap = await confidence_calibration_service.run_daily_calibration(db, user_id)
+        await db.commit()
+        result = await confidence_calibration_service.get_latest_calibration(db, user_id)
+        logger.info(
+            "[Calibration] lazy init run for user=%s total_samples=%s ece=%s",
+            user_id,
+            getattr(snap, "total_samples", None),
+            getattr(snap, "ece", None),
+        )
+        if not result:
+            return {"message": "No calibration data available yet. Run daily calibration first."}
     return result
 
 
@@ -201,6 +212,19 @@ async def get_calibration_history(
     user_id: str = Depends(get_current_user),
 ):
     """返回过去 N 天置信度校准历史。"""
+    rows = await confidence_calibration_service.get_calibration_history(db, user_id, days=days)
+    if rows:
+        return rows
+
+    # 历史为空时也尝试懒初始化一次，返回至少一个快照给前端
+    snap = await confidence_calibration_service.run_daily_calibration(db, user_id)
+    await db.commit()
+    logger.info(
+        "[Calibration] history lazy init run for user=%s total_samples=%s ece=%s",
+        user_id,
+        getattr(snap, "total_samples", None),
+        getattr(snap, "ece", None),
+    )
     return await confidence_calibration_service.get_calibration_history(db, user_id, days=days)
 
 

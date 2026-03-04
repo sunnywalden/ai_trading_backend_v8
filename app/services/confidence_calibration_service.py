@@ -16,7 +16,7 @@ from datetime import date, datetime, timedelta
 from typing import Any
 
 import numpy as np
-from sqlalchemy import select, desc
+from sqlalchemy import and_, desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.confidence_calibration_snapshot import ConfidenceCalibrationSnapshot
@@ -85,7 +85,7 @@ class ConfidenceCalibrationService:
         # 拉取数据（优先 trading_signal.actual_return，不足时回退 trade_journal）
         predicted, outcomes = await self._fetch_signal_outcomes(db, user_id, LOOKBACK_DAYS)
 
-        if len(predicted) < 5:
+        if len(predicted) == 0:
             logger.warning("CalibrationService: insufficient data (%d samples), skipping", len(predicted))
             snap = ConfidenceCalibrationSnapshot(
                 user_id=user_id,
@@ -204,21 +204,55 @@ class ConfidenceCalibrationService:
         from app.models.trade_journal import TradeJournal
         from app.models.trading_signal import TradingSignal
 
-        # 拉取已平仓 journal 记录（有 realized_pnl）
+        # 拉取已平仓 journal 记录：
+        # 1) realized_pnl 已回写，或
+        # 2) entry/exit 价格齐全（可推导收益）
         j_stmt = (
             select(
                 TradeJournal.symbol,
                 TradeJournal.entry_price,
+                TradeJournal.exit_price,
                 TradeJournal.quantity,
                 TradeJournal.realized_pnl,
             )
             .where(
-                TradeJournal.realized_pnl.is_not(None),
+                TradeJournal.account_id == user_id,
+                or_(
+                    TradeJournal.realized_pnl.is_not(None),
+                    and_(
+                        TradeJournal.entry_price.is_not(None),
+                        TradeJournal.exit_price.is_not(None),
+                    ),
+                ),
                 TradeJournal.created_at >= cutoff,
             )
             .order_by(TradeJournal.created_at.desc())
         )
         journals = (await db.execute(j_stmt)).all()
+        if not journals:
+            # 90 天窗口为空时，回退到最近闭环交易样本，避免页面长期空白
+            j_stmt_recent = (
+                select(
+                    TradeJournal.symbol,
+                    TradeJournal.entry_price,
+                    TradeJournal.exit_price,
+                    TradeJournal.quantity,
+                    TradeJournal.realized_pnl,
+                )
+                .where(
+                    TradeJournal.account_id == user_id,
+                    or_(
+                        TradeJournal.realized_pnl.is_not(None),
+                        and_(
+                            TradeJournal.entry_price.is_not(None),
+                            TradeJournal.exit_price.is_not(None),
+                        ),
+                    ),
+                )
+                .order_by(TradeJournal.created_at.desc())
+                .limit(300)
+            )
+            journals = (await db.execute(j_stmt_recent)).all()
         if not journals:
             return [], []
 
@@ -244,8 +278,12 @@ class ConfidenceCalibrationService:
         for j in journals:
             symbol = (j.symbol or "").strip().upper()
             ep = float(j.entry_price or 0)
+            xp = float(j.exit_price or 0)
             qty = float(j.quantity or 0)
-            realized = float(j.realized_pnl or 0)
+            realized_raw = j.realized_pnl
+            realized = float(realized_raw or 0)
+            if realized_raw is None and ep > 0 and xp > 0 and qty > 0:
+                realized = (xp - ep) * qty
             if ep <= 0 or qty <= 0:
                 continue
             confidence = sym_conf.get(symbol, 0.65)
