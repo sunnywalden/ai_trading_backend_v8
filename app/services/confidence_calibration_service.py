@@ -17,6 +17,7 @@ from typing import Any
 
 import numpy as np
 from sqlalchemy import and_, desc, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.confidence_calibration_snapshot import ConfidenceCalibrationSnapshot
@@ -71,30 +72,53 @@ class ConfidenceCalibrationService:
         """核心日度任务：计算 Brier/ECE 并写入快照。"""
         today = date.today()
 
-        # 检查今日是否已运行（若上次因数据不足生成了空快照，则删除并重算）
+        # 检查今日是否已运行（insufficient_data 快照会原地重算，不做删除重插）
         existing = await self._get_snapshot_by_date(db, user_id, today)
         if existing:
             if existing.brier_score is not None:
                 logger.info("CalibrationService: snapshot already exists for %s, skipping", today)
                 return existing
-            # 旧快照是 insufficient_data 占位，删除后重新计算
-            logger.info("CalibrationService: stale insufficient_data snapshot found for %s, recomputing", today)
-            await db.delete(existing)
-            await db.flush()
+            logger.info("CalibrationService: stale insufficient_data snapshot found for %s, recomputing in-place", today)
 
         # 拉取数据（优先 trading_signal.actual_return，不足时回退 trade_journal）
         predicted, outcomes = await self._fetch_signal_outcomes(db, user_id, LOOKBACK_DAYS)
 
         if len(predicted) == 0:
             logger.warning("CalibrationService: insufficient data (%d samples), skipping", len(predicted))
-            snap = ConfidenceCalibrationSnapshot(
-                user_id=user_id,
-                snapshot_date=today,
-                lookback_days=LOOKBACK_DAYS,
-                total_samples=len(predicted),
-            )
-            db.add(snap)
-            await db.flush()
+            if existing:
+                snap = existing
+                snap.brier_score = None
+                snap.ece = None
+                snap.overconfidence_bias = None
+                snap.calibration_buckets = None
+                snap.lookback_days = LOOKBACK_DAYS
+                snap.total_samples = len(predicted)
+                snap.valid_bucket_count = None
+                snap.needs_adjustment = False
+                snap.adjustment_factor = None
+                snap.adjustment_applied_at = None
+            else:
+                snap = ConfidenceCalibrationSnapshot(
+                    user_id=user_id,
+                    snapshot_date=today,
+                    lookback_days=LOOKBACK_DAYS,
+                    total_samples=len(predicted),
+                    needs_adjustment=False,
+                )
+                db.add(snap)
+
+            try:
+                await db.flush()
+            except IntegrityError as e:
+                msg = str(e)
+                if "idx_ccs_user_date" not in msg and "Duplicate entry" not in msg:
+                    raise
+                await db.rollback()
+                latest = await self._get_snapshot_by_date(db, user_id, today)
+                if latest:
+                    logger.info("CalibrationService: duplicate snapshot race detected for %s, using existing", today)
+                    return latest
+                raise
             return snap
 
         # 计算 bucket 映射
@@ -106,21 +130,45 @@ class ConfidenceCalibrationService:
         needs_adj = ece_val > ECE_WARN_THRESHOLD
         adj_factor = _calibration_adjustment_factor(ece_val) if needs_adj else None
 
-        snap = ConfidenceCalibrationSnapshot(
-            user_id=user_id,
-            snapshot_date=today,
-            brier_score=round(brier, 6),
-            ece=round(ece_val, 6),
-            overconfidence_bias=round(overconf, 6),
-            calibration_buckets=buckets,
-            lookback_days=LOOKBACK_DAYS,
-            total_samples=len(predicted),
-            valid_bucket_count=sum(1 for b in buckets if b["count"] >= 10),
-            needs_adjustment=needs_adj,
-            adjustment_factor=round(adj_factor, 4) if adj_factor else None,
-        )
-        db.add(snap)
-        await db.flush()
+        if existing:
+            snap = existing
+            snap.brier_score = round(brier, 6)
+            snap.ece = round(ece_val, 6)
+            snap.overconfidence_bias = round(overconf, 6)
+            snap.calibration_buckets = buckets
+            snap.lookback_days = LOOKBACK_DAYS
+            snap.total_samples = len(predicted)
+            snap.valid_bucket_count = sum(1 for b in buckets if b["count"] >= 10)
+            snap.needs_adjustment = needs_adj
+            snap.adjustment_factor = round(adj_factor, 4) if adj_factor else None
+        else:
+            snap = ConfidenceCalibrationSnapshot(
+                user_id=user_id,
+                snapshot_date=today,
+                brier_score=round(brier, 6),
+                ece=round(ece_val, 6),
+                overconfidence_bias=round(overconf, 6),
+                calibration_buckets=buckets,
+                lookback_days=LOOKBACK_DAYS,
+                total_samples=len(predicted),
+                valid_bucket_count=sum(1 for b in buckets if b["count"] >= 10),
+                needs_adjustment=needs_adj,
+                adjustment_factor=round(adj_factor, 4) if adj_factor else None,
+            )
+            db.add(snap)
+
+        try:
+            await db.flush()
+        except IntegrityError as e:
+            msg = str(e)
+            if "idx_ccs_user_date" not in msg and "Duplicate entry" not in msg:
+                raise
+            await db.rollback()
+            latest = await self._get_snapshot_by_date(db, user_id, today)
+            if latest:
+                logger.info("CalibrationService: duplicate snapshot race detected for %s, using existing", today)
+                return latest
+            raise
         logger.info(
             "CalibrationService: date=%s brier=%.4f ece=%.4f needs_adj=%s",
             today, brier, ece_val, needs_adj,
