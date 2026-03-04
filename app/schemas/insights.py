@@ -32,6 +32,14 @@ class InsightListResponse(BaseModel):
     page:   int
 
 
+class InsightRepositoryStatusResponse(BaseModel):
+    insight_count: int
+    attribution_count_30d: int
+    journal_count_30d: int
+    has_data_source: bool
+    hint: str
+
+
 class ToggleInsightRequest(BaseModel):
     active: bool
 
