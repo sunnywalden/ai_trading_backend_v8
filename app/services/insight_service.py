@@ -149,6 +149,10 @@ class WeeklyInsightGenerator:
                 logger.warning(f"[WeeklyInsight] failed to persist insight: {e}")
 
         await db.commit()
+        # refresh to re-load all columns (commit expires ORM objects by default;
+        # accessing attributes outside the async greenlet would raise MissingGreenlet)
+        for ins in created:
+            await db.refresh(ins)
         logger.info(f"[WeeklyInsight] generated {len(created)} new insights")
         return created
 

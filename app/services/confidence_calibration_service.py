@@ -71,24 +71,23 @@ class ConfidenceCalibrationService:
         """核心日度任务：计算 Brier/ECE 并写入快照。"""
         today = date.today()
 
-        # 检查今日是否已运行
+        # 检查今日是否已运行（若上次因数据不足生成了空快照，则删除并重算）
         existing = await self._get_snapshot_by_date(db, user_id, today)
         if existing:
-            logger.info("CalibrationService: snapshot already exists for %s, skipping", today)
-            return existing
+            if existing.brier_score is not None:
+                logger.info("CalibrationService: snapshot already exists for %s, skipping", today)
+                return existing
+            # 旧快照是 insufficient_data 占位，删除后重新计算
+            logger.info("CalibrationService: stale insufficient_data snapshot found for %s, recomputing", today)
+            await db.delete(existing)
+            await db.flush()
 
-        # 拉取数据
+        # 拉取数据（优先 trading_signal.actual_return，不足时回退 trade_journal）
         predicted, outcomes = await self._fetch_signal_outcomes(db, user_id, LOOKBACK_DAYS)
 
-        if len(predicted) < 20:
+        if len(predicted) < 5:
             logger.warning("CalibrationService: insufficient data (%d samples), skipping", len(predicted))
             snap = ConfidenceCalibrationSnapshot(
-                user_id=user_id,
-                snapshot_date=today,
-                lookback_days=LOOKBACK_DAYS,
-                total_samples=len(predicted),
-                status_note="insufficient_data",
-            ) if hasattr(ConfidenceCalibrationSnapshot, "status_note") else ConfidenceCalibrationSnapshot(
                 user_id=user_id,
                 snapshot_date=today,
                 lookback_days=LOOKBACK_DAYS,
@@ -158,9 +157,14 @@ class ConfidenceCalibrationService:
     async def _fetch_signal_outcomes(
         self, db: AsyncSession, user_id: str, lookback_days: int
     ) -> tuple[list[float], list[float]]:
-        """从 trading_signal 表拉取置信度 + 实际胜率对。"""
+        """从 trading_signal 表拉取置信度 + 实际胜率对。
+
+        当 actual_return 样本不足（< 20）时，自动从 trade_journal 补充历史数据。
+        """
         from app.models.trading_signal import TradingSignal
         cutoff = datetime.utcnow() - timedelta(days=lookback_days)
+        predicted: list[float] = []
+        outcomes: list[float] = []
         try:
             stmt = (
                 select(TradingSignal.confidence, TradingSignal.actual_return)
@@ -173,10 +177,87 @@ class ConfidenceCalibrationService:
             rows = (await db.execute(stmt)).all()
             predicted = [float(r.confidence or 0.5) for r in rows]
             outcomes = [1.0 if (r.actual_return or 0) > 0 else 0.0 for r in rows]
-            return predicted, outcomes
         except Exception as e:
             logger.warning("CalibrationService: fetch failed: %s", e)
+
+        # Fallback：actual_return 样本不足时，从 trade_journal 历史记录补充
+        if len(predicted) < 20:
+            try:
+                extra_pred, extra_out = await self._fetch_outcomes_from_journal(
+                    db, user_id, cutoff
+                )
+                predicted.extend(extra_pred)
+                outcomes.extend(extra_out)
+            except Exception as e:
+                logger.warning("CalibrationService: journal fallback failed: %s", e)
+
+        return predicted, outcomes
+
+    async def _fetch_outcomes_from_journal(
+        self, db: AsyncSession, user_id: str, cutoff: datetime
+    ) -> tuple[list[float], list[float]]:
+        """从 trade_journal 已平仓记录构建校准样本（fallback）。
+
+        以同期同 symbol 的 TradingSignal.confidence 作为预测置信度，
+        以 realized_pnl > 0 作为实际胜率结果。
+        """
+        from app.models.trade_journal import TradeJournal
+        from app.models.trading_signal import TradingSignal
+
+        # 拉取已平仓 journal 记录（有 realized_pnl）
+        j_stmt = (
+            select(
+                TradeJournal.symbol,
+                TradeJournal.entry_price,
+                TradeJournal.quantity,
+                TradeJournal.realized_pnl,
+            )
+            .where(
+                TradeJournal.realized_pnl.is_not(None),
+                TradeJournal.created_at >= cutoff,
+            )
+            .order_by(TradeJournal.created_at.desc())
+        )
+        journals = (await db.execute(j_stmt)).all()
+        if not journals:
             return [], []
+
+        # 构建 symbol → 最新 confidence 映射（来自同期 TradingSignal）
+        sig_stmt = (
+            select(TradingSignal.symbol, TradingSignal.confidence)
+            .where(
+                TradingSignal.user_id == user_id,
+                TradingSignal.created_at >= cutoff,
+                TradingSignal.confidence.isnot(None),
+            )
+            .order_by(TradingSignal.created_at.desc())
+        )
+        sig_rows = (await db.execute(sig_stmt)).all()
+        sym_conf: dict[str, float] = {}
+        for s in sig_rows:
+            k = (s.symbol or "").strip().upper()
+            if k and k not in sym_conf:
+                sym_conf[k] = float(s.confidence)
+
+        predicted: list[float] = []
+        outcomes: list[float] = []
+        for j in journals:
+            symbol = (j.symbol or "").strip().upper()
+            ep = float(j.entry_price or 0)
+            qty = float(j.quantity or 0)
+            realized = float(j.realized_pnl or 0)
+            if ep <= 0 or qty <= 0:
+                continue
+            confidence = sym_conf.get(symbol, 0.65)
+            outcome = 1.0 if realized > 0 else 0.0
+            predicted.append(confidence)
+            outcomes.append(outcome)
+
+        logger.info(
+            "CalibrationService: journal fallback produced %d samples for user=%s",
+            len(predicted), user_id,
+        )
+        return predicted, outcomes
 
     async def _get_snapshot_by_date(
         self, db: AsyncSession, user_id: str, snapshot_date: date
