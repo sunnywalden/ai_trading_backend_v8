@@ -102,6 +102,8 @@ class EventCalendarEntry(Base):
         Index("idx_event_symbol_date",   "symbol", "event_date"),
         Index("idx_event_type_date",     "event_type", "event_date"),
         Index("idx_event_fence_pending", "fence_applied", "event_date"),
+        # V10.3: 唯一索引，防止多来源或重复抓取导致入库重复行
+        Index("idx_event_unique_key", "symbol", "event_type", "event_date", "title", unique=True),
     )
 
     def __repr__(self) -> str:  # pragma: no cover
