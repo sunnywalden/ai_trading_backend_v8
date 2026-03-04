@@ -143,6 +143,7 @@ async def get_autonomy_status(
     """获取 AI 自主运行状态 (V10)，包含实时信号流水线统计"""
     account_id = await _resolve_account_id()
     today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    today_utc_date = today.date().isoformat()
 
     # 今日已执行交易数（与引擎对齐：从审计日志统计 order_id 非空的下单记录）
     exec_result = await session.execute(
@@ -228,6 +229,8 @@ async def get_autonomy_status(
         "daily_trades_today": daily_trades,
         "daily_trades_today_autonomous": daily_trades,
         "daily_trades_today_broker": broker_filled_today,
+        "daily_trades_today_broker_tz": "UTC",
+        "daily_trades_today_broker_date": today_utc_date,
         "max_daily_trades": settings.MAX_DAILY_TRADES,
         "revoke_window_minutes": settings.REVOKE_WINDOW_MINUTES,
         "signal_pipeline": pipeline,
