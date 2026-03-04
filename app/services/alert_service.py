@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import select, func, and_, desc
+from sqlalchemy import and_, desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -24,9 +24,15 @@ class AlertService:
         await self.session.refresh(alert)
         return alert
 
-    async def update_alert(self, alert_id: int, account_id: str, payload: dict) -> Optional[PriceAlert]:
+    async def update_alert(
+        self,
+        alert_id: int,
+        account_id: str,
+        payload: dict,
+        account_ids: Optional[list[str]] = None,
+    ) -> Optional[PriceAlert]:
         """更新告警规则"""
-        alert = await self._get_by_id(alert_id, account_id)
+        alert = await self._get_by_id(alert_id, account_id, account_ids=account_ids)
         if not alert:
             return None
         for key, value in payload.items():
@@ -36,28 +42,39 @@ class AlertService:
         await self.session.refresh(alert)
         return alert
 
-    async def delete_alert(self, alert_id: int, account_id: str) -> bool:
+    async def delete_alert(self, alert_id: int, account_id: str, account_ids: Optional[list[str]] = None) -> bool:
         """删除告警规则"""
-        alert = await self._get_by_id(alert_id, account_id)
+        alert = await self._get_by_id(alert_id, account_id, account_ids=account_ids)
         if not alert:
             return False
         await self.session.delete(alert)
         await self.session.commit()
         return True
 
-    async def list_alerts(self, account_id: str, status: Optional[str] = None) -> list[PriceAlert]:
+    async def list_alerts(
+        self,
+        account_id: str,
+        status: Optional[str] = None,
+        account_ids: Optional[list[str]] = None,
+    ) -> list[PriceAlert]:
         """查询告警列表"""
-        stmt = select(PriceAlert).where(PriceAlert.account_id == account_id)
+        ids = [i for i in (account_ids or [account_id]) if i]
+        if not ids:
+            ids = [account_id]
+        stmt = select(PriceAlert).where(PriceAlert.account_id.in_(ids))
         if status:
             stmt = stmt.where(PriceAlert.alert_status == status)
         stmt = stmt.order_by(desc(PriceAlert.created_at))
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
-    async def get_history(self, account_id: str, limit: int = 20) -> list[AlertHistory]:
+    async def get_history(self, account_id: str, limit: int = 20, account_ids: Optional[list[str]] = None) -> list[AlertHistory]:
         """查询告警触发历史"""
+        ids = [i for i in (account_ids or [account_id]) if i]
+        if not ids:
+            ids = [account_id]
         stmt = select(AlertHistory).where(
-            AlertHistory.account_id == account_id
+            AlertHistory.account_id.in_(ids)
         ).order_by(desc(AlertHistory.trigger_time)).limit(limit)
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
@@ -129,9 +146,12 @@ class AlertService:
         self.session.add(history)
         await self.session.commit()
 
-    async def _get_by_id(self, alert_id: int, account_id: str) -> Optional[PriceAlert]:
+    async def _get_by_id(self, alert_id: int, account_id: str, account_ids: Optional[list[str]] = None) -> Optional[PriceAlert]:
+        ids = [i for i in (account_ids or [account_id]) if i]
+        if not ids:
+            ids = [account_id]
         stmt = select(PriceAlert).where(
-            and_(PriceAlert.id == alert_id, PriceAlert.account_id == account_id)
+            and_(PriceAlert.id == alert_id, PriceAlert.account_id.in_(ids))
         )
         result = await self.session.execute(stmt)
         return result.scalars().first()
