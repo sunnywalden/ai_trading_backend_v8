@@ -195,28 +195,37 @@ class DecisionPostMortemService:
             ),
         )
 
+        keyword = (q or "").strip().upper()
+        local_filters = [
+            TradeJournal.account_id == user_id,
+            TradeJournal.symbol.isnot(None),
+            closed_predicate,
+        ]
+        if keyword:
+            local_filters.append(func.upper(TradeJournal.symbol).like(f"%{keyword}%"))
+
         stmt = (
             select(TradeJournal)
-            .where(
-                TradeJournal.account_id == user_id,
-                TradeJournal.symbol.isnot(None),
-                closed_predicate,
-            )
+            .where(*local_filters)
             .order_by(desc(TradeJournal.created_at))
-            .limit(max(limit * 3, limit))
+            .limit(max(limit * 5, limit))
         )
         rows = (await db.execute(stmt)).scalars().all()
 
         # 兼容历史环境：若 account_id 与登录用户不一致（如 admin / sunnywalden），回退全局闭环样本
         if not rows:
+            fallback_filters = [
+                TradeJournal.symbol.isnot(None),
+                closed_predicate,
+            ]
+            if keyword:
+                fallback_filters.append(func.upper(TradeJournal.symbol).like(f"%{keyword}%"))
+
             fallback_stmt = (
                 select(TradeJournal)
-                .where(
-                    TradeJournal.symbol.isnot(None),
-                    closed_predicate,
-                )
+                .where(*fallback_filters)
                 .order_by(desc(TradeJournal.created_at))
-                .limit(max(limit * 3, limit))
+                .limit(max(limit * 5, limit))
             )
             rows = (await db.execute(fallback_stmt)).scalars().all()
             logger.warning(
@@ -225,7 +234,6 @@ class DecisionPostMortemService:
                 len(rows),
             )
 
-        keyword = (q or "").strip().upper()
         out: list[dict[str, Any]] = []
         for r in rows:
             symbol = (getattr(r, "symbol", "") or "").upper()
