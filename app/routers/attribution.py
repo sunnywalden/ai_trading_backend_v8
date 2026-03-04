@@ -6,6 +6,7 @@ Endpoints:
 """
 from __future__ import annotations
 
+import logging
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +22,7 @@ from app.schemas.attribution import (
 from app.services.trade_attribution_engine import trade_attribution_engine
 
 router = APIRouter(prefix="/api/v1/attribution", tags=["Attribution"])
+logger = logging.getLogger(__name__)
 
 
 @router.get("/trades", response_model=TradeAttributionListResponse, summary="历史归因记录")
@@ -53,7 +55,8 @@ async def list_attribution_trades(
         global_total = (await db.execute(global_total_stmt)).scalar_one_or_none() or 0
         if global_total == 0:
             # 回填全量历史（days=None），不限制时间窗口，确保冷启动时能写入所有 journal 数据
-            await trade_attribution_engine.backfill_from_journal(db, days=None, limit=2000, dry_run=False)
+            bf = await trade_attribution_engine.backfill_from_journal(db, days=None, limit=2000, dry_run=False)
+            logger.info("[Attribution] auto backfill on empty table: %s", bf)
             total = (await db.execute(total_stmt)).scalar_one_or_none() or 0
 
     if total > 0:
@@ -68,6 +71,13 @@ async def list_attribution_trades(
             category=category,
             days=days,
         )
+        logger.info(
+            "[Attribution] fallback from journal used, days=%s symbol=%s category=%s total=%s",
+            days,
+            symbol,
+            category,
+            fallback_total,
+        )
         items = [TradeAttributionItemResponse.model_validate(r) for r in fallback_items]
         total = fallback_total
 
@@ -81,6 +91,7 @@ async def attribution_summary(
 ):
     """返回最近 N 天的归因分类统计（WIN / LOSS / BREAKEVEN 计数 + 平均分）。"""
     data = await trade_attribution_engine.get_summary(db, days=days)
+    logger.info("[Attribution] summary days=%s breakdown_count=%s", days, len(data.get("breakdown") or []))
     return AttributionSummaryResponse(**data)
 
 
