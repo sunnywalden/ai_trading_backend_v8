@@ -31,6 +31,7 @@ UNIVERSE_MAPPING = {
 }
 
 DEFAULT_SYMBOLS = UNIVERSE_MAPPING["US_LARGE_MID_TECH"]
+HK_DEFAULT_SYMBOLS = ["00700", "09988", "03690", "01810", "09618", "09888", "00005", "02318", "01299", "00941"]
 AUTO_UNIVERSE_KEY = "AUTO_MARKET_TIME"
 
 PHASES = [
@@ -58,8 +59,8 @@ def _is_hk_market_hours(ts_utc: datetime) -> bool:
     if hk.weekday() >= 5:
         return False
     hhmm = hk.hour * 60 + hk.minute
-    # 09:30-12:00, 13:00-16:00
-    morning = 9 * 60 + 30 <= hhmm <= 12 * 60
+    # 09:00-12:00, 13:00-16:00
+    morning = 9 * 60 <= hhmm <= 12 * 60
     afternoon = 13 * 60 <= hhmm <= 16 * 60
     return morning or afternoon
 
@@ -127,11 +128,12 @@ async def _select_universe_symbols(session: AsyncSession, run: StrategyRun) -> t
         }
     if raw_key in ("HK_ALL", "HK_ALL_LOCAL"):
         symbols = await _get_local_market_symbols("HK")
-        return "HK_ALL_LOCAL", symbols or DEFAULT_SYMBOLS, {
+        final_symbols = symbols or HK_DEFAULT_SYMBOLS
+        return "HK_ALL_LOCAL", final_symbols, {
             "selection_mode": "EXPLICIT_HK_ALL",
             "resolved_market": "HK",
             "fallback_to_default_symbols": not bool(symbols),
-            "fallback_reason": None if symbols else "HK_LOCAL_UNIVERSE_EMPTY",
+            "fallback_reason": None if symbols else "HK_LOCAL_UNIVERSE_EMPTY_FALLBACK_TO_HK_DEFAULT",
         }
 
     # 自动按扫描时间选择市场
@@ -140,15 +142,14 @@ async def _select_universe_symbols(session: AsyncSession, run: StrategyRun) -> t
     symbols = await _get_local_market_symbols(market)
     fallback_reason = None
 
-    # 若港股池为空，回退到美股全量池；若仍为空，回退默认样本池
-    if not symbols and market != "US":
-        fallback_reason = "HK_LOCAL_UNIVERSE_EMPTY_FALLBACK_TO_US"
-        symbols = await _get_local_market_symbols("US")
-        market = "US"
-
-    final_symbols = symbols or DEFAULT_SYMBOLS
-    if not symbols and fallback_reason is None:
-        fallback_reason = "US_LOCAL_UNIVERSE_EMPTY_FALLBACK_TO_DEFAULT"
+    if market == "HK":
+        final_symbols = symbols or HK_DEFAULT_SYMBOLS
+        if not symbols:
+            fallback_reason = "HK_LOCAL_UNIVERSE_EMPTY_FALLBACK_TO_HK_DEFAULT"
+    else:
+        final_symbols = symbols or DEFAULT_SYMBOLS
+        if not symbols:
+            fallback_reason = "US_LOCAL_UNIVERSE_EMPTY_FALLBACK_TO_DEFAULT"
 
     return f"{market}_ALL_LOCAL", final_symbols, {
         "selection_mode": "AUTO_MARKET_TIME",

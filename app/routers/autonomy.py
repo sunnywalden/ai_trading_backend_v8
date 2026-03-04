@@ -20,7 +20,7 @@ from app.core.runtime_config import (
 from app.models.db import get_session
 from app.models.trading_signal import TradingSignal, SignalStatus
 from app.models.autonomy_audit_log import AutonomyAuditLog
-from app.models.strategy import Strategy, StrategyRun
+from app.models.strategy import Strategy, StrategyRun, HistoricalStrategyRun
 from app.services.autonomous_engine import autonomous_engine
 
 router = APIRouter(prefix="/autonomy", tags=["V10-Autonomy"])
@@ -383,6 +383,7 @@ async def get_signal_pipeline(
 
     strategy_name_map: dict[str, str] = {}
     strategy_run_map: dict[str, StrategyRun] = {}
+    run_universe_meta_map: dict[str, dict] = {}
 
     if strategy_ids:
         strategy_result = await session.execute(
@@ -395,6 +396,18 @@ async def get_signal_pipeline(
             select(StrategyRun).where(StrategyRun.id.in_(strategy_run_ids))
         )
         strategy_run_map = {run.id: run for run in run_result.scalars().all()}
+
+        history_result = await session.execute(
+            select(HistoricalStrategyRun.strategy_run_id, HistoricalStrategyRun.status_payload)
+            .where(HistoricalStrategyRun.strategy_run_id.in_(strategy_run_ids))
+        )
+        for run_id, status_payload in history_result.fetchall():
+            universe_meta = {}
+            if isinstance(status_payload, dict):
+                universe_raw = status_payload.get("universe")
+                if isinstance(universe_raw, dict):
+                    universe_meta = universe_raw
+            run_universe_meta_map[run_id] = universe_meta
 
     # 获取这些信号对应的执行意图（用于备注显示拒绝原因）
     from app.models.execution_intent import AutonomousExecutionIntent
@@ -456,6 +469,47 @@ async def get_signal_pipeline(
                 or (
                     strategy_run_map[s.strategy_run_id].target_universe
                     if s.strategy_run_id in strategy_run_map
+                    else None
+                ),
+                "resolved_market": (
+                    (s.extra_metadata or {}).get("resolved_market")
+                    if isinstance(s.extra_metadata, dict)
+                    else None
+                )
+                or (
+                    (run_universe_meta_map.get(s.strategy_run_id) or {}).get("resolved_market")
+                    if s.strategy_run_id
+                    else None
+                ),
+                "selection_mode": (
+                    (s.extra_metadata or {}).get("selection_mode")
+                    if isinstance(s.extra_metadata, dict)
+                    else None
+                )
+                or (
+                    (run_universe_meta_map.get(s.strategy_run_id) or {}).get("selection_mode")
+                    if s.strategy_run_id
+                    else None
+                ),
+                "fallback_reason": (
+                    (s.extra_metadata or {}).get("fallback_reason")
+                    if isinstance(s.extra_metadata, dict)
+                    else None
+                )
+                or (
+                    (run_universe_meta_map.get(s.strategy_run_id) or {}).get("fallback_reason")
+                    if s.strategy_run_id
+                    else None
+                ),
+                "fallback_to_default_symbols": (
+                    (s.extra_metadata or {}).get("fallback_to_default_symbols")
+                    if isinstance(s.extra_metadata, dict)
+                    else None
+                )
+                if isinstance((s.extra_metadata or {}), dict) and (s.extra_metadata or {}).get("fallback_to_default_symbols") is not None
+                else (
+                    (run_universe_meta_map.get(s.strategy_run_id) or {}).get("fallback_to_default_symbols")
+                    if s.strategy_run_id
                     else None
                 ),
                 "executed_at": s.executed_at.isoformat() if s.executed_at else None,

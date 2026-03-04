@@ -1,7 +1,13 @@
+> ⚠️ **V10.4 M6 文档拆分通知**
+> 本文档已拆分为模块化子文档，位于 [`docs/product/`](product/README.md)。
+> 本文件保留作为向后兼容入口，正式维护请在 `docs/product/` 目录进行。
+
 # 产品需求文档 (PRD)
 
 > **AI量化交易闭环系统** - 个人美港股智能交易平台  
-> 版本：V10.3.3 | 更新日期：2026-03-02  
+> 版本：V10.4（规划中）| 更新日期：2026-03-04  
+> 变更摘要（V10.4）：**巩固、治理与完整性**——M1 数据闭环治理（actual_return 自动回填 Job + IC 真实化 + 因子快照自动化 + 2026 事件日历 + LLM 降级）；M2 UI 大清洗（47→≤38 页面 + 导航 6→4 组 + 执行三合一 + 双仪表盘合并）；M3 Copilot 全局浮窗（Cmd+K 任意页面唤起 + 页面上下文注入 + 实时系统状态 System Prompt）；M4 自主循环稳定增强（AutonomyHealthMonitor + Job Watchdog + Multi-Agent 真实并发 + 三新熔断 + WebSocket 重连）；M5 移动触达（Dashboard/Alert/Copilot 竖屏可用）；M6 文档重构（PRODUCT.md 拆分为模块化多文件，主文件 ≤300 行）  
+> 变更摘要（V10.3.4）：**稳定性与冷启动治理（Stability & Cold-Start Governance）**——全服务冷启动双保险（Dashboard / 代理运行状态 / 执行质量记录 / 置信度校准补全零数据占位逻辑，消除前端 404 抖动）；**市场全量股票池（Market Universe Pool）**——新增 `market_universe` 表，支持美股/港股全量标的同步与缓存；**AI 决策深化**——自主引擎支持 REDUCE/EXIT 信号规则执行，`HOLD/qty≤0` 语义纠偏为 SKIPPED（no-op 原因落库），信号管道新增 `quantity_mode/quantity_value` 标准化；**决策事后剖析升级**——从手工录入升级为交易选择驱动；**多账户兼容**——告警/归因/仪表板接口统一账户 ID 解析；**事件去重**——事件表唯一索引 + 重复写入保护  
 > 变更摘要（V10.3.3）：**P0 可观测性 2.0（Observability 2.0）**——Execution Microscope 执行显微镜（IS 成本四分解：迟延成本/市场冲击/机会成本/时机成本）+ Signal Intelligence Observatory 信号情报观察站（Alpha Decay Monitor 信号半衰期曲线 + Factor Correlation Matrix + Crowding Detector）+ Risk Observability Cluster（实时因子敞口条 + Tail Risk ES 仪表 + 相关性骤升告警）；**P1 AI中枢 2.0（AI Hub 2.0）**——Multi-Agent Orchestration 五智能体协作框架（市场分析 / 风险挑战 / 执行优化 / 深度研究 / Orchestrator 总协调）+ AI Confidence Calibration 置信度校准系统（Reliability Diagram + 自适应降评）+ Adaptive Factor Framework 自适应因子框架（Kalman Filter实时权重更新 + 因子拥挤度检测）+ Decision Post-Mortem Engine 决策事后剖析（反事实分析 + 洞察反哺 InsightService）；**P2 指挥室演进（War Room Dashboard）**——War Room Mode 全屏六格指挥视图 + real-time P&L Ticker + Intelligence Feed AI情报流 + Portfolio Exposure Center 组合敞口中枢 + Smart Alert Center 智能告警分级中枢
 > 变更摘要（V10.3.2）：**P0 执行幂等主键（Execution Intent）**——新增 `autonomous_execution_intent` 表与 `idempotency_key` 唯一约束，确保同一信号同一动作只受理一次；**P1 统一执行入口强化**——`AutonomousEngine.run_decision_cycle` 内统一进入 execution-intent 状态机（PENDING/EXECUTING/SUCCESS/FAILED/SKIPPED/REJECTED），并补齐 RiskGate/CircuitBreaker 拒绝分支的 intent 落库；**P2 语义一致性升级**——交易信号新增 `quantity_mode + quantity_value`（`PCT_EQUITY` / `ABS_SHARES`）并在自主决策链路标准化解析，且补齐策略引擎/快捷交易/交易计划/持仓监控等入口写入，`HOLD/qty<=0` 由 `EXECUTED` 语义纠偏为 `SKIPPED`。
 > 变更摘要（V10.3）：**交易全链路可观测性（Full Trade Observability）**——Trade Lifecycle Center（交易生命周期中枢）双维度可视化（计划生命周期状态机 + 持仓生命周期状态机）+ 实时甘特泳道图；**智能订单簿（Intelligent Order Book）**——统一交易列表（标的/方向/价位/17阶段进度/AI简述/实时P&L/风险标记），替代分散的 AI Advisor + Journal 孤岛视图；**AI 决策溯源面板（Decision Provenance）**——从原始信号到最终执行的完整因果链可视化；**系统态势感知栏（System Situational Awareness Bar）**——全局粘性状态栏，实时聚合体制/VaR水位/事件围栏/活跃阶段/执行队列等关键状态  
@@ -9,9 +15,73 @@
 > 变更摘要（V10.2-M1）：**市场体制感知引擎** ——RegimeClassifier 五维评分体系（趋势强度/波动率制度/量价关系/宏观环境/广度指标）、6类体制自动识别（BULL_TREND / BEAR_TREND / HIGH_VOL / MEAN_REVERT / RANGE_BOUND / CRISIS）、3日确认防噪机制、EventBus 异步事件总线（REGIME_CHANGED 事件驱动策略权重自适应切换、VaR 门限动态调整）、StrategyWeightAllocator 体制感知仓位分配、AI 自主交易闭环升级至 **17 阶段**  
 > 变更摘要（V10.1）：**兑现承诺 + 打磨质量 + 扩展边界**——Tiger 真实下单接入（覆盖美股/港股/期权）、FULL 模式完整自主交易闭环、Copilot 操作指令执行落地、Dashboard 所有 TODO 指标真实化、AI 组合级决策升级（结构化 JSON 输出 + 批量组合决策）、ETF 标的池正式支持、港股支持（Tiger API 统一，无需 Futu）、Paper→Live 毕业自动化、Dashboard WebSocket 实时推送；**本版本明确不含 Telegram 通知，FULL 模式具备完全自主交易能力**
 
-> 历史版本：V10.0（2026-02-24）变更摘要见下方历史记录节
+> 历史版本：V10.0（2026-02-24）变更摘要见下方历史记录节  
+> 详细规划：[V10.4 Release Plan](archived/v10/v10.4/RELEASE_PLAN_V10.4.md)
 
-### V10.3.3 验收标准（新增）
+---
+
+### V10.4 验收标准（规划中）
+
+> 完整规划详见 [docs/archived/v10/v10.4/RELEASE_PLAN_V10.4.md](archived/v10/v10.4/RELEASE_PLAN_V10.4.md)
+
+#### M1 — 数据闭环治理
+
+- [ ] `actual_return` 每日 21:30 ET 自动回填，已平仓信号回填率 ≥ 95%
+- [ ] IC 计算无 hardcoded fallback，所有维度返回 `data_quality` 字段（`REAL`/`INSUFFICIENT`/`STALE`）
+- [ ] `portfolio_factor_exposure` 快照每 5 分钟自动写入（交易时段），无需手动 seed
+- [ ] 事件日历补全 2026 年 FOMC / CPI / NFP / PCE 全年数据
+- [ ] 所有 LLM 调用通过 `LLMCallGuard` 包装，超时/429 不导致 500；`llm_call_log` 记录全量调用
+
+#### M2 — UI 大清洗
+
+- [ ] 前端页面总数 ≤ 38，路由总数 ≤ 40
+- [ ] 废弃路由均有 301 重定向，无 404
+- [ ] 导航一级分组 ≤ 4（重组为：首页仪表盘 / 交易中枢 / 研究&分析 / AI洞察&系统）
+- [ ] DashboardPage + DashboardV2Page 合并为单页（`/dashboard`）
+- [ ] 执行三页（ExecutionCenter/List/Algo）合并为 Order Book + Tab
+
+#### M3 — Copilot 全局化
+
+- [ ] 所有页面右下角 Copilot 浮按钮，`Cmd+K` 可唤起浮窗
+- [ ] 5 个核心页面实现上下文注入（Dashboard/OrderBook/RiskCluster/WarRoom/Regime）
+- [ ] Copilot System Prompt 包含实时系统状态注入（体制/VaR/持仓/告警摘要）
+
+#### M4 — 自主循环稳定增强
+
+- [ ] `AutonomyHealthMonitor` 每 10 分钟执行 8 项健康自检，结果写入 `system_health_snapshot`
+- [ ] `JobWatchdog` 在 Job 超时 2× 预期间隔时自动重注册并补跑
+- [ ] `MultiAgentOrchestrator` 在每次决策周期真实并发调用 5 Agent，`agent_communication_log` 可查
+- [ ] WebSocket 前端指数退避重连（初始 1s，最大 30s），断线 ≤ 30s 恢复推送
+
+#### M5 — 移动触达
+
+- [ ] Dashboard 在 375px 竖屏下无横向溢出，总 PnL / 活跃持仓 / VaR 水位可见
+- [ ] Smart Alert 在 375px 下可滚动，可标记已读
+- [ ] Copilot 浮层在 375px 下全宽，输入框固定底部
+
+#### M6 — 文档重构
+
+- [ ] `PRODUCT.md` 主文档 ≤ 300 行，拆分为 `product/0X_xxx.md` 9 个子文档
+- [ ] `FRONTEND_DESIGN.md` 主文档 ≤ 400 行
+
+---
+
+### V10.3.4 验收标准（归档）
+
+**稳定性与冷启动治理（已全部交付）**：
+
+- [x] 全服务冷启动占位：Dashboard / Agent 运行状态 / 执行质量记录 / 置信度校准快照补全零数据返回逻辑，消除前端 404 抖动
+- [x] `market_universe` 表上线，`MarketUniverseService` 支持美股/港股全量标的同步与缓存；`GET /api/v1/market-universe/status` 返回标的活跃状态及同步信息
+- [x] 自主引擎支持 REDUCE/EXIT 信号规则执行；`HOLD/qty≤0` 语义纠偏为 SKIPPED（no-op 原因字段落库）
+- [x] 事件表新增唯一索引 + 去重逻辑，防止重复事件写入
+- [x] 多账户兼容性：告警 / 仪表板 / 归因 / 量化闭环接口统一账户 ID 解析
+- [x] 决策事后剖析（Post-Mortem）从手工录入升级为交易选择驱动
+- [x] 置信度校准快照支持原地更新与重复检测
+- [x] DB 迁移：`v10.3.4_add_market_universe_table` 已执行
+
+---
+
+### V10.3.3 验收标准（归档）
 
 #### 一、可观测性 2.0 (Observability 2.0)
 
@@ -1052,7 +1122,7 @@ AI_COMPLEX_MODEL=deepseek-reasoner    # 复杂分析
 - **执行幂等主键**：`autonomous_execution_intent` + 状态机（V10.3.2）
 - **信号数量语义统一**：`quantity_mode + quantity_value` 标准化（V10.3.2）
 
-### Phase 12: AI可观测性 & 指挥室 🚀 V10.3.3 当前
+### Phase 12: AI可观测性 & 指挥室 → 稳定性治理 ✅ V10.3.3 ~ V10.3.4 已完成（归档）
 - **Execution Microscope**：Implementation Shortfall 四分解（迟延/市场冲击/机会/时机成本）
 - **Signal Intelligence Observatory**：Alpha Decay 信号半衰期 + 因子相关矩阵 + 拥挤度检测
 - **Risk Observability Cluster**：五因子实时敞口 + ES@97.5% 仪表 + 相关性骤升告警
@@ -1065,12 +1135,22 @@ AI_COMPLEX_MODEL=deepseek-reasoner    # 复杂分析
 - **Portfolio Exposure Center**：行业/因子/地理敞口 + 相关矩阵
 - **Smart Alert Center**：AI分级 + 告警聚合 + 建议行动
 
-### Phase 13: V11 计划 🔜
+### Phase 13: 巩固、治理与完整性 🚀 V10.4 当前规划
+> 详细规划见：[docs/archived/v10/v10.4/RELEASE_PLAN_V10.4.md](archived/v10/v10.4/RELEASE_PLAN_V10.4.md)
+
+- **M1 数据闭环治理**：`actual_return` 自动回填 Job + IC 真实化（移除 fallback）+ 因子快照自动化 + 2026 年事件日历 + LLM 调用 `LLMCallGuard`
+- **M2 UI 大清洗**：47 页 → ≤38 页，6 导航组 → 4 组，执行三页合并，双仪表盘合并，系统监控整合
+- **M3 Copilot 全局化**：全局浮窗（Cmd+K）+ 页面上下文注入 + 实时系统状态 System Prompt
+- **M4 自主循环稳定增强**：AutonomyHealthMonitor 自检 + JobWatchdog + Multi-Agent 真实并发 + WebSocket 重连
+- **M5 移动触达**：Dashboard/Alert/Copilot 三场景 375px 竖屏可用
+- **M6 文档重构**：PRODUCT.md 拆分为模块化多文件，主文件 ≤300 行
+
+### Phase 14: V11 计划 🔜
 - 期权执行开启（`STOCK,ETF,OPTION` 全模式）
-- 多账户支持
-- LLM Fine-tuning 个人交易风格
-- 实时 L2 订单簿分析
-- 移动端原生 App
+- 多账户 / 多用户支持
+- LLM Fine-tuning 个人交易风格适配
+- 实时 L2 订单簿深度分析
+- 移动端原生 App（iOS/Android）
 
 ---
 
@@ -1266,5 +1346,5 @@ GET  /api/v1/war-room/alerts/stats                     — 告警统计（按等
 
 - API.md - 接口文档（V10.3 已含所有端点）
 - BACKEND_DESIGN.md - 后端架构设计（V10.3）
-- FRONTEND_DESIGN.md - 前端 UI/UX 设计（V10.3.3）
+- FRONTEND_DESIGN.md - 前端 UI/UX 设计（V10.3.4）
 - docs/RELEASE_NOTES_V10.3.md - V10.3 完整发布说明

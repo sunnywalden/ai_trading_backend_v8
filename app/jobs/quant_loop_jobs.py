@@ -71,6 +71,44 @@ async def run_daily_trading_cycle():
             logger.error(f"[quant_jobs] Daily trading cycle FAILED: {e}", exc_info=True)
 
 
+async def run_intraday_signal_cycle():
+    """
+    日内信号生成周期：在港股交易时段内多次触发。
+    目标是持续生成/验证新信号，避免仅依赖 08:00 单次扫描。
+
+    与每日周期不同点：
+    - optimize=False（避免日内高频重复优化）
+    - 仍遵循市场时段守卫与自主级别执行逻辑
+    """
+    if not is_any_market_active():
+        logger.debug("[quant_jobs] run_intraday_signal_cycle: market inactive, skip")
+        return
+
+    from app.core.runtime_config import get_autonomy_level
+
+    level = await get_autonomy_level()
+    account_id = await _resolve_runtime_account_id()
+    should_execute = level in ("FULL", "SEMI")
+
+    async with SessionLocal() as session:
+        try:
+            loop = QuantTradingLoop(session)
+            results = await loop.run_full_cycle(
+                account_id=account_id,
+                execute_trades=should_execute,
+                optimize=False,
+            )
+
+            signals_gen = results['phases']['signal_generation']['total_signals_generated']
+            signals_val = results['phases']['signal_validation']['validated_signals']
+            logger.info(
+                f"[quant_jobs] Intraday signal cycle OK — "
+                f"level={level} generated={signals_gen} validated={signals_val}"
+            )
+        except Exception as e:
+            logger.error(f"[quant_jobs] Intraday signal cycle FAILED: {e}", exc_info=True)
+
+
 async def run_autonomous_decision_cycle():
     """
     自主决策周期：每 30 分钟触发，让 AutonomousEngine 处理待执行信号。
@@ -273,6 +311,17 @@ def register_quant_loop_jobs(scheduler: AsyncIOScheduler):
         replace_existing=True,
     )
 
+    # ①-补充：港股时段内每 30 分钟追加一次信号生成（09:00-11:30, 13:00-16:00）
+    scheduler.add_job(
+        run_intraday_signal_cycle,
+        trigger="cron",
+        hour="9-11,13-16",
+        minute="0,30",
+        id="intraday_signal_cycle_hk",
+        name="Intraday Signal Cycle HK Session (every 30m)",
+        replace_existing=True,
+    )
+
     # ② 自主决策周期 — 每 30 分钟（盘中信号执行的核心驱动器）
     scheduler.add_job(
         run_autonomous_decision_cycle,
@@ -337,6 +386,7 @@ def register_quant_loop_jobs(scheduler: AsyncIOScheduler):
 
     logger.info("✓ Quantitative Trading Loop jobs registered:")
     logger.info("  ① Daily Trading Cycle:       08:00  (Signal Gen + Execute by Autonomy Level)")
+    logger.info("  ①+ Intraday Signal Cycle:    09:00-11:30 & 13:00-16:00 every 30m (HK session)")
     logger.info("  ② Autonomous Decision Cycle: every 30m  (market guard, core auto-trade driver)")
     logger.info("  ③ Performance Evaluation:    18:00  (Post-Market)")
     logger.info("  ④ Adaptive Optimization:     22:00  (Daily)")
