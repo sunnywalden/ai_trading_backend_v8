@@ -5,6 +5,8 @@ from typing import Optional, List
 from datetime import datetime, timedelta
 import asyncio
 import time
+import ast
+import json
 
 from app.schemas.position_assessment import (
     PositionsAssessmentResponse,
@@ -29,6 +31,39 @@ from app.models.db import SessionLocal
 from app.jobs.scheduler import add_job
 
 router = APIRouter()
+
+
+def _normalize_key_concerns(raw_value):
+    """将数据库中的 key_concerns 规范为字符串列表。"""
+    if raw_value is None:
+        return []
+
+    if isinstance(raw_value, list):
+        return [str(x) for x in raw_value if str(x).strip()]
+
+    if isinstance(raw_value, str):
+        text = raw_value.strip()
+        if not text:
+            return []
+
+        # 优先 JSON，再尝试 Python 字面量
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return [str(x) for x in parsed if str(x).strip()]
+        except Exception:
+            pass
+
+        try:
+            parsed = ast.literal_eval(text)
+            if isinstance(parsed, list):
+                return [str(x) for x in parsed if str(x).strip()]
+        except Exception:
+            pass
+
+        return [text]
+
+    return [str(raw_value)]
 
 
 # 依赖项：数据库会话（延迟导入避免循环依赖）
@@ -700,7 +735,7 @@ async def get_macro_risk_overview(
                 }
             },
             "alerts": final_alerts,
-            "key_concerns": risk_score.key_concerns,
+            "key_concerns": _normalize_key_concerns(risk_score.key_concerns),
             "recommendations": risk_score.recommendations,
             "ai_analysis": risk_score.risk_summary,  # 默认使用风险摘要
             "recent_events": [

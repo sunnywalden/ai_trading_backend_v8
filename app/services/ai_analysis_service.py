@@ -701,12 +701,15 @@ class AIAnalysisService:
         breakdown = data.get('risk_breakdown', {})
         alerts = data.get('alerts', [])
         events = data.get('recent_events', [])
+
+        overall_score = overall.get('overall_score', overall.get('score', 'N/A'))
+        risk_level = overall.get('risk_level', overall.get('level', 'N/A'))
         
         return f"""
 请解读当前宏观风险状况（300字以内）：
 
-综合风险评分: {overall.get('overall_score', 'N/A')}/100
-风险等级: {overall.get('risk_level', 'N/A')}
+    综合风险评分: {overall_score}/100
+    风险等级: {risk_level}
 
 5维度风险分解:
 - 货币政策风险: {breakdown.get('monetary_policy', {}).get('score', 'N/A')}/100

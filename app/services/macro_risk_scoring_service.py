@@ -14,6 +14,7 @@ from enum import Enum
 import asyncio
 import logging
 import random
+import json
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -104,7 +105,7 @@ class MacroRiskScoringService:
                 overall_score=int(overall_score),
                 risk_level=risk_level.value,
                 risk_summary=risk_summary,
-                key_concerns=str(key_concerns),
+                key_concerns=json.dumps(key_concerns, ensure_ascii=False),
                 recommendations=self._generate_recommendations(risk_level, dimension_scores),
                 data_sources="FRED, yfinance, geopolitical_events",
                 confidence=self._calculate_confidence(dimension_scores)
@@ -324,6 +325,20 @@ class MacroRiskScoringService:
             
             rate_10y = float(data_10y["Close"].iloc[-1])
             rate_2y = float(data_2y["Close"].iloc[-1])
+
+            # 使用短期变化捕捉“降息预期快速减弱/重新定价”
+            # 2Y 上行通常意味着市场对未来政策路径更鹰派
+            if len(data_2y["Close"]) >= 5:
+                rate_2y_5d_ago = float(data_2y["Close"].iloc[-5])
+            else:
+                rate_2y_5d_ago = float(data_2y["Close"].iloc[0])
+            if len(data_10y["Close"]) >= 5:
+                rate_10y_5d_ago = float(data_10y["Close"].iloc[-5])
+            else:
+                rate_10y_5d_ago = float(data_10y["Close"].iloc[0])
+
+            delta_2y = rate_2y - rate_2y_5d_ago
+            delta_10y = rate_10y - rate_10y_5d_ago
             
             fed_rate = rate_2y
             inflation = 3.0  # 简化，实际应从FRED获取
@@ -362,8 +377,27 @@ class MacroRiskScoringService:
                 scores.append(30 * 0.3)
             else:
                 scores.append(10 * 0.3)
+
+            # 4. 利率预期重定价惩罚（快速上行 => 风险上升）
+            # 单位近似为“百分点变化”（例如 +0.20 表示 +20bps）
+            repricing_penalty = 0.0
+            if delta_2y > 0.30:
+                repricing_penalty += 18.0
+            elif delta_2y > 0.20:
+                repricing_penalty += 12.0
+            elif delta_2y > 0.10:
+                repricing_penalty += 6.0
+
+            if delta_10y > 0.25:
+                repricing_penalty += 8.0
+            elif delta_10y > 0.15:
+                repricing_penalty += 5.0
+
+            # 曲线更深倒挂（或平坦化过快）也增加政策误判/衰退风险
+            if yield_curve < -0.5:
+                repricing_penalty += 5.0
             
-            result = round(sum(scores), 2)
+            result = round(max(0.0, sum(scores) - repricing_penalty), 2)
             success = True
             return result
             
@@ -388,10 +422,11 @@ class MacroRiskScoringService:
             地缘政治风险评分
         """
         try:
-            thirty_days_ago = datetime.now() - timedelta(days=30)
-            stmt = select(GeopoliticalEvent).where(
-                GeopoliticalEvent.event_date >= thirty_days_ago
-            )
+            now = datetime.now()
+            thirty_days_ago = now - timedelta(days=30)
+            seven_days_ago = now - timedelta(days=7)
+
+            stmt = select(GeopoliticalEvent).where(GeopoliticalEvent.event_date >= thirty_days_ago)
             result = await session.execute(stmt)
             events = result.scalars().all()
             
@@ -399,41 +434,77 @@ class MacroRiskScoringService:
                 return 90.0
             
             event_count = len(events)
+            recent_events = [e for e in events if getattr(e, "event_date", now) >= seven_days_ago]
+            recent_count = len(recent_events)
             
-            # 1. 事件数量评分
-            if event_count <= 1:
+            # 1. 事件数量评分（近7天权重更高）
+            weighted_count = event_count + recent_count * 1.5
+            if weighted_count <= 2:
                 count_score = 90
-            elif event_count <= 3:
+            elif weighted_count <= 5:
                 count_score = 70
-            elif event_count <= 5:
+            elif weighted_count <= 8:
                 count_score = 50
             else:
-                count_score = 30
+                count_score = 25
             
-            # 2. 严重程度评分
+            # 2. 严重程度评分（近7天高危事件放大）
             severity_map = {"LOW": 2, "MEDIUM": 5, "HIGH": 7, "CRITICAL": 9}
-            severities = [severity_map.get(e.severity, 5) for e in events]
+            severities = [severity_map.get(getattr(e, "severity", "MEDIUM"), 5) for e in events]
             avg_severity = sum(severities) / len(severities)
+            recent_critical_or_high = sum(
+                1 for e in recent_events if str(getattr(e, "severity", "MEDIUM")).upper() in {"HIGH", "CRITICAL"}
+            )
             
             if avg_severity < 3:
                 severity_score = 80
             elif avg_severity <= 5:
                 severity_score = 60
+            elif avg_severity <= 7:
+                severity_score = 40
             else:
-                severity_score = 30
+                severity_score = 25
+
+            # 最近一周若连续出现高危事件，直接下调
+            if recent_critical_or_high >= 3:
+                severity_score -= 20
+            elif recent_critical_or_high >= 2:
+                severity_score -= 12
+            elif recent_critical_or_high == 1:
+                severity_score -= 6
             
-            # 3. 市场影响评分
-            impacts = [e.market_impact_score or 40 for e in events]
+            # 3. 市场影响评分（近期事件额外权重）
+            impacts = [getattr(e, "market_impact_score", None) or 40 for e in events]
             avg_impact = sum(impacts) / len(impacts)
-            
-            if avg_impact < 30:
-                impact_score = 80
-            elif avg_impact <= 50:
-                impact_score = 60
+
+            if recent_events:
+                recent_impacts = [getattr(e, "market_impact_score", None) or 40 for e in recent_events]
+                recent_avg_impact = sum(recent_impacts) / len(recent_impacts)
+                blended_impact = avg_impact * 0.6 + recent_avg_impact * 0.4
             else:
-                impact_score = 40
+                blended_impact = avg_impact
             
-            final_score = count_score * 0.4 + severity_score * 0.3 + impact_score * 0.3
+            if blended_impact < 30:
+                impact_score = 80
+            elif blended_impact <= 50:
+                impact_score = 60
+            elif blended_impact <= 70:
+                impact_score = 45
+            else:
+                impact_score = 30
+
+            # 冲突类别直接惩罚（WAR/能源冲击）
+            war_like_recent = sum(
+                1 for e in recent_events if str(getattr(e, "category", "")).upper() in {"WAR", "ENERGY_CRISIS"}
+            )
+            category_penalty = 0.0
+            if war_like_recent >= 3:
+                category_penalty = 12.0
+            elif war_like_recent >= 1:
+                category_penalty = 6.0
+            
+            final_score = count_score * 0.35 + severity_score * 0.35 + impact_score * 0.30
+            final_score = max(0.0, min(100.0, final_score - category_penalty))
             return round(final_score, 2)
             
         except Exception as e:
