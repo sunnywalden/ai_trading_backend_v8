@@ -634,3 +634,41 @@ async def trigger_full_cycle(
         },
         "details": results,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# V10.4 M4: 自主循环健康检查端点
+# ─────────────────────────────────────────────────────────────────────────────
+_HEALTH_CACHE_KEY = "v10_4:autonomy_health:latest"
+
+
+@router.get("/health")
+async def get_autonomy_health(
+    current_user: str = Depends(get_current_user),
+):
+    """
+    返回最新自主循环健康检查报告。
+
+    优先从 Redis 缓存读取（每 2 分钟由 Job 刷新），
+    若缓存不存在则实时执行一次全量检查（首次启动或 Redis 不可用时）。
+    """
+    import json as _json
+
+    # ── 尝试读 Redis 缓存 ────────────────────────────────────────
+    try:
+        from app.models.db import redis_client
+        if redis_client:
+            raw = await redis_client.get(_HEALTH_CACHE_KEY)
+            if raw:
+                return _json.loads(raw)
+    except Exception:
+        pass
+
+    # ── 缓存未命中：实时执行 ──────────────────────────────────────
+    from app.models.db import SessionLocal
+    from app.services.autonomy_health_monitor import autonomy_health_monitor
+
+    async with SessionLocal() as db:
+        report = await autonomy_health_monitor.run_all_checks(db)
+
+    return report.to_dict()

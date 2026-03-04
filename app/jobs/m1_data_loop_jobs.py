@@ -12,6 +12,10 @@ from typing import Optional
 from sqlalchemy import select, update, and_, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# 确保 SQLAlchemy 在首次映射时可解析 TradingSignal.relationship('Strategy'/'StrategyRun')
+# 该任务可能被独立脚本直接调用，未经过 app.main 的全量模型导入流程。
+import app.models.strategy  # noqa: F401
+
 from app.models.trading_signal import TradingSignal
 from app.models.trade_journal import TradeJournal
 

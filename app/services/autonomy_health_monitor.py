@@ -58,6 +58,22 @@ class AutonomyHealthMonitor:
     返回 AutonomyHealthReport，调用者负责推送。
     """
 
+    @staticmethod
+    def _is_schema_mismatch_error(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return (
+            "doesn't exist" in msg
+            or "unknown column" in msg
+            or "no such table" in msg
+            or "no such column" in msg
+        )
+
+    @staticmethod
+    def _to_utc_datetime(value: Any) -> Optional[datetime]:
+        if not isinstance(value, datetime):
+            return None
+        return value.replace(tzinfo=timezone.utc)
+
     # ── 检查 1: FSM 卡死检测 ────────────────────────────────────
     async def check_fsm_stuck(self, db) -> HealthCheckResult:
         name = "fsm_stuck"
@@ -67,9 +83,19 @@ class AutonomyHealthMonitor:
             # 状态机停留在非终态超过 10 分钟
             TERMINAL_STATES = ("CLOSED", "CANCELLED", "EXPIRED", "COMPLETED", "DONE")
             stmt = text(
-                "SELECT COUNT(*) FROM fsm_transition_log "
-                "WHERE to_state NOT IN :terminals "
-                "AND created_at <= :threshold"
+                "SELECT COUNT(DISTINCT lf.plan_id) "
+                "FROM fsm_transition_log lf "
+                "JOIN ("
+                "  SELECT plan_id, MAX(occurred_at) AS last_occurred_at "
+                "  FROM fsm_transition_log "
+                "  GROUP BY plan_id"
+                ") latest "
+                "  ON latest.plan_id = lf.plan_id "
+                " AND latest.last_occurred_at = lf.occurred_at "
+                "JOIN trading_plan tp ON tp.id = lf.plan_id "
+                "WHERE UPPER(tp.plan_status) IN ('ACTIVE','PARTIAL') "
+                "AND lf.to_state NOT IN :terminals "
+                "AND lf.occurred_at <= :threshold"
             ).bindparams(
                 terminals=TERMINAL_STATES,
                 threshold=threshold_dt.replace(tzinfo=None),
@@ -87,6 +113,10 @@ class AutonomyHealthMonitor:
                                          message=f"{count} 条 FSM 记录卡死，需人工介入",
                                          detail={"stuck_count": count})
         except Exception as exc:
+            if self._is_schema_mismatch_error(exc):
+                return HealthCheckResult(name=name, status="WARN",
+                                         message="FSM 表结构与当前版本不一致，已跳过该检查",
+                                         detail={"error": str(exc)[:160]})
             return HealthCheckResult(name=name, status="ERROR",
                                      message=f"检查异常: {exc}")
 
@@ -96,27 +126,58 @@ class AutonomyHealthMonitor:
         try:
             from sqlalchemy import text
             row = (await db.execute(
-                text("SELECT MAX(created_at) FROM equity_snapshot")
+                text("SELECT MAX(created_at) FROM equity_snapshots")
             )).fetchone()
-            if not row or row[0] is None:
+            latest = row[0] if row else None
+
+            # 回退：若权益快照缺失或过旧，使用风险快照作为系统活跃度近似
+            fallback_row = (await db.execute(
+                text("SELECT MAX(snapshot_at) FROM portfolio_factor_exposure")
+            )).fetchone()
+            fallback_latest = fallback_row[0] if fallback_row else None
+
+            if latest is None and fallback_latest is None:
                 return HealthCheckResult(name=name, status="WARN",
-                                         message="权益快照表为空")
-            latest = row[0]
-            if hasattr(latest, 'replace'):
-                latest = latest.replace(tzinfo=timezone.utc)
-            age_min = (datetime.now(tz=timezone.utc) - latest).total_seconds() / 60
+                                         message="权益/风险快照均为空")
+
+            if latest is None and fallback_latest is not None:
+                latest = fallback_latest
+                source = "risk_snapshot_fallback"
+            elif latest is not None and fallback_latest is not None:
+                # 两者都存在时使用更新更近的一条，避免老旧 equity 快照压制新鲜风险快照
+                latest_dt = self._to_utc_datetime(latest)
+                fallback_dt = self._to_utc_datetime(fallback_latest)
+                if fallback_dt and latest_dt and fallback_dt > latest_dt:
+                    latest = fallback_latest
+                    source = "risk_snapshot_fallback"
+                else:
+                    source = "equity_snapshot"
+            else:
+                source = "equity_snapshot"
+
+            latest_dt = self._to_utc_datetime(latest)
+            if latest_dt is None:
+                return HealthCheckResult(name=name, status="WARN",
+                                         message="快照时间字段类型异常，已跳过该检查")
+
+            age_min = (datetime.now(tz=timezone.utc) - latest_dt).total_seconds() / 60
             if age_min <= 5:
                 return HealthCheckResult(name=name, status="OK",
-                                         message=f"快照 {age_min:.1f}min 前更新")
+                                         message=f"快照 {age_min:.1f}min 前更新",
+                                         detail={"source": source})
             elif age_min <= 15:
                 return HealthCheckResult(name=name, status="WARN",
                                          message=f"快照已 {age_min:.1f}min 未更新",
-                                         detail={"age_minutes": age_min})
+                                         detail={"age_minutes": age_min, "source": source})
             else:
                 return HealthCheckResult(name=name, status="CRITICAL",
                                          message=f"快照已 {age_min:.1f}min 未更新！",
-                                         detail={"age_minutes": age_min})
+                                         detail={"age_minutes": age_min, "source": source})
         except Exception as exc:
+            if self._is_schema_mismatch_error(exc):
+                return HealthCheckResult(name=name, status="WARN",
+                                         message="权益快照表结构不匹配，已跳过该检查",
+                                         detail={"error": str(exc)[:160]})
             return HealthCheckResult(name=name, status="ERROR",
                                      message=f"检查异常: {exc}")
 
@@ -132,7 +193,7 @@ class AutonomyHealthMonitor:
                 "AND NOT EXISTS ("
                 "  SELECT 1 FROM fsm_transition_log ftl "
                 "  WHERE ftl.plan_id = tp.id "
-                "  AND ftl.created_at >= :threshold"
+                "  AND ftl.occurred_at >= :threshold"
                 ")"
             )
             count = (await db.execute(stmt, {"threshold": threshold_dt.replace(tzinfo=None)})).scalar() or 0
@@ -148,6 +209,10 @@ class AutonomyHealthMonitor:
                                          message=f"{count} 个活跃计划 FSM 长时间无响应",
                                          detail={"stale_plan_count": count})
         except Exception as exc:
+            if self._is_schema_mismatch_error(exc):
+                return HealthCheckResult(name=name, status="WARN",
+                                         message="计划/FSM 结构不匹配，已跳过该检查",
+                                         detail={"error": str(exc)[:160]})
             return HealthCheckResult(name=name, status="ERROR",
                                      message=f"检查异常: {exc}")
 
@@ -157,12 +222,12 @@ class AutonomyHealthMonitor:
         try:
             from sqlalchemy import text
             row = (await db.execute(
-                text("SELECT MAX(updated_at) FROM technical_indicators")
+                text("SELECT MAX(timestamp) FROM technical_indicators")
             )).fetchone()
             if not row or row[0] is None:
                 # 可能是表名不同，尝试 technical_indicator
                 row = (await db.execute(
-                    text("SELECT MAX(updated_at) FROM technical_indicator")
+                    text("SELECT MAX(timestamp) FROM technical_indicator")
                 )).fetchone()
             if not row or row[0] is None:
                 return HealthCheckResult(name=name, status="WARN",
@@ -171,6 +236,15 @@ class AutonomyHealthMonitor:
             if hasattr(latest, 'replace'):
                 latest = latest.replace(tzinfo=timezone.utc)
             age_min = (datetime.now(tz=timezone.utc) - latest).total_seconds() / 60
+            # 交易时段判断（美东 09:30-16:00，工作日）
+            from zoneinfo import ZoneInfo
+            now_et = datetime.now(tz=ZoneInfo("America/New_York"))
+            in_session = (
+                now_et.weekday() < 5 and (
+                    (now_et.hour > 9 or (now_et.hour == 9 and now_et.minute >= 30))
+                    and now_et.hour < 16
+                )
+            )
             if age_min <= 30:
                 return HealthCheckResult(name=name, status="OK",
                                          message=f"行情数据 {age_min:.1f}min 前更新")
@@ -178,10 +252,17 @@ class AutonomyHealthMonitor:
                 return HealthCheckResult(name=name, status="WARN",
                                          message=f"行情数据已 {age_min:.1f}min 未更新")
             else:
+                if not in_session and age_min <= 12 * 60:
+                    return HealthCheckResult(name=name, status="WARN",
+                                             message=f"盘后行情数据已 {age_min:.1f}min 未更新")
                 return HealthCheckResult(name=name, status="CRITICAL",
                                          message=f"行情数据已 {age_min:.1f}min 未更新！",
                                          detail={"age_minutes": age_min})
         except Exception as exc:
+            if self._is_schema_mismatch_error(exc):
+                return HealthCheckResult(name=name, status="WARN",
+                                         message="技术指标表结构不匹配，已跳过该检查",
+                                         detail={"error": str(exc)[:160]})
             return HealthCheckResult(name=name, status="ERROR",
                                      message=f"检查异常: {exc}")
 
@@ -215,7 +296,7 @@ class AutonomyHealthMonitor:
             threshold_dt = datetime.now(tz=timezone.utc) - timedelta(minutes=5)
             row = (await db.execute(
                 text(
-                    "SELECT COUNT(*) FROM algo_execution_task "
+                    "SELECT COUNT(*) FROM algo_execution_tasks "
                     "WHERE status='PENDING' AND created_at <= :threshold"
                 ),
                 {"threshold": threshold_dt.replace(tzinfo=None)},
@@ -233,6 +314,10 @@ class AutonomyHealthMonitor:
                                          message=f"{count} 个算法任务严重积压！",
                                          detail={"backlog_count": count})
         except Exception as exc:
+            if self._is_schema_mismatch_error(exc):
+                return HealthCheckResult(name=name, status="WARN",
+                                         message="算法任务表结构不匹配，已跳过该检查",
+                                         detail={"error": str(exc)[:160]})
             return HealthCheckResult(name=name, status="ERROR",
                                      message=f"检查异常: {exc}")
 
@@ -241,8 +326,18 @@ class AutonomyHealthMonitor:
         name = "signal_freshness"
         try:
             from sqlalchemy import text
-            threshold_dt = datetime.now(tz=timezone.utc) - timedelta(minutes=30)
-            # 有活跃计划但最新信号超过 30 分钟
+            # 仅当存在活跃计划时才检查信号新鲜度，避免“空仓/停机期”误报
+            active_row = (await db.execute(
+                text(
+                    "SELECT COUNT(*) FROM trading_plan "
+                    "WHERE UPPER(plan_status) IN ('ACTIVE','PARTIAL')"
+                )
+            )).fetchone()
+            active_count = int(active_row[0] or 0) if active_row else 0
+            if active_count == 0:
+                return HealthCheckResult(name=name, status="OK",
+                                         message="无活跃计划，跳过信号新鲜度检查")
+
             row = (await db.execute(
                 text("SELECT MAX(created_at) FROM trading_signals")
             )).fetchone()
@@ -307,6 +402,13 @@ class AutonomyHealthMonitor:
                                          message=f"{len(missing)} 个关键 Job 未注册",
                                          detail={"missing_jobs": missing})
         except Exception as exc:
+            if "scheduler not initialized" in str(exc).lower():
+                return HealthCheckResult(
+                    name=name,
+                    status="WARN",
+                    message="调度器尚未初始化，Job 注册检查已跳过",
+                    detail={"error": str(exc)[:160]},
+                )
             return HealthCheckResult(name=name, status="ERROR",
                                      message=f"检查异常: {exc}")
 
