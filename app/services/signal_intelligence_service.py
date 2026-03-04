@@ -121,6 +121,161 @@ def _crowding_score(
 class SignalIntelligenceService:
     """信号情报服务：IC 时间序列、Alpha 半衰期、拥挤度检测。"""
 
+    @staticmethod
+    def _to_float(value: Any) -> float | None:
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _extract_dimension_score(self, sig: Any, dimension: str) -> float | None:
+        """尽量从多种字段提取维度预测值，避免字段命名演进导致全 0。"""
+        alias_map: dict[str, tuple[str, ...]] = {
+            "technical": ("technical", "technical_score", "tech", "tech_score"),
+            "fundamental": ("fundamental", "fundamental_score", "value_score"),
+            "ml": ("ml", "ml_score", "model_score", "ai_score", "momentum_score"),
+            "sentiment": ("sentiment", "sentiment_score", "news_sentiment"),
+            "macro": ("macro", "macro_score", "regime_score"),
+            "event": ("event", "event_score", "event_impact_score"),
+        }
+        candidate_keys = alias_map.get(dimension, (dimension,))
+
+        containers = [
+            getattr(sig, "dimension_scores", None),
+            getattr(sig, "factor_scores", None),
+            getattr(sig, "extra_metadata", None),
+            getattr(sig, "tags", None),
+        ]
+        nested_keys = ("dimension_scores", "factor_scores", "dimensions", "scores")
+
+        for c in containers:
+            if not isinstance(c, dict):
+                continue
+
+            # 1) 直接维度键
+            for key in candidate_keys:
+                if key in c:
+                    v = self._to_float(c.get(key))
+                    if v is not None:
+                        return v
+
+            # 2) 常见嵌套结构
+            for nk in nested_keys:
+                nested = c.get(nk)
+                if isinstance(nested, dict):
+                    for key in candidate_keys:
+                        if key in nested:
+                            v = self._to_float(nested.get(key))
+                            if v is not None:
+                                return v
+
+        # 3) 回退：信号强度（模型稳定可用）
+        strength = self._to_float(getattr(sig, "signal_strength", None))
+        if strength is not None:
+            return strength
+
+        # 4) 最后回退：confidence
+        return self._to_float(getattr(sig, "confidence", None))
+
+    @staticmethod
+    def _compute_return_from_journal(
+        entry_price: Any,
+        exit_price: Any,
+        realized_pnl: Any,
+        quantity: Any,
+        direction: str | None,
+    ) -> float | None:
+        e = SignalIntelligenceService._to_float(entry_price)
+        x = SignalIntelligenceService._to_float(exit_price)
+        pnl = SignalIntelligenceService._to_float(realized_pnl)
+        qty = SignalIntelligenceService._to_float(quantity)
+
+        side = (direction or "").upper()
+        if e and e > 0 and x is not None:
+            if side == "SHORT":
+                return (e - x) / e
+            return (x - e) / e
+
+        if pnl is not None and qty and e and e > 0:
+            base = abs(qty) * e
+            if base > 0:
+                return pnl / base
+
+        return None
+
+    async def _load_journal_return_map(
+        self,
+        db: AsyncSession,
+        signal_ids: list[str],
+    ) -> dict[str, float]:
+        """从 trade_journal 按 signal_id 回退收益率，用于 actual_return 缺失场景。"""
+        if not signal_ids:
+            return {}
+
+        from app.models.trade_journal import TradeJournal
+
+        stmt = (
+            select(
+                TradeJournal.signal_id,
+                TradeJournal.entry_price,
+                TradeJournal.exit_price,
+                TradeJournal.realized_pnl,
+                TradeJournal.quantity,
+                TradeJournal.direction,
+                TradeJournal.updated_at,
+            )
+            .where(TradeJournal.signal_id.in_(signal_ids))
+            .order_by(desc(TradeJournal.updated_at))
+        )
+        rows = (await db.execute(stmt)).all()
+
+        mapped: dict[str, float] = {}
+        for r in rows:
+            sid = str(r.signal_id or "").strip()
+            if not sid or sid in mapped:
+                continue
+            ret = self._compute_return_from_journal(
+                r.entry_price,
+                r.exit_price,
+                r.realized_pnl,
+                r.quantity,
+                r.direction,
+            )
+            if ret is not None:
+                mapped[sid] = float(ret)
+        return mapped
+
+    async def _load_latest_ic_from_weight_history(
+        self,
+        db: AsyncSession,
+        user_id: str,
+        dimension: str,
+    ) -> tuple[float, float, float] | None:
+        """当交易信号样本不足时，回退到 signal_weight_history 最新 IC。"""
+        from app.models.signal_weight_history import SignalWeightHistory
+
+        stmt = (
+            select(SignalWeightHistory)
+            .where(
+                SignalWeightHistory.user_id == user_id,
+                SignalWeightHistory.dimension == dimension,
+            )
+            .order_by(desc(SignalWeightHistory.record_date), desc(SignalWeightHistory.id))
+            .limit(1)
+        )
+        row = (await db.execute(stmt)).scalars().first()
+        if not row:
+            return None
+
+        ic5 = self._to_float(row.ic_5d)
+        ic20 = self._to_float(row.ic_20d)
+        ic60 = self._to_float(row.ic_60d)
+        if ic5 is None and ic20 is None and ic60 is None:
+            return None
+        return (ic5 or 0.0, ic20 or 0.0, ic60 or 0.0)
+
     async def compute_dimension_ic(
         self,
         db: AsyncSession,
@@ -132,6 +287,8 @@ class SignalIntelligenceService:
         从数据库读取最近 window 条信号预测值和实际收益，计算 5/20/60 日 IC。
         依赖 trading_signal 表中 dimension_scores 和 actual_return 字段。
         """
+        # 确保关系映射已注册（TradingSignal.strategy -> Strategy）
+        import app.models.strategy  # noqa: F401
         from app.models.trading_signal import TradingSignal  # 延迟导入
         stmt = (
             select(TradingSignal)
@@ -147,27 +304,59 @@ class SignalIntelligenceService:
             logger.warning("SignalIntelligence: DB query failed: %s", e)
             rows = []
 
-        # 提取预测信号和实际收益（如无 actual_return 字段则用 mock）
+        # actual_return 缺失时：尝试从 trade_journal 回退
+        signal_ids = [str(getattr(sig, "signal_id", "") or "") for sig in rows if getattr(sig, "signal_id", None)]
+        journal_return_map = {}
+        try:
+            journal_return_map = await self._load_journal_return_map(db, signal_ids)
+        except Exception as e:
+            logger.warning("SignalIntelligence: load journal fallback failed: %s", e)
+
+        # 提取预测信号和实际收益
         predicted_series, realized_series = [], []
         for sig in reversed(rows):
-            scores = getattr(sig, "dimension_scores", None) or {}
-            score = scores.get(dimension, getattr(sig, "score", 0.0)) or 0.0
+            score = self._extract_dimension_score(sig, dimension)
+            if score is None:
+                continue
+
             realized = getattr(sig, "actual_return", None)
+            if realized is None:
+                realized = getattr(sig, "pnl_pct", None)
+            if realized is None:
+                # 冷启动场景：先用 expected_return 作为代理收益，不阻塞观测站展示
+                realized = getattr(sig, "expected_return", None)
+            if realized is None:
+                sid = str(getattr(sig, "signal_id", "") or "")
+                realized = journal_return_map.get(sid)
             if realized is not None:
+                r = self._to_float(realized)
+                if r is None:
+                    continue
                 predicted_series.append(float(score))
-                realized_series.append(float(realized))
+                realized_series.append(r)
 
         n = len(predicted_series)
-        ic_5 = _spearman_corr(predicted_series[-5:], realized_series[-5:]) if n >= 5 else 0.0
-        ic_20 = _spearman_corr(predicted_series[-20:], realized_series[-20:]) if n >= 20 else 0.0
-        ic_60 = _spearman_corr(predicted_series, realized_series) if n >= 30 else 0.0
+        ic_5 = _spearman_corr(predicted_series[-min(5, n):], realized_series[-min(5, n):]) if n >= 3 else 0.0
+        ic_20 = _spearman_corr(predicted_series[-min(20, n):], realized_series[-min(20, n):]) if n >= 3 else 0.0
+        ic_60 = _spearman_corr(predicted_series[-min(60, n):], realized_series[-min(60, n):]) if n >= 3 else 0.0
 
         # IC 系列用于半衰期
         rolling_ics = []
-        step = max(1, n // 20)
-        for i in range(5, n + 1, step):
+        step = max(1, n // 20) if n > 0 else 1
+        for i in range(3, n + 1, step):
             chunk_ic = _spearman_corr(predicted_series[:i], realized_series[:i])
             rolling_ics.append(chunk_ic)
+
+        # 冷启动回退：无样本时，优先使用 signal_weight_history 最新 IC
+        sample_source = "trading_signals"
+        if n == 0:
+            snapshot = await self._load_latest_ic_from_weight_history(db, user_id, dimension)
+            if snapshot is not None:
+                ic_5, ic_20, ic_60 = snapshot
+                rolling_ics = [v for v in [ic_5, ic_20, ic_60] if v is not None]
+                sample_source = "weight_history"
+            else:
+                sample_source = "empty"
 
         halflife = _compute_halflife(rolling_ics) if rolling_ics else float("inf")
         ic_stddev = float(np.std(rolling_ics)) if len(rolling_ics) > 2 else 0.0
@@ -186,6 +375,7 @@ class SignalIntelligenceService:
             "is_crowded": is_crowded,
             "sample_count": n,
             "weight_reduce_triggered": is_crowded,
+            "sample_source": sample_source,
         }
 
     async def get_signal_intelligence(
