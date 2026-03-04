@@ -94,7 +94,8 @@ async def get_agent_run_status(
         messages = await multi_agent_orchestrator.get_run_summary(db, run_id)
         if messages:
             return {"run_id": run_id, "status": "completed", "messages": messages}
-        raise HTTPException(status_code=404, detail="Agent run not found")
+        # 冷启动/异步写入窗口：尚未落地时返回 pending，避免前端轮询 404 抖动
+        return {"run_id": run_id, "status": "pending"}
 
     if state.get("user_id") != user_id:
         raise HTTPException(status_code=403, detail="Access denied")
