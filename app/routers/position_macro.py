@@ -66,6 +66,47 @@ def _normalize_key_concerns(raw_value):
     return [str(raw_value)]
 
 
+def _enhance_recommendations_by_regime(raw_recommendations, market_calibration: Optional[dict]) -> List[str]:
+    """根据市场校准状态增强总体建议，输出稳定的字符串数组。"""
+    base: List[str] = []
+    if isinstance(raw_recommendations, list):
+        base = [str(x).strip() for x in raw_recommendations if str(x).strip()]
+    elif isinstance(raw_recommendations, str):
+        text = raw_recommendations.strip()
+        if text:
+            base = [text]
+
+    regime = str((market_calibration or {}).get("regime", "NEUTRAL")).upper()
+    penalty = float((market_calibration or {}).get("penalty", 0.0) or 0.0)
+
+    risk_off_cap_min = int((settings.MACRO_RISK_OFF_POSITION_CAP_MIN or 0.5) * 100)
+    risk_off_cap_max = int((settings.MACRO_RISK_OFF_POSITION_CAP_MAX or 0.7) * 100)
+    stop_tighten_pct = int((settings.MACRO_RISK_OFF_STOP_TIGHTEN_PCT or 0.2) * 100)
+    cautious_cash_min = int((settings.MACRO_CAUTIOUS_CASH_BUFFER_MIN or 0.1) * 100)
+    cautious_cash_max = int((settings.MACRO_CAUTIOUS_CASH_BUFFER_MAX or 0.2) * 100)
+
+    if regime == "RISK_OFF":
+        base.extend([
+            f"进入 Risk-Off 阶段：建议将风险资产仓位上限下调至常态的 {risk_off_cap_min}%-{risk_off_cap_max}%。",
+            "优先防御：提高现金/短债/黄金等避险资产比例，并减少高Beta与高估值暴露。",
+            f"执行纪律：新增头寸采用分批小仓，单笔止损更紧（较常态再收紧约{stop_tighten_pct}%）。",
+        ])
+    elif regime == "CAUTIOUS" or penalty >= 6:
+        base.extend([
+            "当前处于谨慎区间：控制净风险敞口，避免在事件窗口追高。",
+            f"保持均衡：适度向防御板块倾斜，并保留约{cautious_cash_min}%-{cautious_cash_max}%机动现金应对波动放大。",
+        ])
+
+    # 去重并保持顺序
+    dedup: List[str] = []
+    seen = set()
+    for item in base:
+        if item not in seen:
+            dedup.append(item)
+            seen.add(item)
+    return dedup
+
+
 # 依赖项：数据库会话（延迟导入避免循环依赖）
 async def get_session():
     from app.models.db import SessionLocal
@@ -679,6 +720,7 @@ async def get_macro_risk_overview(
         # 1. 优先计算或获取缓存的风险评分
         risk_service = MacroRiskScoringService()
         risk_score = await risk_service.calculate_macro_risk_score(use_cache=not force_refresh)
+        market_calibration = await risk_service.get_market_shock_snapshot()
         
         # 2. 并行执行独立操作：风险预警 + 地缘事件
         alerts_task = asyncio.create_task(risk_service.generate_risk_alerts())
@@ -704,6 +746,11 @@ async def get_macro_risk_overview(
         final_events = recent_events if isinstance(recent_events, list) else []
         
         # 3. 构建基础响应数据
+        recommendations = _enhance_recommendations_by_regime(
+            risk_score.recommendations,
+            market_calibration,
+        )
+
         response_data = {
             "timestamp": risk_score.timestamp,
             "overall_risk": {
@@ -736,8 +783,9 @@ async def get_macro_risk_overview(
             },
             "alerts": final_alerts,
             "key_concerns": _normalize_key_concerns(risk_score.key_concerns),
-            "recommendations": risk_score.recommendations,
+            "recommendations": recommendations,
             "ai_analysis": risk_score.risk_summary,  # 默认使用风险摘要
+            "market_calibration": market_calibration,
             "recent_events": [
                 {
                     "title": event.title,

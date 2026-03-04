@@ -206,8 +206,9 @@ Base URL 以你的启动参数为准（示例：`http://localhost:8088`）。
   - `risk_breakdown{ monetary_policy, geopolitical, sector_bubble, economic_cycle, market_sentiment }`
   - `alerts[]`
   - `key_concerns[]`
-  - `recommendations[]`
+  - `recommendations`（后端统一增强后通常为 `string[]`；兼容历史数据时可能是 `string`）
   - `ai_analysis`（可能为 AI 生成或默认摘要）
+  - `market_calibration{ enabled, window, penalty, regime, factors{ vix_change_pct, oil_change_pct, dxy_change_pct }, drivers[] }`
   - `recent_events[]`
   - `_meta{ response_time_ms, cache_hit, data_freshness }`
 
