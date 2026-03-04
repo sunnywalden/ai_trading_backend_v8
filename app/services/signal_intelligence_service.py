@@ -323,11 +323,10 @@ class SignalIntelligenceService:
             if realized is None:
                 realized = getattr(sig, "pnl_pct", None)
             if realized is None:
-                # 冷启动场景：先用 expected_return 作为代理收益，不阻塞观测站展示
-                realized = getattr(sig, "expected_return", None)
-            if realized is None:
                 sid = str(getattr(sig, "signal_id", "") or "")
                 realized = journal_return_map.get(sid)
+            # 注意: expected_return 代理已移除（V10.4 M1 T1.2），
+            # 使用 expected_return 作为实际收益率会制造自相关偏差
             if realized is not None:
                 r = self._to_float(realized)
                 if r is None:
@@ -364,6 +363,17 @@ class SignalIntelligenceService:
         cs = _crowding_score(ic_5, ic_stddev)
         is_crowded = cs > SIGNAL_CROWDING_WARN
 
+        # ── T1.2: data_quality 分级 ──
+        # REAL          : 来自真实成交，样本 >= 10
+        # INSUFFICIENT  : 真实样本 < 10（冷启动/新账户）
+        # STALE         : 来自 weight_history（无近期真实样本）
+        if sample_source == "trading_signals" and n >= 10:
+            data_quality = "REAL"
+        elif sample_source == "trading_signals" and n < 10:
+            data_quality = "INSUFFICIENT"
+        else:
+            data_quality = "STALE"
+
         return {
             "dimension": dimension,
             "ic_5d": round(ic_5, 6),
@@ -376,6 +386,7 @@ class SignalIntelligenceService:
             "sample_count": n,
             "weight_reduce_triggered": is_crowded,
             "sample_source": sample_source,
+            "data_quality": data_quality,   # V10.4 M1 T1.2
         }
 
     async def get_signal_intelligence(

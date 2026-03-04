@@ -1,5 +1,6 @@
 """V10: Trading Copilot 路由"""
 import uuid
+from datetime import datetime, timezone
 from typing import Optional, Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -109,9 +110,107 @@ async def deep_research(
 ):
     """M7 深度研究: 6 数据源 + deepseek-reasoner 生成结构化研究报告"""
     from app.services.copilot_partner_service import copilot_partner_service
-    report = await copilot_partner_service.deep_research_engine.research(
+    report = await copilot_partner_service.deep_research.research(
         symbol=body.symbol.upper(),
         query=body.query or f"Comprehensive analysis of {body.symbol}",
         db=session,
     )
-    return {"report": report}
+    return {"report": report.to_dict()}
+
+
+@router.get("/context")
+async def get_copilot_context(
+    session: AsyncSession = Depends(get_session),
+    current_user: str = Depends(get_current_user),
+):
+    """
+    V10.4 M1 — 获取 Copilot 系统上下文快照
+
+    为 CopilotFloatingWidget 提供跨页面感知所需的实时状态：
+    - 当前市场体制（regime）
+    - 活跃持仓数 / 今日信号数
+    - 未处理警报数
+    - LLM 提供商健康状态
+    - 最新宏观风险评分
+    """
+    from sqlalchemy import text, select, func
+    from app.services.ai_client_manager import get_circuit_breaker_status
+
+    ctx: Dict[str, Any] = {
+        "account_id": current_user,
+        "snapshot_at": datetime.now(tz=timezone.utc).isoformat(),
+    }
+
+    # ─── 活跃持仓 ───
+    try:
+        r = await session.execute(
+            text(
+                "SELECT COUNT(*) FROM trading_plans "
+                "WHERE account_id=:aid AND UPPER(plan_status) IN ('ACTIVE','PARTIAL')"
+            ),
+            {"aid": current_user},
+        )
+        ctx["active_positions"] = r.scalar() or 0
+    except Exception:
+        ctx["active_positions"] = None
+
+    # ─── 今日信号数 ───
+    try:
+        r = await session.execute(
+            text(
+                "SELECT COUNT(*) FROM trading_signals "
+                "WHERE account_id=:aid AND DATE(created_at)=CURDATE()"
+            ),
+            {"aid": current_user},
+        )
+        ctx["today_signals"] = r.scalar() or 0
+    except Exception:
+        try:
+            r = await session.execute(
+                text(
+                    "SELECT COUNT(*) FROM trading_signals "
+                    "WHERE account_id=:aid AND DATE(created_at)=DATE('now')"
+                ),
+                {"aid": current_user},
+            )
+            ctx["today_signals"] = r.scalar() or 0
+        except Exception:
+            ctx["today_signals"] = None
+
+    # ─── 未处理警报数 ───
+    try:
+        r = await session.execute(
+            text(
+                "SELECT COUNT(*) FROM alert_records "
+                "WHERE account_id=:aid AND is_read=0"
+            ),
+            {"aid": current_user},
+        )
+        ctx["unread_alerts"] = r.scalar() or 0
+    except Exception:
+        ctx["unread_alerts"] = None
+
+    # ─── 最新市场体制 ───
+    try:
+        r = await session.execute(
+            text("SELECT regime_label FROM market_regime_snapshots ORDER BY created_at DESC LIMIT 1")
+        )
+        row = r.fetchone()
+        ctx["market_regime"] = row[0] if row else None
+    except Exception:
+        ctx["market_regime"] = None
+
+    # ─── 宏观风险评分 ───
+    try:
+        r = await session.execute(
+            text("SELECT composite_score FROM macro_risk_scores ORDER BY created_at DESC LIMIT 1")
+        )
+        row = r.fetchone()
+        ctx["macro_risk_score"] = float(row[0]) if row else None
+    except Exception:
+        ctx["macro_risk_score"] = None
+
+    # ─── LLM 健康状态 ───
+    ctx["llm_status"] = get_circuit_breaker_status()
+
+    return ctx

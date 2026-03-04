@@ -10,7 +10,10 @@ AI 客户端管理器 - 统一管理多个 AI 提供商（OpenAI、DeepSeek）
 降级策略：OpenAI → DeepSeek → 规则引擎
 """
 
+import asyncio
 import logging
+import time
+import uuid
 from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime, timedelta
 from enum import Enum
@@ -389,3 +392,134 @@ def get_circuit_breaker_status() -> Dict[str, Any]:
             }
     
     return status
+
+
+# ─────────────────────────────────────────────
+# LLMCallGuard (V10.4 M1 T1.5)
+# ─────────────────────────────────────────────
+_LLM_CALL_TIMEOUT = 30   # 秒；超过此时间则超时熔断
+_LLM_MAX_RETRIES  = 1    # 超时后最多重试次数（指数退避）
+
+
+async def _write_llm_call_log(
+    call_id: str,
+    caller: str,
+    model: str,
+    latency_ms: int,
+    status: str,
+    degraded: bool,
+    error_msg: Optional[str] = None,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+) -> None:
+    """异步写入 llm_call_log 表（fire-and-forget，不阻塞主流程）"""
+    try:
+        from app.models.db import SessionLocal
+        from app.models.llm_call_log import LlmCallLog
+        from sqlalchemy import insert
+
+        async with SessionLocal() as session:
+            await session.execute(
+                insert(LlmCallLog).values(
+                    call_id=call_id,
+                    caller=caller,
+                    model=model,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    latency_ms=latency_ms,
+                    status=status,
+                    degraded=degraded,
+                    error_msg=error_msg,
+                )
+            )
+            await session.commit()
+    except Exception as exc:
+        logger.debug(f"[LLMCallGuard] 写入 llm_call_log 失败（非阻塞忽略）: {exc}")
+
+
+async def call_ai_guarded(
+    messages: List[Dict[str, str]],
+    temperature: float = 0.7,
+    max_tokens: Optional[int] = None,
+    response_format: Optional[Dict[str, Any]] = None,
+    caller: str = "unknown",
+) -> Tuple[Optional[str], Optional[AIProvider]]:
+    """
+    LLMCallGuard 包装层（V10.4 M1 T1.5）
+
+    在 call_ai_with_fallback 基础上增加：
+    - 30s asyncio 超时保护（超时算 TIMEOUT 状态）
+    - 指数退避重试一次
+    - 全量调用日志写入 llm_call_log
+    - degraded 标记（fallback 提供商被使用时）
+
+    接口与 call_ai_with_fallback 完全兼容，可直接替换调用。
+    """
+    call_id = str(uuid.uuid4())
+    start_ts = time.monotonic()
+    preferred = _get_preferred_provider()
+
+    content: Optional[str] = None
+    used_provider: Optional[AIProvider] = None
+    status = "ERROR"
+    error_msg: Optional[str] = None
+
+    for attempt in range(_LLM_MAX_RETRIES + 1):
+        try:
+            content, used_provider = await asyncio.wait_for(
+                call_ai_with_fallback(
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    response_format=response_format,
+                ),
+                timeout=_LLM_CALL_TIMEOUT,
+            )
+            if content:
+                status = "SUCCESS"
+                break
+            else:
+                status = "ERROR"
+                error_msg = "empty_content"
+        except asyncio.TimeoutError:
+            status = "TIMEOUT"
+            error_msg = f"timeout>{_LLM_CALL_TIMEOUT}s attempt={attempt+1}"
+            logger.warning(f"[LLMCallGuard] {caller} 超时 (attempt {attempt+1}/{_LLM_MAX_RETRIES+1})")
+            if attempt < _LLM_MAX_RETRIES:
+                await asyncio.sleep(2 ** attempt)   # 1s, 2s...
+                continue
+        except Exception as exc:
+            status = "ERROR"
+            error_msg = str(exc)[:200]
+            logger.warning(f"[LLMCallGuard] {caller} 异常: {exc}")
+            break
+
+    latency_ms = int((time.monotonic() - start_ts) * 1000)
+    degraded = (used_provider is not None and used_provider != preferred)
+    model = get_model_for_provider(used_provider) if used_provider else "unknown"
+
+    # fire-and-forget 写日志
+    asyncio.ensure_future(
+        _write_llm_call_log(
+            call_id=call_id,
+            caller=caller,
+            model=model,
+            latency_ms=latency_ms,
+            status=status,
+            degraded=degraded,
+            error_msg=error_msg,
+        )
+    )
+
+    return content, used_provider
+
+
+def _get_preferred_provider() -> AIProvider:
+    """返回当前配置中优先级最高的提供商"""
+    preferred = getattr(settings, "AI_PREFERRED_PROVIDER", None)
+    if preferred:
+        try:
+            return AIProvider(preferred.lower().strip())
+        except ValueError:
+            pass
+    return AIProvider.OPENAI

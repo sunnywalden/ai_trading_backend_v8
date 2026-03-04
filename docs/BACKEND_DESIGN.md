@@ -1,7 +1,11 @@
 # 后端架构设计文档
 
 > **AI量化交易闭环系统** - Backend Design  
-> 版本：V10.3.3 | 更新日期：2026-03-02
+> 版本：V10.4 | 更新日期：2026-03-04
+>
+> **V10.4 变更摘要（规划→实现）**：**M1 数据闭环治理**——`ReturnBackfillJob`（每日 21:30 ET，自动回填 `TradingSignal.actual_return`，回填率 ≥95%，触发 IC 增量重算）+ IC `data_quality` 字段全覆盖（`REAL`/`INSUFFICIENT`/`STALE`，移除 expected_return 代理收益）+ 因子敞口零快照（无持仓时写入 positions_count=0 快照，不跳过）+ `LLMCallGuard`（超时30s+指数退避重试+降级返回 degraded=true）+ `LlmCallLog` 表（model/latency/tokens/status 全量记录）；**M3 Copilot 上下文服务**——`GET /api/v1/copilot/context` 返回当前系统快照供浮层注入；**M4 自主循环稳定**——`AutonomyHealthMonitorService`（10分钟8项自检）+ `JobWatchdog`（Job 超时2x触发补跑）+ `register_m4_jobs()` 导入 main.py。
+>
+> **V10.3.4 变更摘要**：稳定性与冷启动治理——全服务冷启动占位逻辑 + `market_universe` 表 + PostMortem 交易选择驱动 + REDUCE/EXIT 信号规则执行 + 事件去重索引 + 多账户 ID 兼容。
 >
 > **V10.3.3 变更摘要**：**可观测性 2.0**——`ExecutionMicroscopeService`（IS 四分解：delay/impact/opportunity/timing cost，写入 `execution_quality_log`）+ `SignalIntelligenceService`（六维 IC 滚动序列 + Alpha 半衰期 + 拥挤度检测）+ `RiskObservabilityService`（五因子敞口 5 分钟快照写入 `portfolio_factor_exposure` + ES@97.5% + 相关性骤升告警）；**AI 中枢 2.0**——`MultiAgentOrchestrator`（五专职 Agent 协作框架，`AgentMessage` 写入 `agent_communication_log`，`RiskChallengerAgent` 强制反驳 BUY）+ `ConfidenceCalibrationService`（置信度 bucket→胜率映射，Brier/ECE，写入 `confidence_calibration_snapshot`，ECE>0.12 触发降评）+ `AdaptiveFactorWeightingService`（Kalman Filter 在线权重更新，写入 `signal_weight_history`）+ `DecisionPostMortemService`（平仓后反事实三路径剖析，写入 `decision_post_mortems`，自动反哺 InsightService）；**War Room**——`WarRoomService`（P&L Ticker 聚合 + Intelligence Feed urgency 排序 + 组合敞口 + SmartAlertService AI分级聚合）；3 个新 API 路由组（`/observability` 11 端点 / `/ai-hub` 9 端点 / `/war-room` 8 端点）；6 张新增 DB 表；每日 08:15 校准 Job + 每日收盘 Kalman 权重更新 Job。
 >
@@ -1617,6 +1621,170 @@ SituationalAwarenessService
 | 场景 | 策略 |
 |------|------|
 | Pipeline 分布轮询 | Redis 缓存 5s，TTL 到期后惰性刷新 |
+
+---
+
+## §11. V10.4 — 数据闭环治理 & 系统稳定增强（M1 / M3 / M4）
+
+### 11.1 M1：数据闭环治理（Data Loop Governance）
+
+#### 11.1.1 ReturnBackfillJob（T1.1）
+
+**背景**：`TradingSignal.actual_return` 需要在持仓平仓后从成交数据回填，此前仅有手动脚本，未集成进 APScheduler。
+
+**实现**：新增 `app/jobs/m1_data_loop_jobs.py`，注册 `return_backfill_job`：
+
+```python
+# 调度配置
+trigger: CronTrigger
+hour=21, minute=30           # 每日 21:30（本地 / ET 由部署 TZ 决定）
+id="m1_return_backfill"
+```
+
+**回填逻辑**（`ReturnBackfillService`）：
+
+```
+SELECT ts JOIN tj ON ts.signal_id = tj.signal_id
+  WHERE ts.actual_return IS NULL
+    AND tj.exit_price IS NOT NULL
+    AND tj.journal_status = 'CLOSED'
+UPDATE ts SET actual_return = (exit_price - entry_price) / entry_price
+             pnl_pct = realized_pnl / (qty * entry_price)
+```
+
+- 回填完成且新增 ≥10 条后，异步触发 `SignalIntelligenceService.recompute_ic_for_all_users()`
+- 写入 `scheduler_run_log`（job_id + rows_updated + duration_ms）
+
+**验收**：已平仓信号 actual_return 非 null 率 ≥95%，每日日志可查。
+
+#### 11.1.2 IC 数据质量字段（T1.2）
+
+`SignalIntelligenceService.compute_dimension_ic()` 返回值新增 `data_quality` 字段：
+
+| 值 | 触发条件 |
+|----|---------|
+| `REAL` | `sample_source = "trading_signals"` 且样本量 ≥10 |
+| `INSUFFICIENT` | 样本量 < 10 |
+| `STALE` | 最近一次 computed_at 距今 > 7 天 |
+
+**变更**：
+- 移除 `expected_return` 作为代理收益（之前冷启动场景使用，会造成自相关偏差）
+- 当 `data_quality != REAL` 时，`ic_5d/ic_20d/ic_60d` 仍返回（来自 weight_history fallback），但前端应展示数据质量状态而非原始曲线
+
+#### 11.1.3 因子快照零值处理（T1.3）
+
+`observability_jobs.take_factor_exposure_snapshot()` 增强：
+- 无活跃持仓用户也写入 `positions_count=0` 快照（之前直接返回跳过）
+- 从 `TradingPlan` 扫描所有有历史活跃仓位的用户，而非仅当前活跃
+
+#### 11.1.4 LLMCallGuard（T1.5）
+
+新增 `LLMCallGuard` 上下文管理器，封装所有 LLM 调用：
+
+```python
+class LLMCallGuard:
+    timeout_seconds: int = 30
+    max_retries: int = 3
+    base_retry_delay: float = 1.0  # 指数退避基础延迟
+    
+    async def call(self, fn, *args, **kwargs) -> LLMCallResult:
+        # 超时保护：asyncio.wait_for(fn(), timeout)
+        # 重试策略：429/5xx 指数退避，最多3次
+        # 降级返回：超时/耗尽重试 → LLMCallResult(degraded=True, fallback_reason=...)
+        # 写日志：llm_call_log 每次调用
+```
+
+新增 `LlmCallLog` 数据库模型（`app/models/llm_call_log.py`）：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `id` | BIGINT AUTO_INCREMENT | 主键 |
+| `call_id` | VARCHAR(36) | UUID |
+| `caller` | VARCHAR(64) | 调用方服务名 |
+| `model` | VARCHAR(64) | 使用的模型 |
+| `prompt_tokens` | INT | 输入 token 数 |
+| `completion_tokens` | INT | 输出 token 数 |
+| `latency_ms` | INT | 调用耗时 |
+| `status` | VARCHAR(16) | SUCCESS/TIMEOUT/RATE_LIMITED/ERROR |
+| `degraded` | BOOL | 是否降级响应 |
+| `error_msg` | TEXT | 错误信息（可 null）|
+| `created_at` | DATETIME | 调用时间 |
+
+新增 API 端点：`GET /api/v1/api-monitoring/llm-stats`，返回近 24h 成功率、P95 延迟、总 token 消耗。
+
+### 11.2 M3：Copilot 系统上下文服务
+
+新增 `GET /api/v1/copilot/context` 端点，返回供浮层注入的系统快照：
+
+```json
+{
+  "page_context": {},
+  "system_state": {
+    "autonomy_level": "SEMI",
+    "regime": "BULL_TREND",
+    "regime_confidence": 85,
+    "var_pct": 1.9,
+    "var_limit_pct": 3.0,
+    "active_position_count": 7,
+    "total_unrealized_pnl": 3420.5,
+    "executed_today": 3,
+    "success_rate_today": 100,
+    "latest_alert_summary": "MSFT 明日财报，围栏已激活"
+  },
+  "quick_actions": [
+    "盘前摘要", "今日复盘", "持仓概况"
+  ]
+}
+```
+
+### 11.3 M4：自主循环稳定增强
+
+#### 11.3.1 AutonomyHealthMonitorService
+
+新增 `app/services/autonomy_health_monitor.py`，每 10 分钟执行 8 项健康自检：
+
+| 检查项 | 阈值 | 告警级别 |
+|--------|------|---------|
+| Scheduler 心跳 | 最近 15 分钟内有 Job 运行 | CRITICAL |
+| DB 连接池可用 | pool.size - pool.checkedout > 0 | CRITICAL |
+| actual_return 回填率 | 近7日 ≥80% | HIGH |
+| LLM 调用成功率 | 近1h ≥90% | HIGH |
+| Factor Snapshot 时效 | 距今 ≤ 30 分钟 | MEDIUM |
+| WebSocket 连接数 | ≥1（有活跃前端） | LOW |
+| Redis 可达 | ping 延迟 < 100ms | HIGH |
+| 执行队列无堆积 | pending intent < 20 | MEDIUM |
+
+结果写入 `system_health_snapshot`（已有表），`status` 字段值：`HEALTHY`/`DEGRADED`/`CRITICAL`。
+
+#### 11.3.2 JobWatchdog
+
+新增 `JobWatchdogService`，每 5 分钟检查关键 Job 的上次运行时间：
+
+```python
+WATCHED_JOBS = {
+    "observability_factor_snapshot": {"interval_minutes": 5, "tolerance": 2.0},
+    "m1_return_backfill":           {"interval_minutes": 1440, "tolerance": 1.5},
+    "regime_classify_daily":        {"interval_minutes": 1440, "tolerance": 1.5},
+    "ai_hub_calibration_snapshot":  {"interval_minutes": 1440, "tolerance": 1.5},
+}
+# tolerance: 允许超时 interval * tolerance 倍，超出则重新触发补跑
+```
+
+### 11.4 新增 DB 表汇总（V10.4）
+
+| 表名 | 用途 | 迁移脚本 |
+|------|------|---------|
+| `llm_call_log` | LLM 调用全量记录 | `v10.4.0_add_llm_call_log.py` |
+
+### 11.5 新增 API 端点汇总（V10.4）
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/v1/copilot/context` | GET | Copilot 浮层系统上下文 |
+| `/api/v1/api-monitoring/llm-stats` | GET | LLM 调用统计（近24h）|
+| `/api/v1/admin/health/autonomy` | GET | 自主循环健康状态 |
+| `/api/v1/admin/health/watchdog` | GET | Job Watchdog 状态 |
+
 | 态势感知快照 | Redis 缓存 3s + WS 推送减少轮询 |
 | FSM 事件流 | 分页 20条/页，`occurred_at DESC` 索引覆盖 |
 | 订单簿列表 | 复合 WHERE + LIMIT，最多返回 500 条 |

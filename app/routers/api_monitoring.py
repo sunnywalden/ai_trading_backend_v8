@@ -4,12 +4,14 @@ API监控路由
 提供API调用统计、Rate Limit监控和警告信息
 """
 
-from fastapi import APIRouter, Query
-from datetime import datetime
+from fastapi import APIRouter, Query, Depends
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List
 
 from app.services.api_monitoring_service import api_monitor, APIProvider, APIRateLimit
-from app.models.db import redis_client
+from app.models.db import redis_client, get_session
+from app.core.auth import get_current_user
+from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter(tags=["API Monitoring"])
 
@@ -151,3 +153,119 @@ async def monitoring_health_check() -> Dict[str, Any]:
             "critical": f"{int(APIRateLimit.CRITICAL_THRESHOLD * 100)}%"
         }
     }
+
+
+@router.get("/llm-stats", summary="V10.4 M1 — LLM 调用统计（llm_call_log）")
+async def get_llm_stats(
+    hours: int = Query(24, ge=1, le=168, description="统计时间窗口（小时），最多 7 天"),
+    session: AsyncSession = Depends(get_session),
+    current_user: str = Depends(get_current_user),
+) -> Dict[str, Any]:
+    """
+    查询最近 N 小时内的 LLM 调用统计。
+
+    返回：
+    - total        : 总调用次数
+    - success      : 成功次数
+    - timeout      : 超时次数
+    - rate_limited : 被限速次数
+    - error        : 错误次数
+    - degraded     : 降级调用次数（非首选提供商）
+    - p50_latency_ms / p95_latency_ms : 延迟分位数
+    - by_model     : 按模型分组统计
+    - by_caller    : 按调用方分组统计
+    """
+    from sqlalchemy import text
+
+    since = datetime.now(tz=timezone.utc) - timedelta(hours=hours)
+
+    try:
+        # ── 聚合统计 ──
+        agg_sql = text(
+            """
+            SELECT
+                COUNT(*)                                         AS total,
+                SUM(CASE WHEN status='SUCCESS'      THEN 1 ELSE 0 END) AS success,
+                SUM(CASE WHEN status='TIMEOUT'      THEN 1 ELSE 0 END) AS timeout,
+                SUM(CASE WHEN status='RATE_LIMITED' THEN 1 ELSE 0 END) AS rate_limited,
+                SUM(CASE WHEN status='ERROR'        THEN 1 ELSE 0 END) AS error_count,
+                SUM(CASE WHEN degraded=1            THEN 1 ELSE 0 END) AS degraded,
+                AVG(latency_ms)                                  AS avg_latency_ms
+            FROM llm_call_log
+            WHERE created_at >= :since
+            """
+        )
+        row = (await session.execute(agg_sql, {"since": since})).fetchone()
+        row = row if row is not None else (0, 0, 0, 0, 0, 0, None)
+        total       = int(row[0] or 0)
+        success     = int(row[1] or 0)
+        timeout_cnt = int(row[2] or 0)
+        rate_limited= int(row[3] or 0)
+        error_count = int(row[4] or 0)
+        degraded    = int(row[5] or 0)
+        avg_lat     = round(float(row[6] or 0), 1)
+
+        # ── 延迟分位数（取最近 1000 条排序后近似） ──
+        lat_sql = text(
+            "SELECT latency_ms FROM llm_call_log "
+            "WHERE created_at >= :since AND status='SUCCESS' "
+            "ORDER BY latency_ms LIMIT 1000"
+        )
+        lat_rows = (await session.execute(lat_sql, {"since": since})).fetchall()
+        lat_vals = sorted([r[0] for r in lat_rows if r[0] is not None])
+        p50 = lat_vals[int(len(lat_vals) * 0.5)] if lat_vals else None
+        p95 = lat_vals[int(len(lat_vals) * 0.95)] if lat_vals else None
+
+        # ── 按 model 分组 ──
+        model_sql = text(
+            "SELECT model, COUNT(*) AS cnt "
+            "FROM llm_call_log WHERE created_at >= :since "
+            "GROUP BY model ORDER BY cnt DESC LIMIT 10"
+        )
+        by_model = [
+            {"model": r[0], "count": int(r[1])}
+            for r in (await session.execute(model_sql, {"since": since})).fetchall()
+        ]
+
+        # ── 按 caller 分组 ──
+        caller_sql = text(
+            "SELECT caller, COUNT(*) AS cnt "
+            "FROM llm_call_log WHERE created_at >= :since "
+            "GROUP BY caller ORDER BY cnt DESC LIMIT 20"
+        )
+        by_caller = [
+            {"caller": r[0], "count": int(r[1])}
+            for r in (await session.execute(caller_sql, {"since": since})).fetchall()
+        ]
+
+        error_rate = round((error_count + timeout_cnt) / total * 100, 2) if total else 0.0
+
+        return {
+            "window_hours": hours,
+            "since": since.isoformat(),
+            "total": total,
+            "success": success,
+            "timeout": timeout_cnt,
+            "rate_limited": rate_limited,
+            "error": error_count,
+            "degraded": degraded,
+            "error_rate_pct": error_rate,
+            "avg_latency_ms": avg_lat,
+            "p50_latency_ms": p50,
+            "p95_latency_ms": p95,
+            "by_model": by_model,
+            "by_caller": by_caller,
+        }
+
+    except Exception as exc:
+        # llm_call_log 表可能尚未创建（冷启动期间），返回空统计而不是 500
+        return {
+            "window_hours": hours,
+            "since": since.isoformat(),
+            "total": 0,
+            "success": 0, "timeout": 0, "rate_limited": 0,
+            "error": 0, "degraded": 0, "error_rate_pct": 0.0,
+            "avg_latency_ms": None, "p50_latency_ms": None, "p95_latency_ms": None,
+            "by_model": [], "by_caller": [],
+            "_note": f"llm_call_log 查询失败（可能表尚未创建）: {str(exc)[:120]}",
+        }

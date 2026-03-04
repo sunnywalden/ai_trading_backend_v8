@@ -237,6 +237,16 @@ async def lifespan(app: FastAPI):
             register_ai_hub_jobs(scheduler)         # V10.3.3: 置信度校准 (08:15) + 权重更新 (EOD)
         except ImportError:
             pass
+        try:
+            from app.jobs.m1_data_loop_jobs import register_m1_jobs
+            register_m1_jobs(scheduler)             # V10.4 M1: actual_return 回填 (02:30 UTC)
+        except ImportError:
+            pass
+        try:
+            from app.jobs.m4_health_jobs import register_m4_jobs
+            register_m4_jobs(scheduler)             # V10.4 M4: 自主循环 8 项健康检查 (2min)
+        except ImportError:
+            pass
         start_scheduler()
         logger.info("Scheduler started with periodic tasks")
 
