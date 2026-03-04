@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Any
+from decimal import Decimal
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -116,6 +118,9 @@ class WeeklyInsightGenerator:
 
         raw_insights = await self._call_deepseek(trade_data)
         if not raw_insights:
+            logger.info("[WeeklyInsight] AI generation empty, using rule-based fallback")
+            raw_insights = self._rule_based_insights(trade_data)
+        if not raw_insights:
             return []
 
         created: list[AIInsight] = []
@@ -136,7 +141,10 @@ class WeeklyInsightGenerator:
                 db.add(insight)
                 await db.flush()
                 created.append(insight)
-                await event_bus.publish(Topics.INSIGHT_GENERATED, insight.to_dict())
+                await event_bus.publish(
+                    Topics.INSIGHT_GENERATED,
+                    self._insight_event_payload(insight),
+                )
             except Exception as e:
                 logger.warning(f"[WeeklyInsight] failed to persist insight: {e}")
 
@@ -145,7 +153,7 @@ class WeeklyInsightGenerator:
         return created
 
     async def _fetch_recent_trades(self, db: AsyncSession) -> list[dict]:
-        """从 trade_attribution_entries 拉取最近 30 天数据"""
+        """拉取最近 30 天交易样本：优先 attribution，缺失时回退 trade_journal。"""
         from sqlalchemy import select
 
         from app.models.trade_attribution import TradeAttributionEntry
@@ -158,7 +166,88 @@ class WeeklyInsightGenerator:
             .limit(200)
         )
         rows = list((await db.execute(stmt)).scalars().all())
-        return [r.to_dict() for r in rows]
+        if rows:
+            return [r.to_dict() for r in rows]
+
+        logger.info("[WeeklyInsight] no attribution data, fallback to trade_journal")
+        return await self._fetch_recent_journal_trades(db)
+
+    async def _fetch_recent_journal_trades(self, db: AsyncSession) -> list[dict]:
+        """从 trade_journal 组装洞察训练样本（兜底数据源）。"""
+        from sqlalchemy import select, or_
+        from app.models.trade_journal import TradeJournal
+
+        since = datetime.now(tz=timezone.utc) - timedelta(days=30)
+        since_date = since.date()
+
+        stmt = (
+            select(TradeJournal)
+            .where(
+                or_(
+                    TradeJournal.exit_date >= since_date,
+                    TradeJournal.entry_date >= since_date,
+                )
+            )
+            .order_by(TradeJournal.updated_at.desc())
+            .limit(200)
+        )
+        journals = list((await db.execute(stmt)).scalars().all())
+
+        results: list[dict] = []
+        for j in journals:
+            entry_price = self._to_float(getattr(j, "entry_price", None))
+            exit_price = self._to_float(getattr(j, "exit_price", None))
+            quantity = max(self._to_float(getattr(j, "quantity", None)), 0.0)
+            realized_pnl = self._to_float(getattr(j, "realized_pnl", None))
+
+            pnl_pct = 0.0
+            if entry_price > 0 and exit_price > 0:
+                pnl_pct = (exit_price - entry_price) / entry_price
+            elif entry_price > 0 and quantity > 0 and realized_pnl != 0:
+                base = entry_price * quantity
+                if base > 0:
+                    pnl_pct = realized_pnl / base
+
+            if pnl_pct > 0.005:
+                category = "WIN"
+            elif pnl_pct < -0.005:
+                category = "LOSS"
+            else:
+                category = "BREAKEVEN"
+
+            hold_days = 0
+            entry_date = getattr(j, "entry_date", None)
+            exit_date = getattr(j, "exit_date", None)
+            if entry_date and exit_date:
+                hold_days = max(0, (exit_date - entry_date).days)
+
+            execution_quality = self._to_float(getattr(j, "execution_quality", None))
+            execution_score = execution_quality / 100.0 if execution_quality > 1 else execution_quality
+
+            results.append({
+                "symbol": getattr(j, "symbol", "UNKNOWN"),
+                "pnl_pct": pnl_pct,
+                "category": category,
+                "alpha_source": "JOURNAL_FALLBACK",
+                "execution_score": execution_score if execution_score > 0 else None,
+                "position_mgmt_score": None,
+                "regime_at_entry": None,
+                "scale_in_count": 0,
+                "hold_days": hold_days,
+            })
+
+        return results
+
+    @staticmethod
+    def _to_float(v: Any) -> float:
+        if v is None:
+            return 0.0
+        if isinstance(v, Decimal):
+            return float(v)
+        try:
+            return float(v)
+        except Exception:
+            return 0.0
 
     async def _call_deepseek(self, trade_data: list[dict]) -> list[dict]:
         """调用 deepseek-reasoner 生成洞察，返回 list of insight dicts。"""
@@ -220,11 +309,105 @@ Return ONLY a valid JSON array, no markdown.
                 raw = raw.split("```")[1]
                 if raw.startswith("json"):
                     raw = raw[4:]
-            return json.loads(raw)
+
+            # 1) 直接解析
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    return parsed
+            except Exception:
+                pass
+
+            # 2) 从混合文本中提取 JSON 数组
+            m = re.search(r"\[.*\]", raw, flags=re.S)
+            if m:
+                parsed = json.loads(m.group(0))
+                if isinstance(parsed, list):
+                    return parsed
+
+            return []
 
         except Exception as e:
             logger.error(f"[WeeklyInsight] deepseek call failed: {e}", exc_info=True)
             return []
+
+    def _rule_based_insights(self, trade_data: list[dict]) -> list[dict]:
+        """当 AI 调用失败时，基于统计结果生成最小可用洞察。"""
+        if not trade_data:
+            return []
+
+        n = len(trade_data)
+        wins = [t for t in trade_data if str(t.get("category", "")).upper() == "WIN"]
+        losses = [t for t in trade_data if str(t.get("category", "")).upper() == "LOSS"]
+        win_rate = len(wins) / n if n else 0.0
+
+        def avg(items: list[dict], key: str) -> float:
+            vals = [float(i.get(key) or 0.0) for i in items]
+            return sum(vals) / len(vals) if vals else 0.0
+
+        avg_win = avg(wins, "pnl_pct")
+        avg_loss = avg(losses, "pnl_pct")
+        avg_exec_win = avg(wins, "execution_score")
+        avg_exec_loss = avg(losses, "execution_score")
+
+        insights: list[dict] = []
+
+        insights.append({
+            "type": "PATTERN" if win_rate >= 0.5 else "TRAP",
+            "title": f"近30天样本胜率 {win_rate * 100:.1f}% 的交易行为特征",
+            "summary": (
+                f"样本数 {n}，平均盈利单 {avg_win * 100:.2f}% ，平均亏损单 {avg_loss * 100:.2f}% 。"
+                "建议围绕高质量入场条件做筛选，并减少低把握度信号频次。"
+            ),
+            "confidence": 0.66,
+            "win_rate_impact": 0.02 if win_rate < 0.5 else 0.01,
+            "regime": None,
+            "symbol": None,
+            "evidence": {"sample_size": n, "win_rate": round(win_rate, 4)},
+            "actionable_rule": {
+                "action": "FILTER_SIGNALS",
+                "condition": "仅执行置信度Top分位信号",
+                "params": {"min_confidence_quantile": 0.7},
+            },
+        })
+
+        if (avg_exec_win - avg_exec_loss) > 0.08:
+            insights.append({
+                "type": "EXECUTION",
+                "title": "执行质量与盈亏相关性显著",
+                "summary": "高执行质量样本显著优于低执行质量样本，建议优先在流动性充足时段执行。",
+                "confidence": 0.68,
+                "win_rate_impact": 0.015,
+                "regime": None,
+                "symbol": None,
+                "evidence": {
+                    "sample_size": n,
+                    "avg_exec_win": round(avg_exec_win, 4),
+                    "avg_exec_loss": round(avg_exec_loss, 4),
+                },
+                "actionable_rule": {
+                    "action": "EXECUTION_OPTIMIZE",
+                    "condition": "流动性不足或冲击成本偏高时降速",
+                    "params": {"prefer_algo": "TWAP", "slippage_cap_bps": 25},
+                },
+            })
+
+        return insights[:4]
+
+    @staticmethod
+    def _insight_event_payload(insight: AIInsight) -> dict:
+        """避免访问可能触发懒加载的字段（如 server_default 时间列）。"""
+        return {
+            "id": insight.id,
+            "insight_type": insight.insight_type,
+            "regime": insight.regime,
+            "symbol": insight.symbol,
+            "title": insight.title,
+            "summary": insight.summary,
+            "confidence": insight.confidence,
+            "active": insight.active,
+            "created_by_job": insight.created_by_job,
+        }
 
 
 class ABTestEngine:

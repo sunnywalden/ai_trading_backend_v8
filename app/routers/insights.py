@@ -18,6 +18,7 @@ from app.schemas.insights import (
     ABExperimentItemResponse,
     CreateExperimentRequest,
     ExperimentsListResponse,
+    InsightRepositoryStatusResponse,
     InsightListResponse,
     ToggleInsightRequest,
 )
@@ -88,6 +89,51 @@ async def trigger_generate_weekly(db: AsyncSession = Depends(get_session)):
     except Exception as e:
         logger.error(f"[InsightsRouter] Generate weekly failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Insight generation failed: {str(e)}")
+
+
+@router.get("/repository/status", response_model=InsightRepositoryStatusResponse, summary="洞察库状态与空数据原因")
+async def get_repository_status(db: AsyncSession = Depends(get_session)):
+    """返回洞察库与数据源状态，用于前端空列表提示。"""
+    from datetime import datetime, timedelta, timezone
+    from sqlalchemy import select, func
+    from app.models.ai_insight import AIInsight
+    from app.models.trade_attribution import TradeAttributionEntry
+    from app.models.trade_journal import TradeJournal
+
+    since = datetime.now(tz=timezone.utc) - timedelta(days=30)
+    since_date = since.date()
+
+    insight_count = int((await db.execute(select(func.count()).select_from(AIInsight))).scalar_one() or 0)
+
+    attribution_count = int(
+        (await db.execute(
+            select(func.count()).select_from(TradeAttributionEntry).where(TradeAttributionEntry.created_at >= since)
+        )).scalar_one() or 0
+    )
+
+    journal_count = int(
+        (await db.execute(
+            select(func.count()).select_from(TradeJournal).where(
+                (TradeJournal.exit_date >= since_date) | (TradeJournal.entry_date >= since_date)
+            )
+        )).scalar_one() or 0
+    )
+
+    has_data_source = (attribution_count > 0) or (journal_count > 0)
+    if insight_count > 0:
+        hint = "洞察库已有数据，可直接查看或继续生成本周洞察。"
+    elif has_data_source:
+        hint = "检测到近30天交易数据，点击“触发本周分析”即可生成洞察。"
+    else:
+        hint = "近30天无可用交易样本（归因/日志），请先产生交易记录后再生成洞察。"
+
+    return InsightRepositoryStatusResponse(
+        insight_count=insight_count,
+        attribution_count_30d=attribution_count,
+        journal_count_30d=journal_count,
+        has_data_source=has_data_source,
+        hint=hint,
+    )
 
 
 # ── A/B 实验 ──────────────────────────────────────────────────────────────────
