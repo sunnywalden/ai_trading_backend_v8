@@ -69,6 +69,7 @@ from app.routers import order_book      # V10.3: 智能订单簿
 from app.routers import observability   # V10.3.3: 可观测性 2.0
 from app.routers import ai_hub          # V10.3.3: AI 中枢 2.0
 from app.routers import war_room        # V10.3.3: 战情室
+from app.routers import market_universe # 市场全量池状态
 # V9 routers
 from app.routers import dashboard as v9_dashboard
 from app.routers import dashboard_v2  # V10: 全新Dashboard
@@ -362,6 +363,7 @@ app.include_router(order_book.router, dependencies=[Depends(get_current_user)]) 
 app.include_router(observability.router, dependencies=[Depends(get_current_user)])        # V10.3.3: 可观测性 2.0
 app.include_router(ai_hub.router, dependencies=[Depends(get_current_user)])               # V10.3.3: AI 中枢 2.0
 app.include_router(war_room.router, dependencies=[Depends(get_current_user)])             # V10.3.3: 战情室
+app.include_router(market_universe.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
 
 
 @app.get("/health")

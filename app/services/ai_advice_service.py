@@ -2,6 +2,7 @@ from typing import List
 import json
 import logging
 import asyncio
+from sqlalchemy import select, or_, and_, desc
 
 from app.core.config import settings
 from app.schemas.ai_advice import (
@@ -22,6 +23,7 @@ from app.broker.factory import make_option_broker_client
 from app.services.trading_plan_service import TradingPlanService
 from app.providers.market_data_provider import MarketDataProvider
 from app.providers.technical_calculator import TechnicalIndicatorCalculator
+from app.models.market_universe_symbol import MarketUniverseSymbol
 
 try:
     from tigeropen.common.consts import BarPeriod
@@ -212,7 +214,7 @@ class AiAdviceService:
 
     async def search_symbols(self, query: str) -> SymbolSearchResponse:
         """模糊搜索美港股标的"""
-        items = [
+        static_items = [
             StockSymbol(symbol="AAPL", name="苹果", market="US"),
             StockSymbol(symbol="TSLA", name="特斯拉", market="US"),
             StockSymbol(symbol="NVDA", name="英伟达", market="US"),
@@ -231,6 +233,48 @@ class AiAdviceService:
             StockSymbol(symbol="01024", name="快手-W", market="HK"),
             StockSymbol(symbol="01810", name="小米集团-W", market="HK"),
         ]
+
+        items: List[StockSymbol] = []
+
+        # 1) 优先使用本地全量池（market_universe_symbols）
+        try:
+            q = (query or "").strip().upper()
+            stmt = select(
+                MarketUniverseSymbol.symbol,
+                MarketUniverseSymbol.name,
+                MarketUniverseSymbol.market,
+            ).where(MarketUniverseSymbol.is_active.is_(True))
+
+            if q:
+                like_q = f"%{q}%"
+                stmt = stmt.where(
+                    or_(
+                        MarketUniverseSymbol.symbol.ilike(like_q),
+                        MarketUniverseSymbol.name.ilike(like_q),
+                    )
+                )
+                stmt = stmt.order_by(desc(MarketUniverseSymbol.market), MarketUniverseSymbol.symbol.asc()).limit(80)
+            else:
+                stmt = stmt.order_by(desc(MarketUniverseSymbol.market), MarketUniverseSymbol.symbol.asc()).limit(60)
+
+            rows = (await self.session.execute(stmt)).all()
+            for sym, name, market in rows:
+                m = str(market or "US").upper()
+                if m not in ("US", "HK"):
+                    m = "US"
+                items.append(
+                    StockSymbol(
+                        symbol=str(sym).upper(),
+                        name=str(name) if name else str(sym).upper(),
+                        market=m,  # type: ignore[arg-type]
+                    )
+                )
+        except Exception as e:
+            logger.warning(f"AiAdvice search_symbols local universe read failed: {e}")
+
+        # 2) 若本地池不可用，回退静态样本
+        if not items:
+            items = static_items
         
         try:
             broker_client = make_option_broker_client()
@@ -277,8 +321,20 @@ class AiAdviceService:
                 df = await self.market_provider._get_tiger_bars(symbol, p_str, bar_period=bar_p)
                 if df is not None and not df.empty:
                     subset = df.tail(20)[["Open", "High", "Low", "Close", "Volume"]].copy()
-                    subset.index = subset.index.strftime('%Y-%m-%d %H:%M')
-                    kline_data[label] = subset.to_dict(orient='index')
+                    formatted_data = {}
+                    for ts, row in subset.iterrows():
+                        key = str(ts)
+                        _fmt = getattr(ts, "strftime", None)
+                        if callable(_fmt):
+                            key = _fmt('%Y-%m-%d %H:%M')
+                        formatted_data[key] = {
+                            "Open": float(row.get("Open", 0)),
+                            "High": float(row.get("High", 0)),
+                            "Low": float(row.get("Low", 0)),
+                            "Close": float(row.get("Close", 0)),
+                            "Volume": float(row.get("Volume", 0)),
+                        }
+                    kline_data[label] = formatted_data
                 else: kline_data[label] = "暂无数据"
             except Exception as e: kline_data[label] = f"获取失败: {str(e)}"
 

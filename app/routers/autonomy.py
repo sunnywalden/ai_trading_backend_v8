@@ -20,6 +20,7 @@ from app.core.runtime_config import (
 from app.models.db import get_session
 from app.models.trading_signal import TradingSignal, SignalStatus
 from app.models.autonomy_audit_log import AutonomyAuditLog
+from app.models.strategy import Strategy, StrategyRun
 from app.services.autonomous_engine import autonomous_engine
 
 router = APIRouter(prefix="/autonomy", tags=["V10-Autonomy"])
@@ -369,7 +370,6 @@ async def get_signal_pipeline(
 ):
     """查看近期信号流水线：展示信号从生成到执行的完整状态链"""
     account_id = await _resolve_account_id()
-    from sqlalchemy import text
     result = await session.execute(
         select(TradingSignal)
         .where(TradingSignal.account_id == account_id)
@@ -377,6 +377,24 @@ async def get_signal_pipeline(
         .limit(limit)
     )
     signals = result.scalars().all()
+
+    strategy_ids = {s.strategy_id for s in signals if s.strategy_id}
+    strategy_run_ids = {s.strategy_run_id for s in signals if s.strategy_run_id}
+
+    strategy_name_map: dict[str, str] = {}
+    strategy_run_map: dict[str, StrategyRun] = {}
+
+    if strategy_ids:
+        strategy_result = await session.execute(
+            select(Strategy.id, Strategy.name).where(Strategy.id.in_(strategy_ids))
+        )
+        strategy_name_map = {sid: sname for sid, sname in strategy_result.fetchall()}
+
+    if strategy_run_ids:
+        run_result = await session.execute(
+            select(StrategyRun).where(StrategyRun.id.in_(strategy_run_ids))
+        )
+        strategy_run_map = {run.id: run for run in run_result.scalars().all()}
 
     # 获取这些信号对应的执行意图（用于备注显示拒绝原因）
     from app.models.execution_intent import AutonomousExecutionIntent
@@ -397,6 +415,7 @@ async def get_signal_pipeline(
                 "signal_id": s.signal_id,
                 "symbol": s.symbol,
                 "type": s.signal_type.value,
+                "source": s.signal_source.value,
                 "status": s.status.value,
                 "direction": s.direction,
                 "quantity": s.suggested_quantity,
@@ -406,6 +425,39 @@ async def get_signal_pipeline(
                 "priority": s.priority,
                 "notes": intent_map.get(s.signal_id) or s.notes,
                 "order_id": s.order_id,
+                "strategy_id": s.strategy_id,
+                "strategy_run_id": s.strategy_run_id,
+                "strategy_name": (
+                    (s.extra_metadata or {}).get("strategy_name")
+                    if isinstance(s.extra_metadata, dict)
+                    else None
+                )
+                or (strategy_name_map.get(s.strategy_id) if s.strategy_id else None)
+                or (
+                    strategy_run_map[s.strategy_run_id].strategy.name
+                    if s.strategy_run_id in strategy_run_map and strategy_run_map[s.strategy_run_id].strategy
+                    else None
+                ),
+                "strategy_version": (
+                    (s.extra_metadata or {}).get("strategy_version")
+                    if isinstance(s.extra_metadata, dict)
+                    else None
+                )
+                or (
+                    strategy_run_map[s.strategy_run_id].strategy_version
+                    if s.strategy_run_id in strategy_run_map
+                    else None
+                ),
+                "target_universe": (
+                    (s.extra_metadata or {}).get("run_universe")
+                    if isinstance(s.extra_metadata, dict)
+                    else None
+                )
+                or (
+                    strategy_run_map[s.strategy_run_id].target_universe
+                    if s.strategy_run_id in strategy_run_map
+                    else None
+                ),
                 "executed_at": s.executed_at.isoformat() if s.executed_at else None,
                 "created_at": s.created_at.isoformat() if s.created_at else None,
             }
@@ -508,7 +560,8 @@ async def trigger_full_cycle(
     sig_gen   = phases.get("signal_generation", {}).get("total_signals_generated", 0)
     sig_val   = phases.get("signal_validation", {}).get("validated_signals", 0)
     exec_info = phases.get("trade_execution", {})
-    executed  = exec_info.get("executed", 0)
+    executed  = exec_info.get("executed_orders", exec_info.get("executed", 0))
+    signal_generation_phase = phases.get("signal_generation", {})
 
     return {
         "success": True,
@@ -517,5 +570,13 @@ async def trigger_full_cycle(
         "signals_generated": sig_gen,
         "signals_validated": sig_val,
         "executed": executed,
+        "signal_generation_summary": {
+            "strategy_scope_note": signal_generation_phase.get("strategy_scope_note"),
+            "strategy_runs_processed": signal_generation_phase.get("strategy_runs_processed", 0),
+            "signals_before_dedup": signal_generation_phase.get("signals_before_dedup", 0),
+            "signals_by_strategy": signal_generation_phase.get("signals_by_strategy", {}),
+            "strategy_runs_used": signal_generation_phase.get("strategy_runs_used", []),
+            "runtime_scan": signal_generation_phase.get("runtime_scan", {}),
+        },
         "details": results,
     }
