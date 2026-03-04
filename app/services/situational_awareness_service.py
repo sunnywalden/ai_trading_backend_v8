@@ -212,7 +212,7 @@ class SituationalAwarenessService:
             return ActiveFencesBlock()
 
     async def _get_executions_block(self, db: AsyncSession, account_id: Optional[str]) -> ActiveExecutionsBlock:
-        """查询当前处于算法执行阶段的计划。"""
+        """查询执行态势：running_count + recent_executed_count。"""
         try:
             filters: list[Any] = [
                 TradingPlan.plan_status.in_(["AUTO_EXECUTING", "ACTIVE"]),
@@ -229,6 +229,7 @@ class SituationalAwarenessService:
             plans = (await db.execute(stmt)).scalars().all()
 
             entries: list[ActiveExecutionEntry] = []
+            running_count = 0
             for p in plans:
                 tags = p.plan_tags or {}
                 snapshot = p.provenance_snapshot or {}
@@ -243,6 +244,8 @@ class SituationalAwarenessService:
                 if not is_executing:
                     continue
 
+                running_count += 1
+
                 entries.append(ActiveExecutionEntry(
                     plan_id=p.id,
                     symbol=p.symbol,
@@ -250,10 +253,11 @@ class SituationalAwarenessService:
                     fill_pct=_safe_float(ep.get("fill_pct", 0.0)),
                 ))
 
-            if not entries and account_id:
+            recent_executed_count = 0
+            if account_id:
                 recent_cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
                 sig_stmt = (
-                    select(TradingSignal.symbol, TradingSignal.signal_id)
+                    select(TradingSignal.symbol, TradingSignal.signal_id, TradingSignal.status)
                     .where(
                         and_(
                             TradingSignal.account_id == account_id,
@@ -265,15 +269,26 @@ class SituationalAwarenessService:
                     .limit(10)
                 )
                 sig_rows = (await db.execute(sig_stmt)).all()
-                for i, row in enumerate(sig_rows):
-                    entries.append(ActiveExecutionEntry(
-                        plan_id=-(i + 1),
-                        symbol=row.symbol,
-                        algo_type="ALGO",
-                        fill_pct=0.0,
-                    ))
+                recent_executed_count = sum(1 for r in sig_rows if r.status == SignalStatus.EXECUTED)
 
-            return ActiveExecutionsBlock(count=len(entries), entries=entries)
+                # 若运行中列表为空，回退使用信号侧 executing/queued 作为运行中近似
+                if not entries:
+                    fallback_running = [r for r in sig_rows if r.status in (SignalStatus.EXECUTING, SignalStatus.QUEUED)]
+                    running_count = len(fallback_running)
+                    for i, row in enumerate(fallback_running[:10]):
+                        entries.append(ActiveExecutionEntry(
+                            plan_id=-(i + 1),
+                            symbol=row.symbol,
+                            algo_type="ALGO",
+                            fill_pct=0.0,
+                        ))
+
+            return ActiveExecutionsBlock(
+                count=running_count,
+                running_count=running_count,
+                recent_executed_count=recent_executed_count,
+                entries=entries,
+            )
         except Exception as e:
             logger.warning(f"[SA] Failed to get executions block: {e}")
             return ActiveExecutionsBlock()
@@ -357,6 +372,10 @@ class SituationalAwarenessService:
         if prev.active_fences.count != curr.active_fences.count:
             return True
         if prev.active_executions.count != curr.active_executions.count:
+            return True
+        if prev.active_executions.running_count != curr.active_executions.running_count:
+            return True
+        if prev.active_executions.recent_executed_count != curr.active_executions.recent_executed_count:
             return True
         if prev.pending_confirms.count != curr.pending_confirms.count:
             return True
