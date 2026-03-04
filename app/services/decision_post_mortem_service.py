@@ -16,6 +16,7 @@ from sqlalchemy import select, desc, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.decision_post_mortem import DecisionPostMortem
+from app.models.trade_journal import TradeJournal
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +171,116 @@ class DecisionPostMortemService:
             "lookback_days": days,
         }
 
+    async def list_trade_candidates(
+        self,
+        db: AsyncSession,
+        user_id: str,
+        limit: int = 100,
+        q: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """返回可用于生成事后剖析的交易候选（优先 trade_journal 已平仓记录）。"""
+        # 当前用户已生成过剖析的 trade_id，避免重复
+        existing_stmt = select(DecisionPostMortem.trade_id).where(DecisionPostMortem.user_id == user_id)
+        existing_trade_ids = set((await db.execute(existing_stmt)).scalars().all())
+
+        stmt = (
+            select(TradeJournal)
+            .where(
+                TradeJournal.symbol.isnot(None),
+                TradeJournal.realized_pnl.is_not(None),
+            )
+            .order_by(desc(TradeJournal.created_at))
+            .limit(max(limit * 3, limit))
+        )
+        rows = (await db.execute(stmt)).scalars().all()
+
+        keyword = (q or "").strip().upper()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            symbol = (getattr(r, "symbol", "") or "").upper()
+            if keyword and keyword not in symbol:
+                continue
+
+            rid = int(getattr(r, "id", 0) or 0)
+            trade_id = f"journal:{rid}"
+            # 兼容历史写法（纯数字 trade_id）
+            if trade_id in existing_trade_ids or str(rid) in existing_trade_ids:
+                continue
+
+            realized = _to_float(getattr(r, "realized_pnl", None), 0.0)
+            created_at = getattr(r, "created_at", None)
+            hold_days = int(getattr(r, "holding_days", 0) or 0)
+
+            out.append(
+                {
+                    "trade_id": trade_id,
+                    "symbol": symbol,
+                    "direction": _normalize_direction(getattr(r, "direction", None)),
+                    "realized_pnl": realized,
+                    "hold_days": hold_days,
+                    "entry_price": _to_float(getattr(r, "entry_price", None), 0.0),
+                    "exit_price": _to_float(getattr(r, "exit_price", None), 0.0),
+                    "created_at": created_at.isoformat() if created_at else None,
+                    "display": f"{symbol} | PnL {realized:+.2f} | {created_at.date() if created_at else '-'}",
+                }
+            )
+            if len(out) >= limit:
+                break
+
+        return out
+
+    async def get_trade_prefill(
+        self,
+        db: AsyncSession,
+        user_id: str,
+        trade_id: str,
+    ) -> dict[str, Any] | None:
+        """根据 trade_id 返回可用于生成剖析的预填参数。"""
+        journal_id = _parse_journal_trade_id(trade_id)
+        if journal_id is None:
+            return None
+
+        stmt = select(TradeJournal).where(TradeJournal.id == journal_id).limit(1)
+        row = (await db.execute(stmt)).scalars().first()
+        if not row:
+            return None
+
+        # 如当前用户已生成过该交易，仍允许返回预填，前端可直接打开已存在详情
+        entry_price = _to_float(getattr(row, "entry_price", None), 0.0)
+        exit_price = _to_float(getattr(row, "exit_price", None), 0.0)
+        realized_pnl = _to_float(getattr(row, "realized_pnl", None), 0.0)
+        hold_days = int(getattr(row, "holding_days", 0) or 0)
+        if hold_days <= 0:
+            entry_date = getattr(row, "entry_date", None)
+            exit_date = getattr(row, "exit_date", None)
+            if entry_date and exit_date:
+                hold_days = max((exit_date - entry_date).days, 1)
+            else:
+                hold_days = 1
+
+        context_parts: list[str] = []
+        emotion = getattr(row, "emotion_state", None)
+        if emotion:
+            context_parts.append(f"emotion={emotion}")
+        tags = getattr(row, "mistake_tags", None)
+        if isinstance(tags, list) and tags:
+            context_parts.append(f"mistake_tags={','.join(str(t) for t in tags)}")
+        lesson = getattr(row, "lesson_learned", None)
+        if lesson:
+            context_parts.append(f"lesson={lesson}")
+
+        return {
+            "trade_id": f"journal:{int(getattr(row, 'id', 0) or 0)}",
+            "symbol": (getattr(row, "symbol", "") or "").upper(),
+            "direction": _normalize_direction(getattr(row, "direction", None)),
+            "entry_price": entry_price,
+            "exit_price": exit_price,
+            "realized_pnl": realized_pnl,
+            "hold_days": hold_days,
+            "trade_context": " | ".join(context_parts),
+            "user_id": user_id,
+        }
+
     async def _get_by_trade_id(
         self, db: AsyncSession, trade_id: str
     ) -> DecisionPostMortem | None:
@@ -309,3 +420,34 @@ def _pm_to_dict(pm: DecisionPostMortem) -> dict[str, Any]:
 
 
 decision_post_mortem_service = DecisionPostMortemService()
+
+
+def _to_float(v: Any, default: float = 0.0) -> float:
+    try:
+        if v is None:
+            return default
+        return float(v)
+    except Exception:
+        return default
+
+
+def _normalize_direction(v: Any) -> str:
+    raw = (str(v or "").strip().upper())
+    if raw in {"BUY", "LONG", "B"}:
+        return "long"
+    if raw in {"SELL", "SHORT", "S"}:
+        return "short"
+    return "long"
+
+
+def _parse_journal_trade_id(trade_id: str) -> int | None:
+    raw = (trade_id or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("journal:"):
+        raw = raw.split(":", 1)[1]
+    try:
+        val = int(raw)
+        return val if val > 0 else None
+    except Exception:
+        return None

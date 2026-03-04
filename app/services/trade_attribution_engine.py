@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Optional
 
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.trade_attribution import AttributionCategory, TradeAttributionEntry
+from app.models.trade_journal import TradeJournal
 
 logger = logging.getLogger(__name__)
 
@@ -270,12 +272,6 @@ class TradeAttributionEngine:
         days: int = 30,
     ) -> dict:
         """返回最近 days 天的归因汇总统计。"""
-        from datetime import timedelta
-
-        from sqlalchemy import func, select
-
-        from app.models.trade_attribution import TradeAttributionEntry
-
         since = datetime.now(tz=timezone.utc) - timedelta(days=days)
         stmt = (
             select(
@@ -289,6 +285,9 @@ class TradeAttributionEngine:
             .group_by(TradeAttributionEntry.category)
         )
         rows = (await db.execute(stmt)).all()
+        if not rows:
+            return await self.get_summary_from_journal(db, days=days)
+
         return {
             "period_days": days,
             "breakdown": [
@@ -301,6 +300,244 @@ class TradeAttributionEngine:
                 }
                 for r in rows
             ],
+        }
+
+    async def backfill_from_journal(
+        self,
+        db: AsyncSession,
+        *,
+        days: Optional[int] = None,
+        limit: int = 1000,
+        dry_run: bool = False,
+    ) -> dict:
+        """将 trade_journal 历史记录回填到 trade_attribution_entries（幂等）。"""
+        stmt = select(TradeJournal).where(TradeJournal.realized_pnl.is_not(None))
+        if days and days > 0:
+            since = datetime.now(tz=timezone.utc) - timedelta(days=days)
+            stmt = stmt.where(TradeJournal.created_at >= since)
+
+        journals = list(
+            (await db.execute(stmt.order_by(TradeJournal.created_at.asc()).limit(limit))).scalars().all()
+        )
+
+        if not journals:
+            return {
+                "processed": 0,
+                "inserted": 0,
+                "skipped_existing": 0,
+                "dry_run": dry_run,
+            }
+
+        markers = [f"[BACKFILL_FROM_JOURNAL] journal_id={int(getattr(j, 'id', 0) or 0)}" for j in journals]
+        existing_notes = set(
+            (await db.execute(select(TradeAttributionEntry.notes).where(TradeAttributionEntry.notes.in_(markers))))
+            .scalars()
+            .all()
+        )
+
+        inserted = 0
+        skipped = 0
+
+        for j in journals:
+            marker = f"[BACKFILL_FROM_JOURNAL] journal_id={int(getattr(j, 'id', 0) or 0)}"
+            if marker in existing_notes:
+                skipped += 1
+                continue
+
+            payload = self._journal_to_entry_payload(j)
+            payload["notes"] = marker
+
+            if not dry_run:
+                db.add(TradeAttributionEntry(**payload))
+            inserted += 1
+
+        if not dry_run and inserted > 0:
+            await db.commit()
+
+        return {
+            "processed": len(journals),
+            "inserted": inserted,
+            "skipped_existing": skipped,
+            "dry_run": dry_run,
+        }
+
+    async def list_from_journal(
+        self,
+        db: AsyncSession,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+        symbol: Optional[str] = None,
+        category: Optional[str] = None,
+        days: Optional[int] = None,
+    ) -> tuple[list[dict], int]:
+        """当主归因表为空时，从 trade_journal 生成可展示归因视图。"""
+        stmt = select(TradeJournal).where(TradeJournal.realized_pnl.is_not(None))
+
+        if symbol:
+            stmt = stmt.where(TradeJournal.symbol == symbol)
+        if days and days > 0:
+            since = datetime.now(tz=timezone.utc) - timedelta(days=days)
+            stmt = stmt.where(TradeJournal.created_at >= since)
+
+        rows_all = list((await db.execute(stmt.order_by(TradeJournal.created_at.desc()))).scalars().all())
+
+        generated = [self._journal_to_attribution_item(j) for j in rows_all]
+        if category:
+            category_upper = category.upper()
+            generated = [g for g in generated if g["category"] == category_upper]
+
+        total = len(generated)
+        items = generated[offset: offset + limit]
+        return items, total
+
+    async def get_summary_from_journal(
+        self,
+        db: AsyncSession,
+        days: int = 30,
+    ) -> dict:
+        """从 trade_journal 聚合归因摘要（主表为空时回退）。"""
+        since = datetime.now(tz=timezone.utc) - timedelta(days=days)
+        stmt = (
+            select(TradeJournal)
+            .where(
+                TradeJournal.realized_pnl.is_not(None),
+                TradeJournal.created_at >= since,
+            )
+            .order_by(TradeJournal.created_at.desc())
+        )
+        rows = list((await db.execute(stmt)).scalars().all())
+
+        buckets: dict[str, dict] = {
+            AttributionCategory.WIN.value: {"count": 0, "sum_pnl": 0.0, "sum_exec": 0.0, "sum_pos": 0.0},
+            AttributionCategory.LOSS.value: {"count": 0, "sum_pnl": 0.0, "sum_exec": 0.0, "sum_pos": 0.0},
+            AttributionCategory.BREAKEVEN.value: {"count": 0, "sum_pnl": 0.0, "sum_exec": 0.0, "sum_pos": 0.0},
+        }
+
+        for j in rows:
+            item = self._journal_to_attribution_item(j)
+            cat = item["category"]
+            buckets[cat]["count"] += 1
+            buckets[cat]["sum_pnl"] += float(item["pnl_pct"])
+            buckets[cat]["sum_exec"] += float(item["execution_score"] or 0.0)
+            buckets[cat]["sum_pos"] += float(item["position_mgmt_score"] or 0.0)
+
+        breakdown = []
+        for cat, agg in buckets.items():
+            if agg["count"] <= 0:
+                continue
+            c = agg["count"]
+            breakdown.append(
+                {
+                    "category": cat,
+                    "count": c,
+                    "avg_pnl_pct": round(agg["sum_pnl"] / c, 4),
+                    "avg_exec_score": round(agg["sum_exec"] / c, 4),
+                    "avg_pos_score": round(agg["sum_pos"] / c, 4),
+                }
+            )
+
+        return {"period_days": days, "breakdown": breakdown}
+
+    @staticmethod
+    def _safe_float(v: Any, default: float = 0.0) -> float:
+        try:
+            if v is None:
+                return default
+            return float(v)
+        except Exception:
+            return default
+
+    def _journal_to_attribution_item(self, row: TradeJournal) -> dict:
+        """将 TradeJournal 映射为 Attribution API item。"""
+        entry_price = self._safe_float(getattr(row, "entry_price", None), 0.0)
+        exit_price = self._safe_float(getattr(row, "exit_price", None), 0.0)
+        quantity = self._safe_float(getattr(row, "quantity", None), 0.0)
+        realized_pnl = self._safe_float(getattr(row, "realized_pnl", None), 0.0)
+        base = entry_price * quantity
+
+        if base > 0:
+            pnl_pct = realized_pnl / base
+        elif entry_price > 0 and exit_price > 0:
+            pnl_pct = (exit_price - entry_price) / entry_price
+        else:
+            pnl_pct = 0.0
+
+        if pnl_pct > 0.005:
+            category = AttributionCategory.WIN.value
+        elif pnl_pct < -0.005:
+            category = AttributionCategory.LOSS.value
+        else:
+            category = AttributionCategory.BREAKEVEN.value
+
+        exec_quality = self._safe_float(getattr(row, "execution_quality", None), 50.0)
+        # 兼容两种口径：1-5（旧）与 1-100（新）
+        if exec_quality <= 5:
+            execution_score = max(0.0, min(1.0, exec_quality / 5.0))
+        else:
+            execution_score = max(0.0, min(1.0, exec_quality / 100.0))
+
+        hold_days_raw = getattr(row, "holding_days", None)
+        hold_days = int(hold_days_raw) if hold_days_raw is not None else 0
+        position_mgmt_score = max(0.2, min(0.95, 0.45 + min(max(hold_days, 0), 5) * 0.08))
+
+        strategy_tag = getattr(row, "strategy_tag", None)
+        alpha_source = str(strategy_tag).upper() if strategy_tag else "UNKNOWN"
+
+        return {
+            "id": int(getattr(row, "id", 0) or 0),
+            "symbol": str(getattr(row, "symbol", "") or ""),
+            "pnl_pct": round(float(pnl_pct), 6),
+            "pnl_absolute": round(realized_pnl, 4),
+            "hold_days": hold_days,
+            "category": category,
+            "alpha_source": alpha_source,
+            "alpha_contribution_pct": round(float(pnl_pct) * 0.5, 6),
+            "alpha_detail": {"strategy_tag": strategy_tag} if strategy_tag else None,
+            "execution_score": round(execution_score, 4),
+            "slippage_pct": None,
+            "timing_score": None,
+            "position_mgmt_score": round(position_mgmt_score, 4),
+            "scale_in_count": 0,
+            "scale_out_reason": None,
+            "regime_at_entry": None,
+            "created_at": getattr(row, "created_at", None),
+        }
+
+    def _journal_to_entry_payload(self, row: TradeJournal) -> dict:
+        """将 TradeJournal 映射为 TradeAttributionEntry 入库字段。"""
+        item = self._journal_to_attribution_item(row)
+        entry_price = self._safe_float(getattr(row, "entry_price", None), 0.0)
+        exit_price = self._safe_float(getattr(row, "exit_price", None), 0.0)
+        quantity = self._safe_float(getattr(row, "quantity", None), 0.0)
+        strategy_tag = getattr(row, "strategy_tag", None)
+
+        return {
+            "position_id": int(getattr(row, "plan_id", 0) or 0) or None,
+            "symbol": item["symbol"],
+            "strategy_id": str(strategy_tag) if strategy_tag else None,
+            "entry_price": entry_price,
+            "exit_price": exit_price,
+            "quantity": quantity,
+            "pnl_absolute": item["pnl_absolute"],
+            "pnl_pct": item["pnl_pct"],
+            "hold_days": item["hold_days"],
+            "category": item["category"],
+            "alpha_source": item["alpha_source"],
+            "alpha_contribution_pct": item["alpha_contribution_pct"],
+            "alpha_detail": item["alpha_detail"],
+            "execution_score": item["execution_score"],
+            "slippage_pct": item["slippage_pct"],
+            "timing_score": item["timing_score"],
+            "execution_detail": None,
+            "position_mgmt_score": item["position_mgmt_score"],
+            "scale_in_count": item["scale_in_count"],
+            "scale_out_reason": item["scale_out_reason"],
+            "trailing_stop_used": False,
+            "position_detail": None,
+            "regime_at_entry": item["regime_at_entry"],
+            "regime_at_exit": None,
+            "created_at": item["created_at"],
         }
 
 

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.db import get_session
 from app.models.trade_attribution import TradeAttributionEntry
 from app.schemas.attribution import (
+    AttributionBackfillResponse,
     AttributionSummaryResponse,
     TradeAttributionItemResponse,
     TradeAttributionListResponse,
@@ -26,6 +27,8 @@ router = APIRouter(prefix="/api/v1/attribution", tags=["Attribution"])
 async def list_attribution_trades(
     limit:    int = Query(default=20, ge=1, le=100),
     offset:   int = Query(default=0,  ge=0),
+    days:     int | None = Query(default=None, ge=7, le=365, description="可选：仅返回最近 N 天"),
+    auto_backfill: bool = Query(default=True, description="主归因表为空时是否自动回填"),
     symbol:   str | None = Query(default=None),
     category: str | None = Query(default=None, description="WIN / LOSS / BREAKEVEN"),
     db: AsyncSession = Depends(get_session),
@@ -36,12 +39,34 @@ async def list_attribution_trades(
         stmt = stmt.where(TradeAttributionEntry.symbol == symbol)
     if category:
         stmt = stmt.where(TradeAttributionEntry.category == category)
+    if days:
+        from datetime import datetime, timedelta, timezone
+        since = datetime.now(tz=timezone.utc) - timedelta(days=days)
+        stmt = stmt.where(TradeAttributionEntry.created_at >= since)
 
     total_stmt = select(func.count()).select_from(stmt.subquery())
     total = (await db.execute(total_stmt)).scalar_one_or_none() or 0
 
-    rows = list((await db.execute(stmt.limit(limit).offset(offset))).scalars().all())
-    items = [TradeAttributionItemResponse.model_validate(r) for r in rows]
+    if total == 0 and auto_backfill:
+        # 冷启动：将 journal 历史数据正式回填到归因主表
+        await trade_attribution_engine.backfill_from_journal(db, days=days, limit=2000, dry_run=False)
+        total = (await db.execute(total_stmt)).scalar_one_or_none() or 0
+
+    if total > 0:
+        rows = list((await db.execute(stmt.limit(limit).offset(offset))).scalars().all())
+        items = [TradeAttributionItemResponse.model_validate(r) for r in rows]
+    else:
+        fallback_items, fallback_total = await trade_attribution_engine.list_from_journal(
+            db,
+            limit=limit,
+            offset=offset,
+            symbol=symbol,
+            category=category,
+            days=days,
+        )
+        items = [TradeAttributionItemResponse.model_validate(r) for r in fallback_items]
+        total = fallback_total
+
     return TradeAttributionListResponse(items=items, total=total)
 
 
@@ -53,3 +78,20 @@ async def attribution_summary(
     """返回最近 N 天的归因分类统计（WIN / LOSS / BREAKEVEN 计数 + 平均分）。"""
     data = await trade_attribution_engine.get_summary(db, days=days)
     return AttributionSummaryResponse(**data)
+
+
+@router.post("/backfill", response_model=AttributionBackfillResponse, summary="回填归因历史数据")
+async def backfill_attribution(
+    days: int | None = Query(default=None, ge=7, le=3650, description="可选：仅回填最近 N 天"),
+    limit: int = Query(default=2000, ge=1, le=10000),
+    dry_run: bool = Query(default=False),
+    db: AsyncSession = Depends(get_session),
+):
+    """将 trade_journal 的已实现盈亏记录回填到 trade_attribution_entries。"""
+    result = await trade_attribution_engine.backfill_from_journal(
+        db,
+        days=days,
+        limit=limit,
+        dry_run=dry_run,
+    )
+    return AttributionBackfillResponse(**result)

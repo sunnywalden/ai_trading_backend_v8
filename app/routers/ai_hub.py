@@ -35,6 +35,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/ai-hub", tags=["AI 中枢 2.0 V10.3.3"])
 
 
+class PostMortemCreateRequest(BaseModel):
+    trade_id: str
+    symbol: str
+    direction: str  # long / short
+    entry_price: float
+    exit_price: float
+    realized_pnl: float
+    hold_days: int
+    trade_context: str | None = None
+
+
 # ─────────────────── Multi-Agent Orchestration ─────────────────────────────
 
 class AgentRunRequest(BaseModel):
@@ -246,6 +257,30 @@ async def get_post_mortems(
     return await decision_post_mortem_service.get_post_mortems(db, user_id, limit=limit)
 
 
+@router.get("/post-mortems/trade-candidates")
+async def get_post_mortem_trade_candidates(
+    limit: int = Query(default=100, ge=1, le=500),
+    q: str | None = Query(default=None, description="按 symbol 关键字过滤"),
+    db: AsyncSession = Depends(get_session),
+    user_id: str = Depends(get_current_user),
+):
+    """返回可下拉选择的候选交易列表（自动排除已剖析记录）。"""
+    return await decision_post_mortem_service.list_trade_candidates(db, user_id, limit=limit, q=q)
+
+
+@router.get("/post-mortems/trade-candidates/{trade_id}")
+async def get_post_mortem_trade_prefill(
+    trade_id: str,
+    db: AsyncSession = Depends(get_session),
+    user_id: str = Depends(get_current_user),
+):
+    """返回候选交易的预填参数，供前端一键带入表单。"""
+    payload = await decision_post_mortem_service.get_trade_prefill(db, user_id, trade_id)
+    if not payload:
+        raise HTTPException(status_code=404, detail="Trade candidate not found")
+    return payload
+
+
 @router.get("/post-mortems/patterns")
 async def get_post_mortem_patterns(
     days: int = Query(default=90, ge=30, le=365),
@@ -267,3 +302,36 @@ async def get_post_mortem_by_trade(
     if not result:
         raise HTTPException(status_code=404, detail="Post-mortem not found")
     return result
+
+
+@router.post("/post-mortems")
+async def create_post_mortem(
+    body: PostMortemCreateRequest = Body(...),
+    db: AsyncSession = Depends(get_session),
+    user_id: str = Depends(get_current_user),
+):
+    """创建（或返回已有）单笔交易的 AI 事后剖析报告。"""
+    # 统一方向映射到服务内部提示语义
+    direction = (body.direction or "").strip().upper()
+    if direction in {"LONG", "BUY", "B"}:
+        direction = "BUY"
+    elif direction in {"SHORT", "SELL", "S"}:
+        direction = "SELL"
+    else:
+        direction = "BUY"
+
+    context_payload = {"user_context": body.trade_context} if body.trade_context else {}
+    pm = await decision_post_mortem_service.generate_post_mortem(
+        db=db,
+        user_id=user_id,
+        trade_id=body.trade_id,
+        symbol=body.symbol,
+        direction=direction,
+        entry_price=body.entry_price,
+        exit_price=body.exit_price,
+        realized_pnl=body.realized_pnl,
+        hold_days=max(int(body.hold_days or 1), 1),
+        trade_context=context_payload,
+    )
+    await db.commit()
+    return await decision_post_mortem_service.get_by_trade_id(db, user_id, pm.trade_id)

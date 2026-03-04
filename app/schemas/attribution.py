@@ -45,3 +45,10 @@ class AttributionSummaryItem(BaseModel):
 class AttributionSummaryResponse(BaseModel):
     period_days: int
     breakdown:   list[AttributionSummaryItem]
+
+
+class AttributionBackfillResponse(BaseModel):
+    processed: int
+    inserted: int
+    skipped_existing: int
+    dry_run: bool
