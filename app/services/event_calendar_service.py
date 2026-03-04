@@ -356,7 +356,47 @@ class EventCalendarService:
         if symbol:
             stmt = stmt.where(EventCalendarEntry.symbol == symbol)
         result = await db.execute(stmt)
-        return list(result.scalars().all())
+        rows = list(result.scalars().all())
+        return self._dedupe_events(rows)
+
+    @staticmethod
+    def _event_key(entry: EventCalendarEntry) -> tuple[str, str, datetime, str]:
+        """事件去重键：symbol + type + minute-level event_date + normalized title。"""
+        dt = entry.event_date
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        dt_minute = dt.replace(second=0, microsecond=0)
+        return (
+            (entry.symbol or "").strip().upper(),
+            str(entry.event_type or "").strip().upper(),
+            dt_minute,
+            (entry.title or "").strip().lower(),
+        )
+
+    @staticmethod
+    def _event_priority(entry: EventCalendarEntry) -> tuple[int, datetime, int]:
+        """同 key 冲突时保留更“终态”的记录，避免同时出现已覆盖+待应用。"""
+        # 优先级：overridden > applied > pending
+        state_score = 3 if bool(entry.fence_overridden) else (2 if bool(entry.fence_applied) else 1)
+        updated_at = entry.updated_at or entry.created_at or entry.event_date
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=timezone.utc)
+        return (state_score, updated_at, int(entry.id or 0))
+
+    def _dedupe_events(self, entries: list[EventCalendarEntry]) -> list[EventCalendarEntry]:
+        if len(entries) <= 1:
+            return entries
+
+        kept: dict[tuple[str, str, datetime, str], EventCalendarEntry] = {}
+        for e in entries:
+            key = self._event_key(e)
+            old = kept.get(key)
+            if old is None or self._event_priority(e) > self._event_priority(old):
+                kept[key] = e
+
+        out = list(kept.values())
+        out.sort(key=lambda x: (x.event_date, x.symbol or "", x.id or 0))
+        return out
 
 
 # ── 模块级单例 ────────────────────────────────────────────────────────────────
