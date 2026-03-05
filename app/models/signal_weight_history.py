@@ -19,7 +19,7 @@ class SignalWeightHistory(Base):
     __tablename__ = "signal_weight_history"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    account_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     record_date: Mapped[date] = mapped_column(Date, nullable=False, index=True, comment="权重计算日期")
 
     # 因子维度（与 signal_fusion_engine._DIM_WEIGHTS 对应）
@@ -52,7 +52,7 @@ class SignalWeightHistory(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
 
     __table_args__ = (
-        Index("idx_swh_user_date_dim", "user_id", "record_date", "dimension", unique=True),
+        Index("idx_swh_account_date_dim", "account_id", "record_date", "dimension", unique=True),
         Index("idx_swh_date", "record_date"),
         {"comment": "Kalman 信号权重演化历史 V10.3.3"},
     )

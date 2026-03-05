@@ -17,7 +17,7 @@ class DecisionPostMortem(Base):
     __tablename__ = "decision_post_mortems"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    account_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     trade_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True, comment="关联 trading_plan.id 或 journal.id")
     symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
 
@@ -53,7 +53,7 @@ class DecisionPostMortem(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
 
     __table_args__ = (
-        Index("idx_dpm_user_symbol", "user_id", "symbol"),
+        Index("idx_dpm_account_symbol", "account_id", "symbol"),
         Index("idx_dpm_trade", "trade_id", unique=True),
         {"comment": "决策事后剖析报告 V10.3.3"},
     )

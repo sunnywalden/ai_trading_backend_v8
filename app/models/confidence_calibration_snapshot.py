@@ -17,7 +17,7 @@ class ConfidenceCalibrationSnapshot(Base):
     __tablename__ = "confidence_calibration_snapshot"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    account_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     snapshot_date: Mapped[date] = mapped_column(Date, nullable=False, index=True, comment="快照日期（每日 08:15 生成）")
 
     # 全局校准指标
@@ -41,6 +41,6 @@ class ConfidenceCalibrationSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
 
     __table_args__ = (
-        Index("idx_ccs_user_date", "user_id", "snapshot_date", unique=True),
+        Index("idx_ccs_account_date", "account_id", "snapshot_date", unique=True),
         {"comment": "置信度校准快照 V10.3.3"},
     )

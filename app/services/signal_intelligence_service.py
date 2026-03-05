@@ -250,7 +250,7 @@ class SignalIntelligenceService:
     async def _load_latest_ic_from_weight_history(
         self,
         db: AsyncSession,
-        user_id: str,
+        account_id: str,
         dimension: str,
     ) -> tuple[float, float, float] | None:
         """当交易信号样本不足时，回退到 signal_weight_history 最新 IC。"""
@@ -259,7 +259,7 @@ class SignalIntelligenceService:
         stmt = (
             select(SignalWeightHistory)
             .where(
-                SignalWeightHistory.user_id == user_id,
+                SignalWeightHistory.account_id == account_id,
                 SignalWeightHistory.dimension == dimension,
             )
             .order_by(desc(SignalWeightHistory.record_date), desc(SignalWeightHistory.id))
@@ -279,7 +279,7 @@ class SignalIntelligenceService:
     async def compute_dimension_ic(
         self,
         db: AsyncSession,
-        user_id: str,
+        account_id: str,
         dimension: str,
         window: int = 60,
     ) -> dict[str, Any]:
@@ -294,8 +294,8 @@ class SignalIntelligenceService:
             select(TradingSignal)
             .where(
                 or_(
-                    TradingSignal.user_id == user_id,
-                    TradingSignal.account_id == user_id,
+                    TradingSignal.user_id == account_id,
+                    TradingSignal.account_id == account_id,
                 ),
             )
             .order_by(desc(TradingSignal.created_at))
@@ -365,7 +365,7 @@ class SignalIntelligenceService:
         # 冷启动回退：无样本时，优先使用 signal_weight_history 最新 IC
         # sample_source 在上文已根据真实/代理样本设定
         if n == 0:
-            snapshot = await self._load_latest_ic_from_weight_history(db, user_id, dimension)
+            snapshot = await self._load_latest_ic_from_weight_history(db, account_id, dimension)
             if snapshot is not None:
                 ic_5, ic_20, ic_60 = snapshot
                 rolling_ics = [v for v in [ic_5, ic_20, ic_60] if v is not None]
@@ -410,12 +410,12 @@ class SignalIntelligenceService:
     async def get_signal_intelligence(
         self,
         db: AsyncSession,
-        user_id: str,
+        account_id: str,
     ) -> dict[str, Any]:
         """汇总所有维度 IC 状态。"""
         results = []
         for dim in DIMENSIONS:
-            dim_data = await self.compute_dimension_ic(db, user_id, dim, window=60)
+            dim_data = await self.compute_dimension_ic(db, account_id, dim, window=60)
             results.append(dim_data)
 
         crowding_alerts = [r for r in results if r["is_crowded"]]
@@ -428,16 +428,16 @@ class SignalIntelligenceService:
         return _sanitize_json_compatible(payload)
 
     async def get_crowding_alerts(
-        self, db: AsyncSession, user_id: str
+        self, db: AsyncSession, account_id: str
     ) -> list[dict[str, Any]]:
         """仅返回触发拥挤度告警的维度。"""
-        intel = await self.get_signal_intelligence(db, user_id)
+        intel = await self.get_signal_intelligence(db, account_id)
         return intel["crowding_alerts"]
 
     async def get_signal_correlation_matrix(
         self,
         db: AsyncSession,
-        user_id: str,
+        account_id: str,
         symbols: list[str] | None = None,
         days: int = 20,
     ) -> dict[str, Any]:
@@ -457,8 +457,8 @@ class SignalIntelligenceService:
             )
             .where(
                 or_(
-                    TradingSignal.user_id == user_id,
-                    TradingSignal.account_id == user_id,
+                    TradingSignal.user_id == account_id,
+                    TradingSignal.account_id == account_id,
                 ),
                 TradingSignal.created_at >= cutoff,
             )
@@ -474,8 +474,8 @@ class SignalIntelligenceService:
                 select(TradingSignal.symbol)
                 .where(
                     or_(
-                        TradingSignal.user_id == user_id,
-                        TradingSignal.account_id == user_id,
+                        TradingSignal.user_id == account_id,
+                        TradingSignal.account_id == account_id,
                     )
                 )
                 .order_by(desc(TradingSignal.created_at))

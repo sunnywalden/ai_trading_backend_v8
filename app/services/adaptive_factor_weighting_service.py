@@ -45,21 +45,21 @@ DEFAULT_WEIGHTS: dict[str, float] = {
 }
 
 # Kalman 状态缓存（内存，重启后从 DB 恢复）
-_kalman_state: dict[str, dict[str, float]] = {}  # user_id → {dim: weight, dim_var: variance}
+_kalman_state: dict[str, dict[str, float]] = {}  # account_id → {dim: weight, dim_var: variance}
 
 
-def _load_state(user_id: str) -> dict[str, float]:
+def _load_state(account_id: str) -> dict[str, float]:
     """从缓存加载 Kalman 状态（权重）。"""
-    if user_id in _kalman_state:
-        return {k: v for k, v in _kalman_state[user_id].items() if not k.endswith("_var")}
+    if account_id in _kalman_state:
+        return {k: v for k, v in _kalman_state[account_id].items() if not k.endswith("_var")}
     return dict(DEFAULT_WEIGHTS)
 
 
-def _load_variance(user_id: str) -> dict[str, float]:
+def _load_variance(account_id: str) -> dict[str, float]:
     """加载状态协方差 P。"""
-    if user_id in _kalman_state:
+    if account_id in _kalman_state:
         return {
-            dim: _kalman_state[user_id].get(f"{dim}_var", 0.1)
+            dim: _kalman_state[account_id].get(f"{dim}_var", 0.1)
             for dim in DEFAULT_WEIGHTS
         }
     return {dim: 0.1 for dim in DEFAULT_WEIGHTS}
@@ -113,7 +113,7 @@ class AdaptiveFactorWeightingService:
     async def run_daily_update(
         self,
         db: AsyncSession,
-        user_id: str,
+        account_id: str,
         ic_5d_by_dim: dict[str, float] | None = None,
         ic_20d_by_dim: dict[str, float] | None = None,
         ic_60d_by_dim: dict[str, float] | None = None,
@@ -122,22 +122,22 @@ class AdaptiveFactorWeightingService:
         today = date.today()
 
         # 如已存在今日记录则跳过
-        existing_check = await self._check_today_exists(db, user_id, today)
+        existing_check = await self._check_today_exists(db, account_id, today)
         if existing_check:
-            logger.info("AdaptiveWeighting: already ran for %s user=%s", today, user_id)
+            logger.info("AdaptiveWeighting: already ran for %s user=%s", today, account_id)
             return []
 
         # 如果没有传入 IC，从 signal_intelligence_service 计算
         if ic_5d_by_dim is None:
-            ic_5d_by_dim = await self._fetch_ic_from_db(db, user_id, window=5)
+            ic_5d_by_dim = await self._fetch_ic_from_db(db, account_id, window=5)
         if ic_20d_by_dim is None:
-            ic_20d_by_dim = await self._fetch_ic_from_db(db, user_id, window=20)
+            ic_20d_by_dim = await self._fetch_ic_from_db(db, account_id, window=20)
         if ic_60d_by_dim is None:
-            ic_60d_by_dim = await self._fetch_ic_from_db(db, user_id, window=60)
+            ic_60d_by_dim = await self._fetch_ic_from_db(db, account_id, window=60)
 
         # 从 DB 恢复最近权重（或用默认）
-        prev_weights = await self._get_latest_weights_from_db(db, user_id) or _load_state(user_id)
-        prev_variances = _load_variance(user_id)
+        prev_weights = await self._get_latest_weights_from_db(db, account_id) or _load_state(account_id)
+        prev_variances = _load_variance(account_id)
 
         records = []
         new_weights = {}
@@ -165,12 +165,12 @@ class AdaptiveFactorWeightingService:
         momentum_weights, reasons = _apply_momentum_adjustment(new_weights, ic_5d_by_dim)
 
         # 更新内存缓存
-        _kalman_state[user_id] = {**momentum_weights, **{f"{k}_var": v for k, v in new_variances.items()}}
+        _kalman_state[account_id] = {**momentum_weights, **{f"{k}_var": v for k, v in new_variances.items()}}
 
         # 写入 DB
         for dim in DEFAULT_WEIGHTS:
             rec = SignalWeightHistory(
-                user_id=user_id,
+                account_id=account_id,
                 record_date=today,
                 dimension=dim,
                 weight_before=round(prev_weights.get(dim, DEFAULT_WEIGHTS[dim]), 6),
@@ -201,25 +201,25 @@ class AdaptiveFactorWeightingService:
                 pass
 
         await db.flush()
-        logger.info("AdaptiveWeighting: updated weights for user=%s date=%s", user_id, today)
+        logger.info("AdaptiveWeighting: updated weights for user=%s date=%s", account_id, today)
         return records
 
     async def get_current_weights(
-        self, db: AsyncSession, user_id: str
+        self, db: AsyncSession, account_id: str
     ) -> dict[str, float]:
         """返回最新有效权重。"""
-        weights = await self._get_latest_weights_from_db(db, user_id)
+        weights = await self._get_latest_weights_from_db(db, account_id)
         return weights or dict(DEFAULT_WEIGHTS)
 
     async def get_weights_history(
-        self, db: AsyncSession, user_id: str, days: int = 30, dimension: str | None = None
+        self, db: AsyncSession, account_id: str, days: int = 30, dimension: str | None = None
     ) -> list[dict[str, Any]]:
         """返回权重演化历史。"""
         cutoff = date.today() - timedelta(days=days)
         stmt = (
             select(SignalWeightHistory)
             .where(
-                SignalWeightHistory.user_id == user_id,
+                SignalWeightHistory.account_id == account_id,
                 SignalWeightHistory.record_date >= cutoff,
             )
         )
@@ -246,20 +246,20 @@ class AdaptiveFactorWeightingService:
         ]
 
     async def get_factor_momentum(
-        self, db: AsyncSession, user_id: str
+        self, db: AsyncSession, account_id: str
     ) -> list[dict[str, Any]]:
         """返回最近各维度 IC 及动量因子排名。"""
-        latest = await self.get_weights_history(db, user_id, days=1)
+        latest = await self.get_weights_history(db, account_id, days=1)
         return sorted(latest, key=lambda x: (x.get("ic_5d") or 0), reverse=True)
 
     async def _get_latest_weights_from_db(
-        self, db: AsyncSession, user_id: str
+        self, db: AsyncSession, account_id: str
     ) -> dict[str, float] | None:
         """从 DB 恢复最新一天所有维度动量调整后权重。"""
         stmt = (
             select(SignalWeightHistory)
             .where(
-                SignalWeightHistory.user_id == user_id,
+                SignalWeightHistory.account_id == account_id,
                 SignalWeightHistory.weight_momentum_adjusted.isnot(None),
             )
             .order_by(desc(SignalWeightHistory.record_date))
@@ -278,24 +278,24 @@ class AdaptiveFactorWeightingService:
         return weights if weights else None
 
     async def _check_today_exists(
-        self, db: AsyncSession, user_id: str, today: date
+        self, db: AsyncSession, account_id: str, today: date
     ) -> bool:
         stmt = select(SignalWeightHistory.id).where(
-            SignalWeightHistory.user_id == user_id,
+            SignalWeightHistory.account_id == account_id,
             SignalWeightHistory.record_date == today,
         ).limit(1)
         row = (await db.execute(stmt)).first()
         return row is not None
 
     async def _fetch_ic_from_db(
-        self, db: AsyncSession, user_id: str, window: int
+        self, db: AsyncSession, account_id: str, window: int
     ) -> dict[str, float]:
         """从 signal_intelligence_service 获取最新 IC。"""
         from app.services.signal_intelligence_service import signal_intelligence_service, DIMENSIONS
         result = {}
         for dim in DIMENSIONS:
             try:
-                data = await signal_intelligence_service.compute_dimension_ic(db, user_id, dim, window=window)
+                data = await signal_intelligence_service.compute_dimension_ic(db, account_id, dim, window=window)
                 ic_key = f"ic_{window}d"
                 result[dim] = data.get(ic_key, 0.0) or 0.0
             except Exception:
