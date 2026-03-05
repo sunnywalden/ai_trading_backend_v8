@@ -37,7 +37,17 @@ async def chat(
         message=body.message,
         db=session,
     )
-    return result
+    # 前端 normalizeMessage 读取 content 字段，将 message 映射到 content
+    return {
+        "id": result.get("id"),
+        "role": "assistant",
+        "content": result.get("message", ""),
+        "model_used": result.get("model_used"),
+        "action_intent": result.get("action_intent"),
+        "session_id": result.get("session_id"),
+        "tokens_used": result.get("tokens_used"),
+        "requires_confirmation": result.get("requires_confirmation", False),
+    }
 
 
 @router.get("/history")
@@ -55,7 +65,8 @@ async def get_history(
     if session_id:
         query += " AND session_id=:sid"
         params["sid"] = session_id
-    query += " ORDER BY created_at DESC LIMIT :limit"
+    # 用 id 排序（自增主键），避免同批次保存的 user/assistant 消息时间戳相同导致顺序不确定
+    query += " ORDER BY id DESC LIMIT :limit"
     params["limit"] = limit
 
     result = await session.execute(text(query), params)

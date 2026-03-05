@@ -58,7 +58,7 @@ class CopilotService:
         messages.append({"role": "user", "content": message})
 
         # 调用 AI
-        raw_response, model_used, tokens = await self._call_ai(messages, model_type)
+        raw_response, model_used, tokens = await self._call_ai(messages, model_type, caller="copilot_chat")
 
         # 意图检测
         action_intent = self._detect_intent(message, raw_response)
@@ -148,7 +148,7 @@ class CopilotService:
         # 优化：早间简报优先保证响应速度，使用 lightweight 模型 (deepseek-chat)
         # 强制刷新也不需要 complex 推理，仅是为了获取最新数据快照
         model_type = "lightweight"
-        raw_response, _, _ = await self._call_ai(messages, model_type)
+        raw_response, _, _ = await self._call_ai(messages, model_type, caller="copilot_morning_brief")
         
         result = None
         try:
@@ -439,9 +439,13 @@ class CopilotService:
         db.add(CopilotMessage(account_id=account_id, session_id=session_id, role="assistant", content=ai_msg, model_used=model_used, action_intent=action_intent, tokens_used=tokens))
         await db.commit()
 
-    async def _call_ai(self, messages: list, model_type: str = "lightweight") -> tuple[str, str, int]:
-        """返回 (response_text, model_name, tokens_used)"""
+    async def _call_ai(self, messages: list, model_type: str = "lightweight", caller: str = "copilot") -> tuple[str, str, int]:
+        """返回 (response_text, model_name, tokens_used)，并写入 llm_call_log 用于统计"""
+        import asyncio
+        import time
+        import uuid
         from openai import AsyncOpenAI
+        from app.services.ai_client_manager import _write_llm_call_log
 
         model = settings.AI_COMPLEX_MODEL if model_type == "complex" else settings.AI_LIGHTWEIGHT_MODEL
 
@@ -458,13 +462,45 @@ class CopilotService:
                 timeout=settings.OPENAI_TIMEOUT_SECONDS,
             )
 
-        resp = await client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_tokens=1500,
-        )
-        content = resp.choices[0].message.content or ""
-        tokens = getattr(resp.usage, "total_tokens", 0)
+        call_id = str(uuid.uuid4())
+        start_ts = time.monotonic()
+        status = "ERROR"
+        error_msg: str | None = None
+        content = ""
+        tokens = 0
+        prompt_tokens = 0
+        completion_tokens = 0
+        try:
+            resp = await client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_tokens=1500,
+            )
+            content = resp.choices[0].message.content or ""
+            tokens = getattr(resp.usage, "total_tokens", 0)
+            prompt_tokens = getattr(resp.usage, "prompt_tokens", 0)
+            completion_tokens = getattr(resp.usage, "completion_tokens", 0)
+            status = "SUCCESS"
+        except Exception as exc:
+            status = "ERROR"
+            error_msg = str(exc)[:200]
+            logger.warning("[Copilot._call_ai] LLM 调用异常: %s", exc)
+            raise
+        finally:
+            latency_ms = int((time.monotonic() - start_ts) * 1000)
+            asyncio.ensure_future(
+                _write_llm_call_log(
+                    call_id=call_id,
+                    caller=caller,
+                    model=model,
+                    latency_ms=latency_ms,
+                    status=status,
+                    degraded=False,
+                    error_msg=error_msg,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                )
+            )
         return content, model, int(tokens)
 
 
