@@ -1264,6 +1264,11 @@ class AutonomousEngine:
             logger.error(f"Execute order failed: {e}")
             return None
 
+    # 出场/减仓方向集合 —— 遇到这些方向时关闭已有日志，而不是新建
+    _EXIT_DIRECTIONS: frozenset[str] = frozenset(
+        {"SELL", "SHORT", "EXIT", "EXIT_FULL", "REDUCE", "CLOSE", "SELL_ALL"}
+    )
+
     async def _create_journal_for_executed_signal(
         self,
         db: AsyncSession,
@@ -1271,22 +1276,21 @@ class AutonomousEngine:
         signal: dict,
         decision: dict,
     ) -> None:
-        """为自主执行成功的信号补写交易日志（幂等）。"""
+        """为自主执行成功的信号补写交易日志（幂等）。
+
+        - BUY/LONG 信号 → 新建 DRAFT 日志（记录建仓）
+        - SELL/EXIT 信号 → 查找对应 DRAFT 日志并关闭（记录平仓）
+        """
         try:
-            from sqlalchemy import select
+            from datetime import date as _date
+            from sqlalchemy import select as _select
             from app.models.trade_journal import TradeJournal
             from app.services.journal_service import JournalService
 
             signal_ref = str(signal.get("signal_id") or signal.get("id") or "")
-            if signal_ref:
-                # 幂等：同 signal_id 已存在则不重复创建
-                exists_stmt = select(TradeJournal.id).where(TradeJournal.signal_id == signal_ref).limit(1)
-                exists_row = await db.execute(exists_stmt)
-                if exists_row.scalar_one_or_none() is not None:
-                    return
-
             direction = str(decision.get("action") or signal.get("direction") or "BUY").upper()
-            entry_price = float(
+            symbol = str(signal.get("symbol") or decision.get("symbol") or "")
+            price = float(
                 decision.get("ref_price")
                 or signal.get("price")
                 or signal.get("suggested_price")
@@ -1294,17 +1298,98 @@ class AutonomousEngine:
             )
             qty = float(decision.get("qty") or signal.get("quantity") or signal.get("quantity_value") or 0.0)
 
-            journal_svc = JournalService(db)
-            await journal_svc.create_from_execution(
-                account_id=account_id,
-                symbol=str(signal.get("symbol") or decision.get("symbol") or ""),
-                direction=direction,
-                price=max(entry_price, 0.01),
-                quantity=max(qty, 0.0),
-                signal_id=signal_ref or None,
+            if direction in self._EXIT_DIRECTIONS:
+                # ── 出场信号：关闭对应的 DRAFT 建仓日志 ──
+                await self._close_journal_for_exit(
+                    db=db,
+                    account_id=account_id,
+                    symbol=symbol,
+                    exit_price=max(price, 0.0001),
+                    qty=qty,
+                    exit_signal_id=signal_ref or None,
+                )
+            else:
+                # ── 建仓信号：幂等新建 ──
+                if signal_ref:
+                    exists_row = await db.execute(
+                        _select(TradeJournal.id).where(TradeJournal.signal_id == signal_ref).limit(1)
+                    )
+                    if exists_row.scalar_one_or_none() is not None:
+                        return
+
+                journal_svc = JournalService(db)
+                await journal_svc.create_from_execution(
+                    account_id=account_id,
+                    symbol=symbol,
+                    direction=direction,
+                    price=max(price, 0.01),
+                    quantity=max(qty, 0.0),
+                    signal_id=signal_ref or None,
+                )
+        except Exception as _e:
+            logger.warning(f"[AutonomousEngine] Failed to create/close TradeJournal entry: {_e}")
+
+    async def _close_journal_for_exit(
+        self,
+        db: AsyncSession,
+        account_id: str,
+        symbol: str,
+        exit_price: float,
+        qty: float,
+        exit_signal_id: str | None = None,
+    ) -> None:
+        """平仓时，找到最近一条 DRAFT 建仓日志并关闭（写入 exit_price / realized_pnl / CLOSED）。"""
+        try:
+            from datetime import date as _date
+            from sqlalchemy import select as _select
+            from app.models.trade_journal import TradeJournal
+
+            stmt = (
+                _select(TradeJournal)
+                .where(
+                    TradeJournal.account_id == account_id,
+                    TradeJournal.symbol == symbol,
+                    TradeJournal.journal_status == "DRAFT",
+                    TradeJournal.entry_price.is_not(None),
+                    TradeJournal.exit_price.is_(None),
+                )
+                .order_by(TradeJournal.created_at.desc())
+                .limit(1)
+            )
+            journal = (await db.execute(stmt)).scalar_one_or_none()
+
+            if journal is None:
+                # 找不到可关闭的日志，改为新建 SELL 记录（防止数据丢失）
+                from app.services.journal_service import JournalService
+                await JournalService(db).create_from_execution(
+                    account_id=account_id,
+                    symbol=symbol,
+                    direction="SELL",
+                    price=exit_price,
+                    quantity=qty,
+                    signal_id=exit_signal_id,
+                )
+                return
+
+            entry_price = float(getattr(journal, 'entry_price') or 0)
+            used_qty = float(getattr(journal, 'quantity') or qty)
+            direction_mul = -1.0 if str(getattr(journal, 'direction') or "BUY").upper() in {"BUY", "LONG"} else 1.0
+            realized_pnl = (exit_price - entry_price) * used_qty * direction_mul
+
+            setattr(journal, 'exit_price', exit_price)
+            setattr(journal, 'exit_date', _date.today())
+            setattr(journal, 'realized_pnl', realized_pnl)
+            setattr(journal, 'journal_status', "CLOSED")
+            if exit_signal_id:
+                notes = getattr(journal, 'lesson_learned') or ""
+                setattr(journal, 'lesson_learned', (notes + f" | 平仓信号ID: {exit_signal_id}").strip(" |"))
+
+            logger.info(
+                "[AutonomousEngine] closed TradeJournal id=%s %s exit=%.4f pnl=%.2f",
+                journal.id, symbol, exit_price, realized_pnl,
             )
         except Exception as _e:
-            logger.warning(f"[AutonomousEngine] Failed to create TradeJournal entry: {_e}")
+            logger.warning(f"[AutonomousEngine] Failed to close TradeJournal on exit: {_e}")
 
     async def _schedule_revoke_window(self, account_id: str, order_id: str) -> None:
         """SEMI 模式：记录可撤单窗口（实际撤单由 /autonomy/revoke API 触发）"""

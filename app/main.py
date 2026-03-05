@@ -247,6 +247,11 @@ async def lifespan(app: FastAPI):
             register_m4_jobs(scheduler)             # V10.4 M4: 自主循环 8 项健康检查 (2min)
         except ImportError:
             pass
+        try:
+            from app.jobs.data_sync_jobs import register_data_sync_jobs
+            register_data_sync_jobs(scheduler)      # V10.4: 数据自动同步 (journal关闭/actual_return/归因)
+        except ImportError:
+            pass
         start_scheduler()
         logger.info("Scheduler started with periodic tasks")
 
