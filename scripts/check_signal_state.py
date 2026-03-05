@@ -3,7 +3,7 @@ import os, sys
 sys.path.append(os.getcwd())
 
 import app.models.strategy
-from app.models.db import SessionLocal
+from app.models.db import SessionLocal, close_db_resources
 from app.models.trading_signal import TradingSignal, SignalStatus
 from app.models.autonomy_audit_log import AutonomyAuditLog
 from datetime import datetime, timezone, timedelta
@@ -76,5 +76,12 @@ async def check():
             oid = (row[2] or "")[:22]
             print(f"  {row[0]:<8} {str(row[1].value if hasattr(row[1],'value') else row[1]):<12} {oid:<25} {row[3]}")
 
+
+async def main():
+    try:
+        await check()
+    finally:
+        await close_db_resources()
+
 if __name__ == "__main__":
-    asyncio.run(check())
+    asyncio.run(main())

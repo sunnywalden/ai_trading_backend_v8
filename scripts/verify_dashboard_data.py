@@ -1,5 +1,5 @@
 import asyncio
-from app.models.db import engine
+from app.models.db import engine, close_db_resources
 from sqlalchemy import text
 from datetime import date, timedelta
 
@@ -15,4 +15,13 @@ async def check_data():
         for r in res:
             print(f"Status: {r[0]}, Count: {r[1]}")
 
-asyncio.run(check_data())
+
+async def main():
+    try:
+        await check_data()
+    finally:
+        await close_db_resources()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

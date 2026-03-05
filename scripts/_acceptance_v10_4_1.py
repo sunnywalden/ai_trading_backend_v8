@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import app.models.strategy  # noqa: F401 — 触发模型注册
 
 from sqlalchemy import text, select, func
-from app.models.db import SessionLocal
+from app.models.db import SessionLocal, close_db_resources
 from app.models.trading_signal import TradingSignal
 from app.services.signal_intelligence_service import signal_intelligence_service
 from app.services.autonomy_health_monitor import autonomy_health_monitor
@@ -121,31 +121,34 @@ async def test_m1_copilot_context(db):
 
 
 async def main():
-    print("=" * 60)
-    print("V10.4.1 验收测试")
-    print("=" * 60)
+    try:
+        print("=" * 60)
+        print("V10.4.1 验收测试")
+        print("=" * 60)
 
-    async with SessionLocal() as db:
-        print("\n── M1 数据闭环治理 ──")
-        await test_m1_llm_call_log(db)
-        await test_m1_return_backfill(db)
-        await test_m1_signal_intelligence(db)
+        async with SessionLocal() as db:
+            print("\n── M1 数据闭环治理 ──")
+            await test_m1_llm_call_log(db)
+            await test_m1_return_backfill(db)
+            await test_m1_signal_intelligence(db)
 
-        print("\n── M3/M1 Copilot 上下文 ──")
-        await test_m1_copilot_context(db)
+            print("\n── M3/M1 Copilot 上下文 ──")
+            await test_m1_copilot_context(db)
 
-        print("\n── M4 自主循环稳定 ──")
-        await test_m4_health_monitor(db)
+            print("\n── M4 自主循环稳定 ──")
+            await test_m4_health_monitor(db)
 
-    print("\n" + "=" * 60)
-    passed = sum(1 for _, ok in results if ok)
-    total = len(results)
-    print(f"结果：{passed}/{total} 通过")
-    if passed == total:
-        print("🎉 V10.4.1 验收通过！")
-    else:
-        print("⚠️  部分测试失败，请检查以上输出")
-    print("=" * 60)
+        print("\n" + "=" * 60)
+        passed = sum(1 for _, ok in results if ok)
+        total = len(results)
+        print(f"结果：{passed}/{total} 通过")
+        if passed == total:
+            print("🎉 V10.4.1 验收通过！")
+        else:
+            print("⚠️  部分测试失败，请检查以上输出")
+        print("=" * 60)
+    finally:
+        await close_db_resources()
 
 
 if __name__ == "__main__":
