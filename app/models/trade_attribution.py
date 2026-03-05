@@ -73,12 +73,18 @@ class TradeAttributionEntry(Base):
     regime_at_exit:  Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     notes:           Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # traded_at：交易实际平仓日期（来自 journal.exit_date）；NULL 则降级用 created_at
+    traded_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True, index=True,
+        comment="交易实际平仓时间（来自 journal.exit_date）",
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
 
     __table_args__ = (
         Index("idx_attr_symbol",   "symbol"),
         Index("idx_attr_strategy", "strategy_id"),
         Index("idx_attr_created",  "created_at"),
+        Index("idx_attr_traded",   "traded_at"),
         Index("idx_attr_category", "category"),
     )
 

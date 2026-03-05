@@ -273,6 +273,8 @@ class TradeAttributionEngine:
     ) -> dict:
         """返回最近 days 天的归因汇总统计。"""
         since = datetime.now(tz=timezone.utc) - timedelta(days=days)
+        # 优先用 traded_at（实际平仓时间），回退到 created_at（入库时间）
+        effective_date = func.coalesce(TradeAttributionEntry.traded_at, TradeAttributionEntry.created_at)
         stmt = (
             select(
                 TradeAttributionEntry.category,
@@ -281,7 +283,7 @@ class TradeAttributionEngine:
                 func.avg(TradeAttributionEntry.execution_score).label("avg_exec"),
                 func.avg(TradeAttributionEntry.position_mgmt_score).label("avg_pos"),
             )
-            .where(TradeAttributionEntry.created_at >= since)
+            .where(effective_date >= since)
             .group_by(TradeAttributionEntry.category)
         )
         rows = (await db.execute(stmt)).all()
@@ -313,8 +315,11 @@ class TradeAttributionEngine:
         """将 trade_journal 历史记录回填到 trade_attribution_entries（幂等）。"""
         stmt = select(TradeJournal).where(self._journal_closed_predicate())
         if days and days > 0:
-            since = datetime.now(tz=timezone.utc) - timedelta(days=days)
-            stmt = stmt.where(TradeJournal.created_at >= since)
+            # 按实际平仓日期（exit_date）过滤，而非入库时间（created_at）
+            since_date = (datetime.now(tz=timezone.utc) - timedelta(days=days)).date()
+            stmt = stmt.where(
+                func.coalesce(TradeJournal.exit_date, TradeJournal.entry_date) >= since_date
+            )
 
         journals = list(
             (await db.execute(stmt.order_by(TradeJournal.created_at.asc()).limit(limit))).scalars().all()
@@ -377,8 +382,11 @@ class TradeAttributionEngine:
         if symbol:
             stmt = stmt.where(TradeJournal.symbol == symbol)
         if days and days > 0:
-            since = datetime.now(tz=timezone.utc) - timedelta(days=days)
-            stmt = stmt.where(TradeJournal.created_at >= since)
+            # 按实际平仓日期（exit_date）过滤，而非入库时间（created_at）
+            since_date = (datetime.now(tz=timezone.utc) - timedelta(days=days)).date()
+            stmt = stmt.where(
+                func.coalesce(TradeJournal.exit_date, TradeJournal.entry_date) >= since_date
+            )
 
         rows_all = list((await db.execute(stmt.order_by(TradeJournal.created_at.desc()))).scalars().all())
 
@@ -397,12 +405,13 @@ class TradeAttributionEngine:
         days: int = 30,
     ) -> dict:
         """从 trade_journal 聚合归因摘要（主表为空时回退）。"""
-        since = datetime.now(tz=timezone.utc) - timedelta(days=days)
+        # 按实际平仓日期（exit_date）过滤，而非入库时间（created_at）
+        since_date = (datetime.now(tz=timezone.utc) - timedelta(days=days)).date()
         stmt = (
             select(TradeJournal)
             .where(
                 self._journal_closed_predicate(),
-                TradeJournal.created_at >= since,
+                func.coalesce(TradeJournal.exit_date, TradeJournal.entry_date) >= since_date,
             )
             .order_by(TradeJournal.created_at.desc())
         )
@@ -531,6 +540,24 @@ class TradeAttributionEngine:
         quantity = self._safe_float(getattr(row, "quantity", None), 0.0)
         strategy_tag = getattr(row, "strategy_tag", None)
 
+        # traded_at：优先 exit_date，其次 entry_date，转为 datetime 以匹配列类型
+        exit_date_raw  = getattr(row, "exit_date",  None)
+        entry_date_raw = getattr(row, "entry_date", None)
+        traded_date = exit_date_raw or entry_date_raw
+        traded_at: Optional[datetime] = None
+        if traded_date is not None:
+            try:
+                from datetime import date as _date
+                if isinstance(traded_date, _date):
+                    traded_at = datetime(
+                        traded_date.year, traded_date.month, traded_date.day,
+                        tzinfo=timezone.utc,
+                    )
+                elif isinstance(traded_date, datetime):
+                    traded_at = traded_date
+            except Exception:
+                traded_at = None
+
         return {
             "position_id": int(getattr(row, "plan_id", 0) or 0) or None,
             "symbol": item["symbol"],
@@ -556,6 +583,7 @@ class TradeAttributionEngine:
             "position_detail": None,
             "regime_at_entry": item["regime_at_entry"],
             "regime_at_exit": None,
+            "traded_at": traded_at,
             "created_at": item["created_at"],
         }
 
