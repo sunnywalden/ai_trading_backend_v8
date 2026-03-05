@@ -17,7 +17,7 @@ class PortfolioFactorExposure(Base):
     __tablename__ = "portfolio_factor_exposure"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
-    user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    account_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     snapshot_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True, comment="快照时间（UTC）")
 
     # Fama-French 五因子 + QMJ Beta
@@ -50,6 +50,6 @@ class PortfolioFactorExposure(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
 
     __table_args__ = (
-        Index("idx_pfe_user_snap", "user_id", "snapshot_at"),
+        Index("idx_pfe_account_snap", "account_id", "snapshot_at"),
         {"comment": "五因子敞口快照 V10.3.3"},
     )

@@ -26,9 +26,9 @@ class WarRoomService:
     """战情室聚合数据服务。"""
 
     @staticmethod
-    def _candidate_user_keys(user_id: str) -> list[str]:
-        keys = [str(user_id)]
-        uid = str(user_id)
+    def _candidate_user_keys(account_id: str) -> list[str]:
+        keys = [str(account_id)]
+        uid = str(account_id)
         if "@" in uid:
             keys.append(uid.split("@", 1)[0])
         if uid.lower().startswith("user_"):
@@ -43,7 +43,7 @@ class WarRoomService:
     async def _load_plan_positions(
         self,
         db: AsyncSession,
-        user_id: str,
+        account_id: str,
     ) -> list[dict[str, Any]]:
         """从 trading_plan 构造持仓视图（兼容 account_id 维度）。"""
         from app.models.trading_plan import TradingPlan
@@ -57,7 +57,7 @@ class WarRoomService:
                 TradingPlan.plan_tags,
             )
             .where(
-                TradingPlan.account_id.in_(self._candidate_user_keys(user_id)),
+                TradingPlan.account_id.in_(self._candidate_user_keys(account_id)),
                 func.upper(TradingPlan.plan_status).in_(["ACTIVE", "PARTIAL"]),
             )
             .order_by(desc(TradingPlan.updated_at))
@@ -100,7 +100,7 @@ class WarRoomService:
     async def _load_signal_positions_fallback(
         self,
         db: AsyncSession,
-        user_id: str,
+        account_id: str,
         limit: int = 30,
     ) -> list[dict[str, Any]]:
         """无持仓时从近期信号构造轻量‘观察仓位’，避免 P1 完全空白。"""
@@ -114,7 +114,7 @@ class WarRoomService:
                 TradingSignal.expected_return,
                 TradingSignal.created_at,
             )
-            .where(TradingSignal.user_id.in_(self._candidate_user_keys(user_id)))
+            .where(TradingSignal.user_id.in_(self._candidate_user_keys(account_id)))
             .order_by(desc(TradingSignal.created_at))
             .limit(limit)
         )
@@ -150,16 +150,16 @@ class WarRoomService:
         return positions[:15]
 
     async def get_pnl_ticker(
-        self, db: AsyncSession, user_id: str
+        self, db: AsyncSession, account_id: str
     ) -> dict[str, Any]:
         """
         汇总当前 P&L 状态。
         数据来源：trading_plan / position / trade_attribution。
         """
         try:
-            positions = await self._load_plan_positions(db, user_id)
+            positions = await self._load_plan_positions(db, account_id)
             if not positions:
-                positions = await self._load_signal_positions_fallback(db, user_id)
+                positions = await self._load_signal_positions_fallback(db, account_id)
         except Exception:
             positions = []
 
@@ -190,7 +190,7 @@ class WarRoomService:
     async def get_intelligence_feed(
         self,
         db: AsyncSession,
-        user_id: str,
+        account_id: str,
         limit: int = 20,
         category_filter: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -211,7 +211,7 @@ class WarRoomService:
             stmt = (
                 select(AIInsight)
                 .where(
-                    AIInsight.user_id == user_id,
+                    AIInsight.user_id == account_id,
                     AIInsight.created_at >= cutoff,
                 )
                 .order_by(desc(AIInsight.created_at))
@@ -241,12 +241,12 @@ class WarRoomService:
             from app.models.portfolio_factor_exposure import PortfolioFactorExposure
 
             # 冷启动：没有快照时先自动生成一条
-            await risk_observability_service.ensure_recent_snapshot(db, user_id)
+            await risk_observability_service.ensure_recent_snapshot(db, account_id)
 
             stmt = (
                 select(PortfolioFactorExposure)
                 .where(
-                    PortfolioFactorExposure.user_id == user_id,
+                    PortfolioFactorExposure.account_id == account_id,
                     PortfolioFactorExposure.correlation_spike.is_(True),
                     PortfolioFactorExposure.snapshot_at >= datetime.utcnow() - timedelta(hours=6),
                 )
@@ -294,21 +294,21 @@ class WarRoomService:
         return feed_items[:limit]
 
     async def get_portfolio_exposure(
-        self, db: AsyncSession, user_id: str
+        self, db: AsyncSession, account_id: str
     ) -> dict[str, Any]:
         """返回持仓热力图 + 因子敞口数据。"""
         try:
             from app.services.risk_observability_service import risk_observability_service
-            await risk_observability_service.ensure_recent_snapshot(db, user_id)
-            latest_snap = await risk_observability_service.get_latest_snapshot(db, user_id)
+            await risk_observability_service.ensure_recent_snapshot(db, account_id)
+            latest_snap = await risk_observability_service.get_latest_snapshot(db, account_id)
         except Exception:
             latest_snap = None
 
         # 持仓列表（优先计划持仓，不足则回退信号观察仓）
         try:
-            positions = await self._load_plan_positions(db, user_id)
+            positions = await self._load_plan_positions(db, account_id)
             if not positions:
-                positions = await self._load_signal_positions_fallback(db, user_id)
+                positions = await self._load_signal_positions_fallback(db, account_id)
         except Exception:
             positions = []
 
@@ -320,13 +320,13 @@ class WarRoomService:
         }
 
     async def get_war_room_snapshot(
-        self, db: AsyncSession, user_id: str
+        self, db: AsyncSession, account_id: str
     ) -> dict[str, Any]:
         """一次调用返回所有战情室面板数据。"""
         # 注意：同一个 AsyncSession 不可并发执行多个查询（会导致随机面板为空）
-        pnl = await self.get_pnl_ticker(db, user_id)
-        feed = await self.get_intelligence_feed(db, user_id, limit=10)
-        exposure = await self.get_portfolio_exposure(db, user_id)
+        pnl = await self.get_pnl_ticker(db, account_id)
+        feed = await self.get_intelligence_feed(db, account_id, limit=10)
+        exposure = await self.get_portfolio_exposure(db, account_id)
         return {
             "pnl_ticker": pnl,
             "intelligence_feed": feed,

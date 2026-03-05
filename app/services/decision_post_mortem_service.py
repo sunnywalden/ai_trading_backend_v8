@@ -29,7 +29,7 @@ class DecisionPostMortemService:
     async def generate_post_mortem(
         self,
         db: AsyncSession,
-        user_id: str,
+        account_id: str,
         trade_id: str,
         symbol: str,
         direction: str,
@@ -49,7 +49,7 @@ class DecisionPostMortemService:
 
         # 创建 pending 记录
         pm = DecisionPostMortem(
-            user_id=user_id,
+            account_id=account_id,
             trade_id=trade_id,
             symbol=symbol,
             direction=direction,
@@ -88,7 +88,7 @@ class DecisionPostMortemService:
 
             # 自动生成 LESSON Insight
             insight_id = await self._create_lesson_insight(
-                db, user_id, symbol, pm.key_lessons or "", pm.improvement_suggestions or ""
+                db, account_id, symbol, pm.key_lessons or "", pm.improvement_suggestions or ""
             )
             pm.insight_id = insight_id
 
@@ -100,11 +100,11 @@ class DecisionPostMortemService:
         return pm
 
     async def get_post_mortems(
-        self, db: AsyncSession, user_id: str, limit: int = 20
+        self, db: AsyncSession, account_id: str, limit: int = 20
     ) -> list[dict[str, Any]]:
         stmt = (
             select(DecisionPostMortem)
-            .where(DecisionPostMortem.user_id == user_id)
+            .where(DecisionPostMortem.account_id == account_id)
             .order_by(desc(DecisionPostMortem.created_at))
             .limit(limit)
         )
@@ -112,15 +112,15 @@ class DecisionPostMortemService:
         return [_pm_to_dict(r) for r in rows]
 
     async def get_by_trade_id(
-        self, db: AsyncSession, user_id: str, trade_id: str
+        self, db: AsyncSession, account_id: str, trade_id: str
     ) -> dict[str, Any] | None:
         pm = await self._get_by_trade_id(db, trade_id)
-        if pm and pm.user_id == user_id:
+        if pm and pm.user_id == account_id:
             return _pm_to_dict(pm)
         return None
 
     async def get_patterns(
-        self, db: AsyncSession, user_id: str, days: int = 90
+        self, db: AsyncSession, account_id: str, days: int = 90
     ) -> dict[str, Any]:
         """汇总常见错误模式和认知偏见。"""
         cutoff = datetime.utcnow() - timedelta(days=days)
@@ -131,7 +131,7 @@ class DecisionPostMortemService:
                 func.count().label("cnt"),
             )
             .where(
-                DecisionPostMortem.user_id == user_id,
+                DecisionPostMortem.account_id == account_id,
                 DecisionPostMortem.created_at >= cutoff,
                 DecisionPostMortem.status == "completed",
             )
@@ -153,7 +153,7 @@ class DecisionPostMortemService:
         tag_stmt = (
             select(DecisionPostMortem.pattern_tags)
             .where(
-                DecisionPostMortem.user_id == user_id,
+                DecisionPostMortem.account_id == account_id,
                 DecisionPostMortem.created_at >= cutoff,
                 DecisionPostMortem.pattern_tags.isnot(None),
             )
@@ -174,16 +174,16 @@ class DecisionPostMortemService:
     async def list_trade_candidates(
         self,
         db: AsyncSession,
-        user_id: str,
+        account_id: str,
         limit: int = 100,
         q: str | None = None,
     ) -> list[dict[str, Any]]:
         """返回可用于生成事后剖析的交易候选（优先 trade_journal 已平仓记录）。"""
         # 当前用户已生成过剖析的 trade_id，避免重复
-        existing_stmt = select(DecisionPostMortem.trade_id).where(DecisionPostMortem.user_id == user_id)
+        existing_stmt = select(DecisionPostMortem.trade_id).where(DecisionPostMortem.account_id == account_id)
         existing_trade_ids = set((await db.execute(existing_stmt)).scalars().all())
 
-        # 优先按当前 user_id/account_id 查询，避免多用户混淆
+        # 优先按当前 account_id/account_id 查询，避免多用户混淆
         # 已平仓判定：
         # 1) realized_pnl 非空；或
         # 2) entry/exit 价格齐全（可推导收益）
@@ -197,7 +197,7 @@ class DecisionPostMortemService:
 
         keyword = (q or "").strip().upper()
         local_filters = [
-            TradeJournal.account_id == user_id,
+            TradeJournal.account_id == account_id,
             TradeJournal.symbol.isnot(None),
             closed_predicate,
         ]
@@ -230,7 +230,7 @@ class DecisionPostMortemService:
             rows = (await db.execute(fallback_stmt)).scalars().all()
             logger.warning(
                 "PostMortem: no candidates for user=%s by account_id, fallback to global closed journals, count=%d",
-                user_id,
+                account_id,
                 len(rows),
             )
 
@@ -274,7 +274,7 @@ class DecisionPostMortemService:
 
         logger.info(
             "PostMortem: list_trade_candidates user=%s q=%s returned=%d",
-            user_id,
+            account_id,
             (q or "").strip(),
             len(out),
         )
@@ -283,7 +283,7 @@ class DecisionPostMortemService:
     async def get_trade_prefill(
         self,
         db: AsyncSession,
-        user_id: str,
+        account_id: str,
         trade_id: str,
     ) -> dict[str, Any] | None:
         """根据 trade_id 返回可用于生成剖析的预填参数。"""
@@ -329,7 +329,7 @@ class DecisionPostMortemService:
             "realized_pnl": realized_pnl,
             "hold_days": hold_days,
             "trade_context": " | ".join(context_parts),
-            "user_id": user_id,
+            "account_id": account_id,
         }
 
     async def _get_by_trade_id(
@@ -419,7 +419,7 @@ Provide your analysis in the following EXACT JSON format:
     async def _create_lesson_insight(
         self,
         db: AsyncSession,
-        user_id: str,
+        account_id: str,
         symbol: str,
         key_lessons: str,
         improvement_suggestions: str,

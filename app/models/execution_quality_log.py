@@ -18,7 +18,7 @@ class ExecutionQualityLog(Base):
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     intent_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True, comment="关联 autonomous_execution_intent.id")
     symbol: Mapped[str] = mapped_column(String(20), nullable=False)
-    user_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    account_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
 
     # IS 四分解（bps 单位，正值=成本，负值=节省）
     delay_cost_bps: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, comment="决策→下单延迟成本 bps")
@@ -47,7 +47,7 @@ class ExecutionQualityLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
 
     __table_args__ = (
-        Index("idx_eql_user_symbol", "user_id", "symbol"),
+        Index("idx_eql_account_symbol", "account_id", "symbol"),
         Index("idx_eql_created", "created_at"),
         {"comment": "IS 执行质量四分解日志 V10.3.3"},
     )

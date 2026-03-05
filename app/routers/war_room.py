@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
 from app.models.db import get_session
+from app.broker.factory import make_option_broker_client
 from app.services.war_room_service import war_room_service
 from app.services.smart_alert_service import smart_alert_service
 
@@ -28,13 +29,26 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/war-room", tags=["War Room V10.3.3"])
 
 
+async def _resolve_broker_account_id(current_user: str) -> str:
+    """券商账号解析：优先实时获取券商账号，回退 current_user。"""
+    try:
+        broker = make_option_broker_client()
+        broker_id = await broker.get_account_id()
+        if broker_id:
+            return str(broker_id)
+    except Exception:
+        pass
+    return str(current_user)
+
+
 @router.get("/snapshot")
 async def get_war_room_snapshot(
     db: AsyncSession = Depends(get_session),
     user_id: str = Depends(get_current_user),
 ):
     """一次调用返回所有战情室面板数据（P&L + Feed + Exposure）。"""
-    return await war_room_service.get_war_room_snapshot(db, user_id)
+    account_id = await _resolve_broker_account_id(user_id)
+    return await war_room_service.get_war_room_snapshot(db, account_id)
 
 
 @router.get("/pnl-ticker")
@@ -43,7 +57,8 @@ async def get_pnl_ticker(
     user_id: str = Depends(get_current_user),
 ):
     """返回 P&L Ticker：total_pnl / pnl_change_1h / top_contributor / top_detractor。"""
-    return await war_room_service.get_pnl_ticker(db, user_id)
+    account_id = await _resolve_broker_account_id(user_id)
+    return await war_room_service.get_pnl_ticker(db, account_id)
 
 
 @router.get("/intelligence-feed")
@@ -54,8 +69,9 @@ async def get_intelligence_feed(
     user_id: str = Depends(get_current_user),
 ):
     """返回按 urgency_score 排序的 Intelligence Feed。"""
+    account_id = await _resolve_broker_account_id(user_id)
     return await war_room_service.get_intelligence_feed(
-        db, user_id, limit=limit, category_filter=category
+        db, account_id, limit=limit, category_filter=category
     )
 
 
@@ -65,7 +81,8 @@ async def get_portfolio_exposure(
     user_id: str = Depends(get_current_user),
 ):
     """返回持仓热力图数据 + 最新五因子敞口。"""
-    return await war_room_service.get_portfolio_exposure(db, user_id)
+    account_id = await _resolve_broker_account_id(user_id)
+    return await war_room_service.get_portfolio_exposure(db, account_id)
 
 
 @router.get("/alerts")

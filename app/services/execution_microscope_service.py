@@ -101,7 +101,7 @@ class ExecutionMicroscopeService:
         db: AsyncSession,
         *,
         intent_id: int,
-        user_id: str,
+        account_id: str,
         symbol: str,
         direction: str,
         arrival_price: float,
@@ -124,7 +124,7 @@ class ExecutionMicroscopeService:
         log = ExecutionQualityLog(
             intent_id=intent_id,
             symbol=symbol,
-            user_id=user_id,
+            account_id=account_id,
             arrival_price=arrival_price,
             fill_price=fill_price,
             mid_price_at_order=mid_at_order,
@@ -148,15 +148,15 @@ class ExecutionMicroscopeService:
     async def get_quality_summary(
         self,
         db: AsyncSession,
-        user_id: str,
+        account_id: str,
         limit: int = 50,
     ) -> list[dict[str, Any]]:
         """返回最近 N 笔执行质量记录（摘要）。"""
-        await self._ensure_seeded_from_intents(db, user_id=user_id, days=90)
+        await self._ensure_seeded_from_intents(db, account_id=account_id, days=90)
 
         stmt = (
             select(ExecutionQualityLog)
-            .where(ExecutionQualityLog.user_id == user_id)
+            .where(ExecutionQualityLog.account_id == account_id)
             .order_by(desc(ExecutionQualityLog.created_at))
             .limit(limit)
         )
@@ -182,13 +182,13 @@ class ExecutionMicroscopeService:
     async def get_fill_heatmap(
         self,
         db: AsyncSession,
-        user_id: str,
+        account_id: str,
         days: int = 30,
     ) -> list[dict[str, Any]]:
         """返回按 symbol × algo_type 聚合的平均 IS，用于热力图。"""
         from datetime import timedelta
 
-        await self._ensure_seeded_from_intents(db, user_id=user_id, days=days)
+        await self._ensure_seeded_from_intents(db, account_id=account_id, days=days)
 
         cutoff = datetime.utcnow() - timedelta(days=days)
         stmt = (
@@ -200,7 +200,7 @@ class ExecutionMicroscopeService:
                 func.count().label("count"),
             )
             .where(
-                ExecutionQualityLog.user_id == user_id,
+                ExecutionQualityLog.account_id == account_id,
                 ExecutionQualityLog.created_at >= cutoff,
             )
             .group_by(ExecutionQualityLog.symbol, "hour_of_day")
@@ -222,14 +222,14 @@ class ExecutionMicroscopeService:
     async def get_avg_is_by_date(
         self,
         db: AsyncSession,
-        user_id: str,
+        account_id: str,
         days: int = 30,
     ) -> list[dict[str, Any]]:
         """按日期返回平均 IS 趋势。"""
         from datetime import timedelta
         from sqlalchemy import cast, Date as SQLDate
 
-        await self._ensure_seeded_from_intents(db, user_id=user_id, days=days)
+        await self._ensure_seeded_from_intents(db, account_id=account_id, days=days)
 
         cutoff = datetime.utcnow() - timedelta(days=days)
         stmt = (
@@ -243,7 +243,7 @@ class ExecutionMicroscopeService:
                 func.count().label("count"),
             )
             .where(
-                ExecutionQualityLog.user_id == user_id,
+                ExecutionQualityLog.account_id == account_id,
                 ExecutionQualityLog.created_at >= cutoff,
             )
             .group_by("date")
@@ -263,7 +263,7 @@ class ExecutionMicroscopeService:
             for r in rows
         ]
 
-    async def _ensure_seeded_from_intents(self, db: AsyncSession, user_id: str, days: int) -> None:
+    async def _ensure_seeded_from_intents(self, db: AsyncSession, account_id: str, days: int) -> None:
         """冷启动兜底：当 execution_quality_log 为空时，从执行意图派生近似执行质量。"""
         from datetime import timedelta
 
@@ -271,7 +271,7 @@ class ExecutionMicroscopeService:
         exists_stmt = (
             select(ExecutionQualityLog.id)
             .where(
-                ExecutionQualityLog.user_id == user_id,
+                ExecutionQualityLog.account_id == account_id,
                 ExecutionQualityLog.created_at >= cutoff,
             )
             .limit(1)
@@ -280,13 +280,13 @@ class ExecutionMicroscopeService:
         if exists:
             return
 
-        await self.backfill_from_execution_intents(db, user_id=user_id, days=days, limit=500)
+        await self.backfill_from_execution_intents(db, account_id=account_id, days=days, limit=500)
 
     async def backfill_from_execution_intents(
         self,
         db: AsyncSession,
         *,
-        user_id: str,
+        account_id: str,
         days: int = 30,
         limit: int = 500,
     ) -> dict[str, int]:
@@ -296,7 +296,7 @@ class ExecutionMicroscopeService:
         cutoff = datetime.utcnow() - timedelta(days=days)
 
         existing_intent_ids = set(
-            (await db.execute(select(ExecutionQualityLog.intent_id).where(ExecutionQualityLog.user_id == user_id))).scalars().all()
+            (await db.execute(select(ExecutionQualityLog.intent_id).where(ExecutionQualityLog.account_id == account_id))).scalars().all()
         )
 
         stmt = (
@@ -353,7 +353,7 @@ class ExecutionMicroscopeService:
             row = ExecutionQualityLog(
                 intent_id=int(it.id),
                 symbol=str(it.symbol or ""),
-                user_id=user_id,
+                account_id=account_id,
                 delay_cost_bps=delay_cost,
                 market_impact_bps=impact_cost,
                 opportunity_cost_bps=opportunity_cost,
@@ -380,7 +380,7 @@ class ExecutionMicroscopeService:
 
         logger.info(
             "ExecutionMicroscope backfill done: user=%s days=%s inserted=%s skipped=%s",
-            user_id,
+            account_id,
             days,
             inserted,
             skipped,

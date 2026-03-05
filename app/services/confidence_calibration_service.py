@@ -67,13 +67,13 @@ class ConfidenceCalibrationService:
     """置信度校准系统。"""
 
     async def run_daily_calibration(
-        self, db: AsyncSession, user_id: str
+        self, db: AsyncSession, account_id: str
     ) -> ConfidenceCalibrationSnapshot:
         """核心日度任务：计算 Brier/ECE 并写入快照。"""
         today = date.today()
 
         # 检查今日是否已运行（insufficient_data 快照会原地重算，不做删除重插）
-        existing = await self._get_snapshot_by_date(db, user_id, today)
+        existing = await self._get_snapshot_by_date(db, account_id, today)
         if existing:
             if existing.brier_score is not None:
                 logger.info("CalibrationService: snapshot already exists for %s, skipping", today)
@@ -81,7 +81,7 @@ class ConfidenceCalibrationService:
             logger.info("CalibrationService: stale insufficient_data snapshot found for %s, recomputing in-place", today)
 
         # 拉取数据（优先 trading_signal.actual_return，不足时回退 trade_journal）
-        predicted, outcomes = await self._fetch_signal_outcomes(db, user_id, LOOKBACK_DAYS)
+        predicted, outcomes = await self._fetch_signal_outcomes(db, account_id, LOOKBACK_DAYS)
 
         if len(predicted) == 0:
             logger.warning("CalibrationService: insufficient data (%d samples), skipping", len(predicted))
@@ -99,7 +99,7 @@ class ConfidenceCalibrationService:
                 snap.adjustment_applied_at = None
             else:
                 snap = ConfidenceCalibrationSnapshot(
-                    user_id=user_id,
+                    account_id=account_id,
                     snapshot_date=today,
                     lookback_days=LOOKBACK_DAYS,
                     total_samples=len(predicted),
@@ -114,7 +114,7 @@ class ConfidenceCalibrationService:
                 if "idx_ccs_user_date" not in msg and "Duplicate entry" not in msg:
                     raise
                 await db.rollback()
-                latest = await self._get_snapshot_by_date(db, user_id, today)
+                latest = await self._get_snapshot_by_date(db, account_id, today)
                 if latest:
                     logger.info("CalibrationService: duplicate snapshot race detected for %s, using existing", today)
                     return latest
@@ -143,7 +143,7 @@ class ConfidenceCalibrationService:
             snap.adjustment_factor = round(adj_factor, 4) if adj_factor else None
         else:
             snap = ConfidenceCalibrationSnapshot(
-                user_id=user_id,
+                account_id=account_id,
                 snapshot_date=today,
                 brier_score=round(brier, 6),
                 ece=round(ece_val, 6),
@@ -164,7 +164,7 @@ class ConfidenceCalibrationService:
             if "idx_ccs_user_date" not in msg and "Duplicate entry" not in msg:
                 raise
             await db.rollback()
-            latest = await self._get_snapshot_by_date(db, user_id, today)
+            latest = await self._get_snapshot_by_date(db, account_id, today)
             if latest:
                 logger.info("CalibrationService: duplicate snapshot race detected for %s, using existing", today)
                 return latest
@@ -176,11 +176,11 @@ class ConfidenceCalibrationService:
         return snap
 
     async def get_latest_calibration(
-        self, db: AsyncSession, user_id: str
+        self, db: AsyncSession, account_id: str
     ) -> dict[str, Any] | None:
         stmt = (
             select(ConfidenceCalibrationSnapshot)
-            .where(ConfidenceCalibrationSnapshot.user_id == user_id)
+            .where(ConfidenceCalibrationSnapshot.account_id == account_id)
             .order_by(desc(ConfidenceCalibrationSnapshot.snapshot_date))
             .limit(1)
         )
@@ -188,13 +188,13 @@ class ConfidenceCalibrationService:
         return _snap_to_dict(snap) if snap else None
 
     async def get_calibration_history(
-        self, db: AsyncSession, user_id: str, days: int = 30
+        self, db: AsyncSession, account_id: str, days: int = 30
     ) -> list[dict[str, Any]]:
         cutoff = date.today() - timedelta(days=days)
         stmt = (
             select(ConfidenceCalibrationSnapshot)
             .where(
-                ConfidenceCalibrationSnapshot.user_id == user_id,
+                ConfidenceCalibrationSnapshot.account_id == account_id,
                 ConfidenceCalibrationSnapshot.snapshot_date >= cutoff,
             )
             .order_by(ConfidenceCalibrationSnapshot.snapshot_date)
@@ -203,7 +203,7 @@ class ConfidenceCalibrationService:
         return [_snap_to_dict(r) for r in rows]
 
     async def _fetch_signal_outcomes(
-        self, db: AsyncSession, user_id: str, lookback_days: int
+        self, db: AsyncSession, account_id: str, lookback_days: int
     ) -> tuple[list[float], list[float]]:
         """从 trading_signal 表拉取置信度 + 实际胜率对。
 
@@ -217,7 +217,7 @@ class ConfidenceCalibrationService:
             stmt = (
                 select(TradingSignal.confidence, TradingSignal.actual_return)
                 .where(
-                    TradingSignal.user_id == user_id,
+                    TradingSignal.user_id == account_id,
                     TradingSignal.created_at >= cutoff,
                     TradingSignal.actual_return.isnot(None),
                 )
@@ -232,7 +232,7 @@ class ConfidenceCalibrationService:
         if len(predicted) < 20:
             try:
                 extra_pred, extra_out = await self._fetch_outcomes_from_journal(
-                    db, user_id, cutoff
+                    db, account_id, cutoff
                 )
                 predicted.extend(extra_pred)
                 outcomes.extend(extra_out)
@@ -242,7 +242,7 @@ class ConfidenceCalibrationService:
         return predicted, outcomes
 
     async def _fetch_outcomes_from_journal(
-        self, db: AsyncSession, user_id: str, cutoff: datetime
+        self, db: AsyncSession, account_id: str, cutoff: datetime
     ) -> tuple[list[float], list[float]]:
         """从 trade_journal 已平仓记录构建校准样本（fallback）。
 
@@ -264,7 +264,7 @@ class ConfidenceCalibrationService:
                 TradeJournal.realized_pnl,
             )
             .where(
-                TradeJournal.account_id == user_id,
+                TradeJournal.account_id == account_id,
                 or_(
                     TradeJournal.realized_pnl.is_not(None),
                     and_(
@@ -288,7 +288,7 @@ class ConfidenceCalibrationService:
                     TradeJournal.realized_pnl,
                 )
                 .where(
-                    TradeJournal.account_id == user_id,
+                    TradeJournal.account_id == account_id,
                     or_(
                         TradeJournal.realized_pnl.is_not(None),
                         and_(
@@ -308,7 +308,7 @@ class ConfidenceCalibrationService:
         sig_stmt = (
             select(TradingSignal.symbol, TradingSignal.confidence)
             .where(
-                TradingSignal.user_id == user_id,
+                TradingSignal.user_id == account_id,
                 TradingSignal.created_at >= cutoff,
                 TradingSignal.confidence.isnot(None),
             )
@@ -341,17 +341,17 @@ class ConfidenceCalibrationService:
 
         logger.info(
             "CalibrationService: journal fallback produced %d samples for user=%s",
-            len(predicted), user_id,
+            len(predicted), account_id,
         )
         return predicted, outcomes
 
     async def _get_snapshot_by_date(
-        self, db: AsyncSession, user_id: str, snapshot_date: date
+        self, db: AsyncSession, account_id: str, snapshot_date: date
     ) -> ConfidenceCalibrationSnapshot | None:
         stmt = (
             select(ConfidenceCalibrationSnapshot)
             .where(
-                ConfidenceCalibrationSnapshot.user_id == user_id,
+                ConfidenceCalibrationSnapshot.account_id == account_id,
                 ConfidenceCalibrationSnapshot.snapshot_date == snapshot_date,
             )
         )

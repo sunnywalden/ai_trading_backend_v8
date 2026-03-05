@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
 from app.models.db import get_session
+from app.broker.factory import make_option_broker_client
 from app.services.multi_agent_orchestrator import multi_agent_orchestrator
 from app.services.confidence_calibration_service import confidence_calibration_service
 from app.services.adaptive_factor_weighting_service import adaptive_factor_weighting_service
@@ -33,6 +34,18 @@ from app.services.decision_post_mortem_service import decision_post_mortem_servi
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/ai-hub", tags=["AI 中枢 2.0 V10.3.3"])
+
+
+async def _resolve_broker_account_id(current_user: str) -> str:
+    """券商账号解析：优先实时获取券商账号，回退 current_user。"""
+    try:
+        broker = make_option_broker_client()
+        broker_id = await broker.get_account_id()
+        if broker_id:
+            return str(broker_id)
+    except Exception:
+        pass
+    return str(current_user)
 
 
 class PostMortemCreateRequest(BaseModel):
@@ -188,15 +201,16 @@ async def get_calibration(
     user_id: str = Depends(get_current_user),
 ):
     """返回最新置信度校准快照。"""
-    result = await confidence_calibration_service.get_latest_calibration(db, user_id)
+    account_id = await _resolve_broker_account_id(user_id)
+    result = await confidence_calibration_service.get_latest_calibration(db, account_id)
     if not result:
         # 懒初始化：首次访问时自动尝试跑一次，避免页面长时间空白
-        snap = await confidence_calibration_service.run_daily_calibration(db, user_id)
+        snap = await confidence_calibration_service.run_daily_calibration(db, account_id)
         await db.commit()
-        result = await confidence_calibration_service.get_latest_calibration(db, user_id)
+        result = await confidence_calibration_service.get_latest_calibration(db, account_id)
         logger.info(
-            "[Calibration] lazy init run for user=%s total_samples=%s ece=%s",
-            user_id,
+            "[Calibration] lazy init run for account=%s total_samples=%s ece=%s",
+            account_id,
             getattr(snap, "total_samples", None),
             getattr(snap, "ece", None),
         )
@@ -212,20 +226,21 @@ async def get_calibration_history(
     user_id: str = Depends(get_current_user),
 ):
     """返回过去 N 天置信度校准历史。"""
-    rows = await confidence_calibration_service.get_calibration_history(db, user_id, days=days)
+    account_id = await _resolve_broker_account_id(user_id)
+    rows = await confidence_calibration_service.get_calibration_history(db, account_id, days=days)
     if rows:
         return rows
 
     # 历史为空时也尝试懒初始化一次，返回至少一个快照给前端
-    snap = await confidence_calibration_service.run_daily_calibration(db, user_id)
+    snap = await confidence_calibration_service.run_daily_calibration(db, account_id)
     await db.commit()
     logger.info(
-        "[Calibration] history lazy init run for user=%s total_samples=%s ece=%s",
-        user_id,
+        "[Calibration] history lazy init run for account=%s total_samples=%s ece=%s",
+        account_id,
         getattr(snap, "total_samples", None),
         getattr(snap, "ece", None),
     )
-    return await confidence_calibration_service.get_calibration_history(db, user_id, days=days)
+    return await confidence_calibration_service.get_calibration_history(db, account_id, days=days)
 
 
 @router.post("/calibration/run")
@@ -234,7 +249,8 @@ async def run_calibration(
     user_id: str = Depends(get_current_user),
 ):
     """手动触发今日置信度校准（日常由 APScheduler 在 08:15 自动运行）。"""
-    snap = await confidence_calibration_service.run_daily_calibration(db, user_id)
+    account_id = await _resolve_broker_account_id(user_id)
+    snap = await confidence_calibration_service.run_daily_calibration(db, account_id)
     await db.commit()
     return {"message": "Calibration completed", "snapshot_date": str(snap.snapshot_date), "ece": snap.ece}
 
@@ -247,7 +263,8 @@ async def get_factor_weights(
     user_id: str = Depends(get_current_user),
 ):
     """返回当前最新自适应因子权重。"""
-    return await adaptive_factor_weighting_service.get_current_weights(db, user_id)
+    account_id = await _resolve_broker_account_id(user_id)
+    return await adaptive_factor_weighting_service.get_current_weights(db, account_id)
 
 
 @router.get("/factor-weights/history")
@@ -258,7 +275,8 @@ async def get_factor_weights_history(
     user_id: str = Depends(get_current_user),
 ):
     """返回权重演化历史。可按 dimension 过滤。"""
-    return await adaptive_factor_weighting_service.get_weights_history(db, user_id, days=days, dimension=dimension)
+    account_id = await _resolve_broker_account_id(user_id)
+    return await adaptive_factor_weighting_service.get_weights_history(db, account_id, days=days, dimension=dimension)
 
 
 @router.get("/factor-momentum")
@@ -267,7 +285,8 @@ async def get_factor_momentum(
     user_id: str = Depends(get_current_user),
 ):
     """返回最新因子 IC 动量排名。"""
-    return await adaptive_factor_weighting_service.get_factor_momentum(db, user_id)
+    account_id = await _resolve_broker_account_id(user_id)
+    return await adaptive_factor_weighting_service.get_factor_momentum(db, account_id)
 
 
 # ─────────────────── Decision Post-Mortem ──────────────────────────────────
@@ -279,7 +298,8 @@ async def get_post_mortems(
     user_id: str = Depends(get_current_user),
 ):
     """返回最近 N 笔决策事后剖析报告。"""
-    return await decision_post_mortem_service.get_post_mortems(db, user_id, limit=limit)
+    account_id = await _resolve_broker_account_id(user_id)
+    return await decision_post_mortem_service.get_post_mortems(db, account_id, limit=limit)
 
 
 @router.get("/post-mortems/trade-candidates")
@@ -290,7 +310,8 @@ async def get_post_mortem_trade_candidates(
     user_id: str = Depends(get_current_user),
 ):
     """返回可下拉选择的候选交易列表（自动排除已剖析记录）。"""
-    return await decision_post_mortem_service.list_trade_candidates(db, user_id, limit=limit, q=q)
+    account_id = await _resolve_broker_account_id(user_id)
+    return await decision_post_mortem_service.list_trade_candidates(db, account_id, limit=limit, q=q)
 
 
 @router.get("/post-mortems/trade-candidates/{trade_id}")
@@ -300,7 +321,8 @@ async def get_post_mortem_trade_prefill(
     user_id: str = Depends(get_current_user),
 ):
     """返回候选交易的预填参数，供前端一键带入表单。"""
-    payload = await decision_post_mortem_service.get_trade_prefill(db, user_id, trade_id)
+    account_id = await _resolve_broker_account_id(user_id)
+    payload = await decision_post_mortem_service.get_trade_prefill(db, account_id, trade_id)
     if not payload:
         raise HTTPException(status_code=404, detail="Trade candidate not found")
     return payload
@@ -313,7 +335,8 @@ async def get_post_mortem_patterns(
     user_id: str = Depends(get_current_user),
 ):
     """汇总常见决策错误模式和认知偏见。"""
-    return await decision_post_mortem_service.get_patterns(db, user_id, days=days)
+    account_id = await _resolve_broker_account_id(user_id)
+    return await decision_post_mortem_service.get_patterns(db, account_id, days=days)
 
 
 @router.get("/post-mortems/{trade_id}")
@@ -323,7 +346,8 @@ async def get_post_mortem_by_trade(
     user_id: str = Depends(get_current_user),
 ):
     """返回指定 trade_id 的事后剖析报告。"""
-    result = await decision_post_mortem_service.get_by_trade_id(db, user_id, trade_id)
+    account_id = await _resolve_broker_account_id(user_id)
+    result = await decision_post_mortem_service.get_by_trade_id(db, account_id, trade_id)
     if not result:
         raise HTTPException(status_code=404, detail="Post-mortem not found")
     return result
@@ -346,9 +370,10 @@ async def create_post_mortem(
         direction = "BUY"
 
     context_payload = {"user_context": body.trade_context} if body.trade_context else {}
+    account_id = await _resolve_broker_account_id(user_id)
     pm = await decision_post_mortem_service.generate_post_mortem(
         db=db,
-        user_id=user_id,
+        account_id=account_id,
         trade_id=body.trade_id,
         symbol=body.symbol,
         direction=direction,
@@ -359,4 +384,4 @@ async def create_post_mortem(
         trade_context=context_payload,
     )
     await db.commit()
-    return await decision_post_mortem_service.get_by_trade_id(db, user_id, pm.trade_id)
+    return await decision_post_mortem_service.get_by_trade_id(db, account_id, pm.trade_id)
