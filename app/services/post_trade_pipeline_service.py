@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,6 +30,7 @@ from app.models.fsm_transition_log import FsmTransitionLog
 from app.models.trading_plan import TradingPlan
 
 logger = logging.getLogger(__name__)
+_SH_TZ = ZoneInfo("Asia/Shanghai")
 
 # 各阶段最小停留秒数（取 P50 × 1，即达到 P50 时立即推进）
 _MIN_SECS: dict[int, int] = {
@@ -51,6 +53,29 @@ _STAGE_TO_POS_FSM: dict[int, str] = {
 
 class PostTradePipelineService:
     """驱动 Post-Trade Pipeline S12→S16 自动流转。"""
+
+    @staticmethod
+    def _normalize_entered_at(entered: datetime, now: datetime) -> datetime:
+        """标准化 stage_entered_at 到 UTC。
+
+        历史数据里存在无时区 datetime。默认按 UTC 解释；
+        若结果落在“未来时间”，再尝试按 Asia/Shanghai 解释做一次回退，
+        以兼容旧数据/旧脚本写入导致的时区漂移，避免计划长期无法推进。
+        """
+        if entered.tzinfo is not None:
+            return entered.astimezone(timezone.utc)
+
+        as_utc = entered.replace(tzinfo=timezone.utc)
+        if as_utc <= now + timedelta(seconds=30):
+            return as_utc
+
+        # 未来时间兜底：尝试按上海时区解释旧的 naive 时间
+        as_sh = entered.replace(tzinfo=_SH_TZ).astimezone(timezone.utc)
+        if as_sh <= now + timedelta(seconds=30):
+            return as_sh
+
+        # 双重解释都在未来，则退回默认解释
+        return as_utc
 
     async def advance_post_trade_plans(
         self,
@@ -120,8 +145,7 @@ class PostTradePipelineService:
             min_secs = _MIN_SECS.get(stage, 60)
             entered = plan.stage_entered_at
             if entered is not None:
-                if entered.tzinfo is None:
-                    entered = entered.replace(tzinfo=timezone.utc)
+                entered = self._normalize_entered_at(entered, now)
                 elapsed = (now - entered).total_seconds()
                 if elapsed < min_secs:
                     continue  # 还未到 P50，暂不推进
