@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import numpy as np
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -293,7 +293,10 @@ class SignalIntelligenceService:
         stmt = (
             select(TradingSignal)
             .where(
-                TradingSignal.user_id == user_id,
+                or_(
+                    TradingSignal.user_id == user_id,
+                    TradingSignal.account_id == user_id,
+                ),
             )
             .order_by(desc(TradingSignal.created_at))
             .limit(window)
@@ -314,6 +317,7 @@ class SignalIntelligenceService:
 
         # 提取预测信号和实际收益
         predicted_series, realized_series = [], []
+        proxy_predicted_series, proxy_realized_series = [], []
         for sig in reversed(rows):
             score = self._extract_dimension_score(sig, dimension)
             if score is None:
@@ -325,14 +329,26 @@ class SignalIntelligenceService:
             if realized is None:
                 sid = str(getattr(sig, "signal_id", "") or "")
                 realized = journal_return_map.get(sid)
-            # 注意: expected_return 代理已移除（V10.4 M1 T1.2），
-            # 使用 expected_return 作为实际收益率会制造自相关偏差
             if realized is not None:
                 r = self._to_float(realized)
                 if r is None:
                     continue
                 predicted_series.append(float(score))
                 realized_series.append(r)
+            else:
+                # 冷启动代理样本：当真实收益为空时，回退到 expected_return
+                # 注意：该口径仅用于可观测性展示，data_quality 会标记为 PROXY。
+                proxy_ret = self._to_float(getattr(sig, "expected_return", None))
+                if proxy_ret is not None:
+                    proxy_predicted_series.append(float(score))
+                    proxy_realized_series.append(proxy_ret)
+
+        if not predicted_series and len(proxy_predicted_series) >= 3:
+            predicted_series = proxy_predicted_series
+            realized_series = proxy_realized_series
+            sample_source = "expected_return_proxy"
+        else:
+            sample_source = "trading_signals"
 
         n = len(predicted_series)
         ic_5 = _spearman_corr(predicted_series[-min(5, n):], realized_series[-min(5, n):]) if n >= 3 else 0.0
@@ -347,7 +363,7 @@ class SignalIntelligenceService:
             rolling_ics.append(chunk_ic)
 
         # 冷启动回退：无样本时，优先使用 signal_weight_history 最新 IC
-        sample_source = "trading_signals"
+        # sample_source 在上文已根据真实/代理样本设定
         if n == 0:
             snapshot = await self._load_latest_ic_from_weight_history(db, user_id, dimension)
             if snapshot is not None:
@@ -371,6 +387,8 @@ class SignalIntelligenceService:
             data_quality = "REAL"
         elif sample_source == "trading_signals" and n < 10:
             data_quality = "INSUFFICIENT"
+        elif sample_source == "expected_return_proxy":
+            data_quality = "PROXY"
         else:
             data_quality = "STALE"
 
@@ -430,9 +448,18 @@ class SignalIntelligenceService:
         from app.models.trading_signal import TradingSignal
         cutoff = datetime.utcnow() - timedelta(days=days)
         stmt = (
-            select(TradingSignal.symbol, TradingSignal.signal_strength, TradingSignal.created_at)
+            select(
+                TradingSignal.symbol,
+                TradingSignal.signal_strength,
+                TradingSignal.confidence,
+                TradingSignal.expected_return,
+                TradingSignal.created_at,
+            )
             .where(
-                TradingSignal.user_id == user_id,
+                or_(
+                    TradingSignal.user_id == user_id,
+                    TradingSignal.account_id == user_id,
+                ),
                 TradingSignal.created_at >= cutoff,
             )
             .order_by(TradingSignal.symbol, TradingSignal.created_at)
@@ -442,19 +469,63 @@ class SignalIntelligenceService:
         except Exception:
             rows = []
 
+        if not rows:
+            fallback_stmt = (
+                select(TradingSignal.symbol)
+                .where(
+                    or_(
+                        TradingSignal.user_id == user_id,
+                        TradingSignal.account_id == user_id,
+                    )
+                )
+                .order_by(desc(TradingSignal.created_at))
+                .limit(200)
+            )
+            fallback_rows = (await db.execute(fallback_stmt)).all()
+            fallback_symbols: list[str] = []
+            for r in fallback_rows:
+                sym = str(r.symbol)
+                if sym not in fallback_symbols:
+                    fallback_symbols.append(sym)
+                if len(fallback_symbols) >= 10:
+                    break
+            n = len(fallback_symbols)
+            diag = [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
+            return {
+                "symbols": fallback_symbols,
+                "matrix": diag,
+                "updated_at": datetime.utcnow().isoformat(),
+            }
+
         # 按标的分组
         series: dict[str, list[float]] = {}
         for r in rows:
-            series.setdefault(r.symbol, []).append(float(r.signal_strength or 0))
+            # 优先 signal_strength；否则退化到 confidence / expected_return，避免全 0 方差
+            v = self._to_float(r.signal_strength)
+            if v is None or abs(v) < 1e-12:
+                v = self._to_float(getattr(r, "confidence", None))
+            if v is None or abs(v) < 1e-12:
+                v = self._to_float(getattr(r, "expected_return", None))
+            if v is None:
+                v = 0.0
+            series.setdefault(r.symbol, []).append(float(v))
 
-        # 只取样本数≥5的标的，最多10个
-        filtered = {k: v for k, v in series.items() if len(v) >= 5}
+        # 只取样本数≥2的标的，最多10个（降低门槛避免空白）
+        filtered = {k: v for k, v in series.items() if len(v) >= 2}
         if symbols:
             filtered = {k: v for k, v in filtered.items() if k in symbols}
         top_symbols = sorted(filtered.keys())[:10]
 
         if len(top_symbols) < 2:
-            return {"symbols": top_symbols, "matrix": [], "updated_at": datetime.utcnow().isoformat()}
+            # 降级：从所有序列里拿到最多 10 个活跃标的，返回对角矩阵
+            fallback_symbols = sorted(series.keys())[:10]
+            n = len(fallback_symbols)
+            diag = [[1.0 if i == j else 0.0 for j in range(n)] for i in range(n)]
+            return {
+                "symbols": fallback_symbols,
+                "matrix": diag,
+                "updated_at": datetime.utcnow().isoformat(),
+            }
 
         # 对齐长度
         min_len = min(len(filtered[s]) for s in top_symbols)
@@ -468,15 +539,15 @@ class SignalIntelligenceService:
             with np.errstate(invalid="ignore", divide="ignore"):
                 corr_matrix = np.corrcoef(arr)
 
-            # 对零方差序列对应的行/列统一置为 nan，随后由 _safe 清洗为 None
+            # 对零方差序列对应的行/列统一置为 0，避免前端热力图出现整行空白
             for i, is_valid in enumerate(valid_mask):
                 if not bool(is_valid):
-                    corr_matrix[i, :] = np.nan
-                    corr_matrix[:, i] = np.nan
+                    corr_matrix[i, :] = 0.0
+                    corr_matrix[:, i] = 0.0
 
-            # 有效序列的对角线应为 1；无效序列保持 nan
+            # 对角线固定为 1
             for i, is_valid in enumerate(valid_mask):
-                corr_matrix[i, i] = 1.0 if bool(is_valid) else np.nan
+                corr_matrix[i, i] = 1.0
 
             # 将 inf / -inf / nan 替换为 None（JSON 安全）
             def _safe(v: float):
