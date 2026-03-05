@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.equity_snapshot import EquitySnapshot
 from app.models.trading_plan import TradingPlan
+from app.models.trade_pnl_attribution import TradePnlAttribution
 from app.models.price_alert import AlertHistory, PriceAlert
 from app.models.trading_signal import TradingSignal, SignalStatus
 from app.models.strategy import StrategyRun
@@ -1140,58 +1141,105 @@ class DashboardV2Service:
     async def _get_performance_trend(self, account_id: str, days: int = 30) -> List[PerformanceTrend]:
         """获取性能趋势"""
         end_date = date.today()
-        start_date = end_date - timedelta(days=days)
-        
-        stmt = select(EquitySnapshot).where(
+        points = max(2, int(days))
+        start_date = end_date - timedelta(days=points - 1)
+        date_axis = [start_date + timedelta(days=i) for i in range(points)]
+
+        # 读取窗口前一定范围内快照：用于窗口内命中 + 窗口外锚点（carry-forward）
+        anchor_start = start_date - timedelta(days=60)
+        snap_stmt = select(EquitySnapshot).where(
             and_(
                 EquitySnapshot.account_id == account_id,
-                EquitySnapshot.snapshot_date >= start_date,
+                EquitySnapshot.snapshot_date >= anchor_start,
                 EquitySnapshot.snapshot_date <= end_date,
             )
         ).order_by(EquitySnapshot.snapshot_date)
-        result = await self.session.execute(stmt)
-        snapshots = list(result.scalars().all())
-        
-        if not snapshots:
-            # 冷启动兜底：无快照时用当前权益生成平坦曲线，避免前端“暂无数据”
-            current_eq = await self._get_current_equity(account_id)
-            if current_eq <= 0:
-                return []
+        snap_result = await self.session.execute(snap_stmt)
+        snapshots = list(snap_result.scalars().all())
 
-            generated: List[PerformanceTrend] = []
-            points = max(2, min(int(days), 7))
-            for offset in range(points - 1, -1, -1):
-                d = end_date - timedelta(days=offset)
-                generated.append(
-                    PerformanceTrend(
-                        date=d.isoformat(),
-                        equity=float(current_eq),
-                        pnl=0.0,
-                        return_pct=0.0,
+        current_eq = await self._get_current_equity(account_id)
+        snap_map: Dict[date, float] = {
+            s.snapshot_date: float(s.total_equity or 0.0) for s in snapshots
+        }
+        has_window_snapshot = any(start_date <= d <= end_date for d in snap_map.keys())
+
+        # 若窗口内无快照，尝试用 trade_pnl_attribution 的每日已实现盈亏反推近 N 日权益
+        if not has_window_snapshot and current_eq > 0:
+            pnl_stmt = (
+                select(
+                    TradePnlAttribution.trade_date,
+                    func.sum(TradePnlAttribution.realized_pnl).label("daily_pnl"),
+                )
+                .where(
+                    and_(
+                        TradePnlAttribution.account_id == account_id,
+                        TradePnlAttribution.trade_date >= start_date,
+                        TradePnlAttribution.trade_date <= end_date,
                     )
                 )
-            return generated
-        
-        first_equity = float(snapshots[0].total_equity)
-        
-        trend = []
-        for i, snap in enumerate(snapshots):
-            equity = float(snap.total_equity)
-            if i > 0:
-                prev_equity = float(snapshots[i-1].total_equity)
-                pnl = equity - prev_equity
-                return_pct = (pnl / prev_equity * 100) if prev_equity > 0 else 0.0
-            else:
-                pnl = 0.0
-                return_pct = 0.0
-            
-            trend.append(PerformanceTrend(
-                date=snap.snapshot_date.isoformat(),
-                equity=equity,
-                pnl=pnl,
-                return_pct=return_pct,
-            ))
-        
+                .group_by(TradePnlAttribution.trade_date)
+            )
+            pnl_result = await self.session.execute(pnl_stmt)
+            pnl_map: Dict[date, float] = {
+                r.trade_date: float(r.daily_pnl or 0.0) for r in pnl_result.all()
+            }
+
+            if pnl_map:
+                reversed_equity: Dict[date, float] = {}
+                cumulative_future_pnl = 0.0
+                for d in reversed(date_axis):
+                    reversed_equity[d] = float(current_eq) - cumulative_future_pnl
+                    cumulative_future_pnl += float(pnl_map.get(d, 0.0))
+
+                trend: List[PerformanceTrend] = []
+                prev_eq: Optional[float] = None
+                for d in date_axis:
+                    eq = float(reversed_equity[d])
+                    pnl = 0.0 if prev_eq is None else (eq - prev_eq)
+                    ret = (pnl / prev_eq * 100) if prev_eq and prev_eq > 0 else 0.0
+                    trend.append(
+                        PerformanceTrend(
+                            date=d.isoformat(),
+                            equity=eq,
+                            pnl=pnl,
+                            return_pct=ret,
+                        )
+                    )
+                    prev_eq = eq
+                return trend
+
+        # 默认：快照 + carry-forward；今日优先覆盖为实时权益
+        carry_eq: Optional[float] = None
+        for s in snapshots:
+            if s.snapshot_date <= start_date:
+                carry_eq = float(s.total_equity or 0.0)
+
+        if carry_eq is None:
+            carry_eq = float(current_eq or 0.0)
+
+        trend: List[PerformanceTrend] = []
+        prev_eq: Optional[float] = None
+        for d in date_axis:
+            if d in snap_map:
+                carry_eq = float(snap_map[d])
+
+            eq = float(carry_eq or 0.0)
+            if d == end_date and current_eq > 0:
+                eq = float(current_eq)
+
+            pnl = 0.0 if prev_eq is None else (eq - prev_eq)
+            ret = (pnl / prev_eq * 100) if prev_eq and prev_eq > 0 else 0.0
+
+            trend.append(
+                PerformanceTrend(
+                    date=d.isoformat(),
+                    equity=eq,
+                    pnl=pnl,
+                    return_pct=ret,
+                )
+            )
+            prev_eq = eq
+
         return trend
     
     # ============ 错误处理 ============
