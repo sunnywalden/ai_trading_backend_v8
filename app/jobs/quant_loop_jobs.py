@@ -298,10 +298,11 @@ async def run_post_trade_pipeline_job():
         try:
             from app.services.post_trade_pipeline_service import post_trade_pipeline_service
 
-            account_id = await _resolve_runtime_account_id()
             result = await post_trade_pipeline_service.advance_post_trade_plans(
                 db=session,
-                account_id=account_id,
+                # 交易后流水线属于收尾型任务，应覆盖所有账户，
+                # 避免因运行时账户与历史/手工账户不一致导致卡在 S13/S14。
+                account_id=None,
             )
             await session.commit()
             if result["advanced"] > 0 or result["repaired_orphans"] > 0:
