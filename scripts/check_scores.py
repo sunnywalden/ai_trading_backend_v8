@@ -1,6 +1,6 @@
 import asyncio
 from sqlalchemy import select
-from app.models.db import SessionLocal
+from app.models.db import SessionLocal, close_db_resources
 from app.models.position_score import PositionScore
 
 from app.models.fundamental_data import FundamentalData
@@ -20,5 +20,12 @@ async def check():
         for s in scores:
             print(f"Symbol: {s.symbol}, Score: {s.overall_score}, Sector: {s.sector}, Industry: {s.industry}, Beta: {s.beta}")
 
+
+async def main():
+    try:
+        await check()
+    finally:
+        await close_db_resources()
+
 if __name__ == "__main__":
-    asyncio.run(check())
+    asyncio.run(main())

@@ -321,3 +321,17 @@ async def ensure_mysql_schema_updates() -> None:
 async def get_redis():
     """获取 Redis 客户端的依赖项"""
     return redis_client
+
+
+async def close_db_resources() -> None:
+    """显式关闭数据库与 Redis 资源（适用于独立脚本退出前调用）。"""
+    try:
+        await engine.dispose()
+    except Exception:
+        pass
+
+    if redis_client:
+        try:
+            await redis_client.close()
+        except Exception:
+            pass

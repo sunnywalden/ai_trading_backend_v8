@@ -221,6 +221,21 @@ class AutonomyHealthMonitor:
         name = "market_data_lag"
         try:
             from sqlalchemy import text
+            # 与 signal_freshness 语义保持一致：无活跃计划时不做行情时效硬告警
+            active_row = (await db.execute(
+                text(
+                    "SELECT COUNT(*) FROM trading_plan "
+                    "WHERE UPPER(plan_status) IN ('ACTIVE','PARTIAL')"
+                )
+            )).fetchone()
+            active_count = int(active_row[0] or 0) if active_row else 0
+            if active_count == 0:
+                return HealthCheckResult(
+                    name=name,
+                    status="OK",
+                    message="无活跃计划，跳过行情时效检查",
+                )
+
             row = (await db.execute(
                 text("SELECT MAX(timestamp) FROM technical_indicators")
             )).fetchone()
