@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import enum
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any
 
 from sqlalchemy import Boolean, DateTime, Float, Index, Integer, JSON, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
@@ -53,11 +53,11 @@ class AIInsight(Base):
     # ── 洞察内容 ──
     title: Mapped[str] = mapped_column(String(256), nullable=False)
     summary: Mapped[str] = mapped_column(Text, nullable=False)
-    evidence: Mapped[Optional[dict]] = mapped_column(
+    evidence: Mapped[Any] = mapped_column(
         JSON, nullable=True,
         comment="支撑证据：{'trade_ids': [...], 'win_rate': 0.72, 'sample_size': 34}",
     )
-    actionable_rule: Mapped[Optional[dict]] = mapped_column(
+    actionable_rule: Mapped[Any] = mapped_column(
         JSON, nullable=True,
         comment="可执行规则：{'action': 'REDUCE_SIZE', 'condition': '...', 'params': {...}}",
     )
@@ -127,8 +127,8 @@ class ABExperiment(Base):
         String(128), nullable=False,
         comment="被测试的参数名称，如 'var_multiplier.HIGH_VOL'",
     )
-    control_value: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="对照组参数")
-    treatment_value: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True, comment="实验组参数")
+    control_value: Mapped[Any] = mapped_column(JSON, nullable=True, comment="对照组参数")
+    treatment_value: Mapped[Any] = mapped_column(JSON, nullable=True, comment="实验组参数")
 
     # ── 实验状态 ──
     status: Mapped[str] = mapped_column(String(16), nullable=False, default=ExperimentStatus.RUNNING)

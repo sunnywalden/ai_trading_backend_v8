@@ -72,6 +72,6 @@ class CreateExperimentRequest(BaseModel):
     insight_id:       Optional[int] = None
     experiment_name:  str = Field(..., min_length=5)
     param_key:        str
-    control_value:    dict
-    treatment_value:  dict
+    control_value:    Any
+    treatment_value:  Any
     duration_days:    int = Field(default=14, ge=7, le=90)
