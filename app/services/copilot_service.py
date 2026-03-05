@@ -88,26 +88,61 @@ class CopilotService:
                 return cached
 
         context = await self._build_context(account_id)
-        prompt = f"""你是顶级私募、量化系统专业 AI，请基于以下真实市场与账户信息生成今日盘前交易摘要。
 
-当前状态：{json.dumps(context, ensure_ascii=False, indent=2)}
+        # 提取关键数据用于精简 prompt
+        pnl_info = context.get("pnl_ticker") or {}
+        positions_count = context.get("positions_count") or 0
+        factor = context.get("factor_exposure") or {}
+        signals_count = len(context.get("top_signals") or [])
+        factor_info = (
+            factor.get("factor_exposures")
+            or factor.get("factors")
+            or {"Beta": factor.get("beta", "N/A"), "MOM": factor.get("mom", "N/A")}
+        )
+        factor_str = json.dumps(factor_info, ensure_ascii=False)
+        positions_preview_str = json.dumps(context.get("positions_preview") or [], ensure_ascii=False)
+        signals_str = json.dumps(context.get("top_signals") or [], ensure_ascii=False)
+        today_date = context.get("date", "YYYY-MM-DD")
+        market_regime = context.get("market_regime", "UNKNOWN")
 
-注意：
-1. 标的范围严格限制在【美股】和【港股】，严禁包含任何 A 股（如 .SZ 或 .SH 结尾的股票）。
-2. 如果 top_signals 中有数据，请优先基于这些真实信号进行分析；如果为空，则根据已知市场趋势推荐 2-3 个主流对冲或套利标的。
-3. 语气要简洁、专业、客观。
+        prompt = f"""你是顶级私募量化系统专业 AI，请基于以下账户与市场快照生成今日盘前简报。
 
-请务必按以下 JSON 格式输出：
+【账户快照】
+- 持仓数: {positions_count}
+- 未实现盈亏: {pnl_info.get('unrealized_pnl_pct', 'N/A')}%  已实现盈亏: {pnl_info.get('realized_pnl', 'N/A')}
+- 市场体制: {market_regime}  自主模式: {context.get('autonomy_level', 'N/A')}
+- 五因子暴露: {factor_str}
+- 活跃信号数: {signals_count}
+- 持仓预览: {positions_preview_str}
+- 信号列表: {signals_str}
+
+【生成要求】
+1. summary: 2-3 句精炼账户状态（盈亏/仓位/主要驱动/核心风险），≤100字，风格简洁专业。
+2. market_outlook: 1-2 句当日市场展望与操作建议方向，≤60字。
+3. key_themes: 精选 2-4 条当日核心关注点（因子异常/集中度/机会/尾部风险等），每条≤30字。
+4. portfolio_snapshot: 从数据中提取结构化指标（若数据缺失填 null）。
+5. top_signals: 严格来自真实信号列表，无信号时推荐 1-2 个适合当前体制的对冲/套利标的（action 用 MONITOR_FOR_HEDGE）；禁止 A 股。
+6. risk_alerts: 2-4 条具体风险提示，优先相关性集中度、单边敞口、因子异动，每条≤40字。
+
+请严格按以下 JSON 格式输出（仅输出 JSON，不含其他文字）：
 {{
-  "date": "YYYY-MM-DD",
-  "summary": "概要描述",
-  "market_outlook": "市场展望",
+  "date": "{today_date}",
+  "market_regime": "{market_regime}",
+  "summary": "2-3句精炼账户状态",
+  "market_outlook": "市场展望与方向建议",
+  "portfolio_snapshot": {{
+    "positions_count": {positions_count},
+    "unrealized_pnl_pct": null,
+    "top_contributor": null,
+    "beta_exposure": null,
+    "mom_exposure": null
+  }},
+  "key_themes": ["关注点1", "关注点2"],
   "top_signals": [
-    {{"symbol": "AAPL", "action": "BUY", "reason": "xxxxx"}}
+    {{"symbol": "AAPL", "action": "BUY", "reason": "核心逻辑", "confidence": 0.75}}
   ],
-  "risk_alerts": ["xxxxx", "xxxxx"]
-}}
-仅输出 JSON。"""
+  "risk_alerts": ["风险提示1", "风险提示2"]
+}}"""
 
         messages = [{"role": "user", "content": prompt}]
         # 优化：早间简报优先保证响应速度，使用 lightweight 模型 (deepseek-chat)
@@ -124,16 +159,22 @@ class CopilotService:
             else:
                 result = {
                     "date": datetime.now().strftime("%Y-%m-%d"),
-                    "summary": raw_response[:200] + "...",
+                    "market_regime": market_regime,
+                    "summary": raw_response[:150] + "...",
                     "market_outlook": "AI 正在分析中...",
+                    "portfolio_snapshot": {"positions_count": positions_count},
+                    "key_themes": [],
                     "top_signals": [],
                     "risk_alerts": []
                 }
         except Exception:
             result = {
                 "date": datetime.now().strftime("%Y-%m-%d"),
-                "summary": "解析摘要失败",
-                "market_outlook": raw_response,
+                "market_regime": market_regime,
+                "summary": "解析摘要失败，请刷新重试",
+                "market_outlook": "",
+                "portfolio_snapshot": {"positions_count": positions_count},
+                "key_themes": [],
                 "top_signals": [],
                 "risk_alerts": []
             }
