@@ -75,20 +75,26 @@ class FusedSignalResult:
     dimensions:          list[DimensionScore] = field(default_factory=list)
     dominant_dimension:  str = ""           # 贡献最大的维度
     aligned_count:       int = 0            # 同向维度数量
+    aligned_dims:        list[str] = field(default_factory=list)   # V10.4.2: 同向维度名称列表
+    opposing_dims:       list[str] = field(default_factory=list)   # V10.4.2: 反向维度名称列表
+    anti_resonance_kill: bool = False                               # V10.4.2: 是否触发反共振熔断
     recommendation:      str = ""           # BUY / SELL / HOLD
 
     def to_dict(self) -> dict:
         return {
-            "symbol":             self.symbol,
-            "fused_confidence":   round(self.fused_confidence, 4),
-            "base_score":         round(self.base_score, 4),
-            "resonance_bonus":    round(self.resonance_bonus, 4),
-            "conflict_penalty":   round(self.conflict_penalty, 4),
-            "regime_multiplier":  self.regime_multiplier,
-            "regime":             self.regime,
-            "aligned_count":      self.aligned_count,
-            "dominant_dimension": self.dominant_dimension,
-            "recommendation":     self.recommendation,
+            "symbol":              self.symbol,
+            "fused_confidence":    round(self.fused_confidence, 4),
+            "base_score":          round(self.base_score, 4),
+            "resonance_bonus":     round(self.resonance_bonus, 4),
+            "conflict_penalty":    round(self.conflict_penalty, 4),
+            "regime_multiplier":   self.regime_multiplier,
+            "regime":              self.regime,
+            "aligned_count":       self.aligned_count,
+            "aligned_dims":        self.aligned_dims,
+            "opposing_dims":       self.opposing_dims,
+            "anti_resonance_kill": self.anti_resonance_kill,
+            "dominant_dimension":  self.dominant_dimension,
+            "recommendation":      self.recommendation,
             "dimensions": [
                 {
                     "name":      d.name,
@@ -222,16 +228,25 @@ class SignalFusionEngine:
         base_score   = sum(d.score * d.weight for d in dims) / total_weight
 
         # ── Layer-2: 共振奖励 ──────────────────────────────────────────────────
-        bullish_count = sum(1 for d in dims if d.direction == 1)
-        bearish_count = sum(1 for d in dims if d.direction == -1)
-        aligned_count = max(bullish_count, bearish_count)
-        extra_aligned = max(0, aligned_count - _RESONANCE_THRESHOLD)
+        bullish_count  = sum(1 for d in dims if d.direction == 1)
+        bearish_count  = sum(1 for d in dims if d.direction == -1)
+        aligned_count  = max(bullish_count, bearish_count)
+        extra_aligned  = max(0, aligned_count - _RESONANCE_THRESHOLD)
         resonance_bonus = extra_aligned * _RESONANCE_BONUS
 
+        # V10.4.2: 计算同向/反向维度名称供漏斗使用
+        dominant_dir    = 1 if bullish_count >= bearish_count else -1
+        aligned_dims    = [d.name for d in dims if d.direction == dominant_dir]
+        opposing_dims   = [d.name for d in dims if d.direction == -dominant_dir]
+
         # ── Layer-3: 冲突惩罚 ─────────────────────────────────────────────────
-        tech_dir = (technical.direction if technical else 0)
-        fund_dir = (fundamental.direction if fundamental else 0)
+        tech_dir  = (technical.direction  if technical    else 0)
+        fund_dir  = (fundamental.direction if fundamental  else 0)
+        macro_dir = (macro.direction       if macro        else 0)
         conflict_penalty = _CONFLICT_PENALTY if (tech_dir != 0 and fund_dir != 0 and tech_dir != fund_dir) else 0.0
+
+        # V10.4.2: 反共振熔断标志（技术 vs 基本面方向矛盾）
+        anti_resonance_kill = bool(tech_dir != 0 and fund_dir != 0 and tech_dir != fund_dir)
 
         # ── Layer-4: 市场状态乘数 ──────────────────────────────────────────────
         regime_multiplier = _REGIME_MULTIPLIERS.get(regime, 1.0)
@@ -252,17 +267,20 @@ class SignalFusionEngine:
             recommendation = "HOLD"
 
         return FusedSignalResult(
-            symbol=symbol,
-            fused_confidence=fused_confidence,
-            base_score=base_score,
-            resonance_bonus=resonance_bonus,
-            conflict_penalty=conflict_penalty,
-            regime_multiplier=regime_multiplier,
-            regime=regime,
-            dimensions=dims,
-            dominant_dimension=dominant.name,
-            aligned_count=aligned_count,
-            recommendation=recommendation,
+            symbol              = symbol,
+            fused_confidence    = fused_confidence,
+            base_score          = base_score,
+            resonance_bonus     = resonance_bonus,
+            conflict_penalty    = conflict_penalty,
+            regime_multiplier   = regime_multiplier,
+            regime              = regime,
+            dimensions          = dims,
+            dominant_dimension  = dominant.name,
+            aligned_count       = aligned_count,
+            aligned_dims        = aligned_dims,        # V10.4.2
+            opposing_dims       = opposing_dims,       # V10.4.2
+            anti_resonance_kill = anti_resonance_kill, # V10.4.2
+            recommendation      = recommendation,
         )
 
     def score_sentiment_only(

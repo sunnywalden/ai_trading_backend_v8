@@ -150,8 +150,93 @@ class AutonomousEngine:
         except Exception as _e:
             logger.warning(f"[AutonomousEngine] Failed to lock signals to QUEUED: {_e}")
 
+        daily_signals_executed = 0  # V10.4.2: 当日已通过漏斗并成功执行的信号数
         for signal in signals:
             decision = await self._ai_decide(signal, current_positions, current_equity)
+
+            # ─────────────────────────────────────────────────────────────────
+            # V10.4.2: 信号精英化漏斗 — RiskGate 前置的多维度品质过滤
+            # ─────────────────────────────────────────────────────────────────
+            _funnel_passed = True  # 默认通过（漏斗模块异常时不阻断主流程）
+            try:
+                from app.services.signal_quality_funnel import (
+                    signal_quality_funnel, SignalFunnelInput,
+                )
+                _dims: list = signal.get("dimensions") or []
+
+                def _dim_dir(name: str) -> int:
+                    for _d in _dims:
+                        if isinstance(_d, dict) and _d.get("name") == name:
+                            return int(_d.get("direction", 0))
+                    return 0
+
+                def _dim_score(name: str) -> float:
+                    for _d in _dims:
+                        if isinstance(_d, dict) and _d.get("name") == name:
+                            return float(_d.get("score", 0.5))
+                    return 0.5
+
+                _action = str(decision.get("action", "HOLD")).upper()
+                _sq_dir = "LONG" if _action == "BUY" else ("SHORT" if _action == "SELL" else "HOLD")
+                _sq_conf = float(
+                    signal.get("confidence") or signal.get("fused_confidence") or 0.0
+                )
+                # 兼容 0-1 和 0-100 两种置信度格式
+                _composite = _sq_conf * 100 if _sq_conf <= 1.0 else _sq_conf
+
+                _funnel_input = SignalFunnelInput(
+                    signal_id                     = signal.get("id"),
+                    symbol                        = str(decision.get("symbol") or signal.get("symbol") or ""),
+                    direction                     = _sq_dir,
+                    regime                        = regime_at_decision or "SIDEWAYS",
+                    composite_score               = _composite,
+                    aligned_count                 = int(signal.get("aligned_count") or 0),
+                    aligned_dims                  = list(signal.get("aligned_dims") or []),
+                    opposing_dims                 = list(signal.get("opposing_dims") or []),
+                    tech_direction                = _dim_dir("technical"),
+                    fundamental_direction         = _dim_dir("fundamental"),
+                    macro_score                   = _dim_score("macro"),
+                    options_score                 = _dim_score("options"),
+                    adv_usd                       = float(signal.get("adv_usd") or 5_000_000),
+                    market_cap                    = float(signal.get("market_cap") or 5_000_000_000),
+                    max_correlation_with_existing = 0.0,  # 后续可接入相关性矩阵
+                    historical_ic                 = signal.get("historical_ic"),
+                    timing_quality                = signal.get("timing_quality"),
+                )
+                _funnel_decision = await signal_quality_funnel.evaluate(
+                    signal                  = _funnel_input,
+                    db                      = db,
+                    current_positions_count = len(current_positions),
+                    daily_signals_executed  = daily_signals_executed,
+                )
+                if not _funnel_decision.passed:
+                    _funnel_passed = False
+                    _reject_reason = (
+                        f"quality-funnel(L{_funnel_decision.rejected_at_layer},"
+                        f"{_funnel_decision.rejection_reason})"
+                    )
+                    logger.info(
+                        f"[AutonomousEngine] Signal {signal['id']} blocked by quality funnel: "
+                        f"{_reject_reason}"
+                    )
+                    await self._update_signal_status(db, signal["id"], _SS.REJECTED)
+                    results.append({
+                        "signal_id":           signal["id"],
+                        "decision":            decision,
+                        "gate_passed":         False,
+                        "order_id":            None,
+                        "execution_intent_id": None,
+                        "reason":              _reject_reason,
+                    })
+            except Exception as _sq_err:
+                logger.warning(
+                    f"[AutonomousEngine] Signal quality funnel error (non-fatal, will proceed): {_sq_err}"
+                )
+
+            if not _funnel_passed:
+                continue
+            # ─── 品质漏斗通过 → 继续 RiskGate ──────────────────────────────────
+
             gate = await risk_gate_service.check(
                 account_id=account_id,
                 symbol=decision["symbol"],
@@ -352,6 +437,7 @@ class AutonomousEngine:
                         order_id = None
                     daily_trades += 1
                     if order_id:
+                        daily_signals_executed += 1  # V10.4.2: 当日漏斗通过的实际执行数
                         await self._update_signal_status(db, signal["id"], _SS.EXECUTED)
                         await self._update_execution_intent(
                             db,
