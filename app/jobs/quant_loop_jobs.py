@@ -286,6 +286,37 @@ async def run_broker_order_reconcile():
             logger.error(f"[quant_jobs] Broker order reconcile FAILED: {e}", exc_info=True)
 
 
+async def run_post_trade_pipeline_job():
+    """
+    交易后 Pipeline 推进：驱动 S12→S13→S14→S15→S16 自动流转。
+
+    该任务不受市场时段限制，确保已成交计划能在 P50 基准时间内
+    依次经历归因分析、洞察更新、A/B实验后到达「已完成」(S16)。
+    每 5 分钟触发一次。
+    """
+    async with SessionLocal() as session:
+        try:
+            from app.services.post_trade_pipeline_service import post_trade_pipeline_service
+
+            account_id = await _resolve_runtime_account_id()
+            result = await post_trade_pipeline_service.advance_post_trade_plans(
+                db=session,
+                account_id=account_id,
+            )
+            await session.commit()
+            if result["advanced"] > 0 or result["repaired_orphans"] > 0:
+                logger.info(
+                    "[quant_jobs] Post-trade pipeline OK — "
+                    f"scanned={result['scanned']} "
+                    f"advanced={result['advanced']} "
+                    f"repaired={result['repaired_orphans']} "
+                    f"by_stage={result['by_stage']}"
+                )
+        except Exception as e:
+            await session.rollback()
+            logger.error(f"[quant_jobs] Post-trade pipeline FAILED: {e}", exc_info=True)
+
+
 def register_quant_loop_jobs(scheduler: AsyncIOScheduler):
     """
     注册量化交易闭环定时任务，挂载到 APScheduler。
@@ -297,7 +328,8 @@ def register_quant_loop_jobs(scheduler: AsyncIOScheduler):
       ④ 22:00 cron  — 自适应优化   （不受时段限制）
       ⑤ interval/15m— 持仓监控扫描（止损/止盈/超龄，市场时段守卫）
       ⑥ interval/60m— 持仓再平衡扫描（REDUCE/SELL建议转信号，市场时段守卫）
-            ⑦ interval/Nm — 券商订单对账（手动撤单/成交补偿同步，不受时段限制）
+      ⑦ interval/Nm — 券商订单对账（手动撤单/成交补偿同步，不受时段限制）
+      ⑧ interval/5m — 交易后流水线推进（S12→S16，不受时段限制）
     """
 
     # ① 每日交易周期 — 早上 8:00
@@ -384,6 +416,16 @@ def register_quant_loop_jobs(scheduler: AsyncIOScheduler):
         replace_existing=True,
     )
 
+    # ⑧ 交易后 Pipeline 推进 — 每 5 分钟（S12→S13→S14→S15→S16，不受时段限制）
+    scheduler.add_job(
+        run_post_trade_pipeline_job,
+        trigger="interval",
+        minutes=5,
+        id="post_trade_pipeline",
+        name="Post-Trade Pipeline Advance (every 5m, S12→S16)",
+        replace_existing=True,
+    )
+
     logger.info("✓ Quantitative Trading Loop jobs registered:")
     logger.info("  ① Daily Trading Cycle:       08:00  (Signal Gen + Execute by Autonomy Level)")
     logger.info("  ①+ Intraday Signal Cycle:    09:00-11:30 & 13:00-16:00 every 30m (HK session)")
@@ -393,3 +435,4 @@ def register_quant_loop_jobs(scheduler: AsyncIOScheduler):
     logger.info(f" ⑤ Position Exit Scan:        every {settings.POSITION_MONITOR_INTERVAL_MINUTES}m  (market guard)")
     logger.info("  ⑥ Position Rebalance Scan:   every 60m  (REDUCE/SELL → Signal, market guard)")
     logger.info(f"  ⑦ Broker Order Reconcile:    every {settings.BROKER_ORDER_SYNC_INTERVAL_MINUTES}m  (manual-cancel sync)")
+    logger.info("  ⑧ Post-Trade Pipeline:       every 5m   (S12→S13→S14→S15→S16 auto-advance)")

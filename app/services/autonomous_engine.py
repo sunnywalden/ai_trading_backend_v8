@@ -1189,6 +1189,7 @@ class AutonomousEngine:
                 source="AI_AUTONOMOUS",
                 pipeline_stage=7,           # S7: 下单执行（已完成）
                 stage_entered_at=datetime.now(timezone.utc),
+                position_fsm_state="ENTERING",  # 初始持仓状态
             )
             db.add(plan)
             await db.flush()
