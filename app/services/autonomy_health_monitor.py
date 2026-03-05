@@ -72,7 +72,10 @@ class AutonomyHealthMonitor:
     def _to_utc_datetime(value: Any) -> Optional[datetime]:
         if not isinstance(value, datetime):
             return None
-        return value.replace(tzinfo=timezone.utc)
+        if value.tzinfo is None:
+            # 兼容 MySQL 无时区 datetime，统一视为 UTC
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
 
     # ── 检查 1: FSM 卡死检测 ────────────────────────────────────
     async def check_fsm_stuck(self, db) -> HealthCheckResult:
