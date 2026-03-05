@@ -233,6 +233,11 @@ async def lifespan(app: FastAPI):
         except ImportError:
             pass
         try:
+            from app.jobs.equity_jobs import register_equity_jobs
+            register_equity_jobs(scheduler)         # V10: 每日美股收盘后权益快照
+        except ImportError:
+            pass
+        try:
             from app.jobs.ai_hub_jobs import register_ai_hub_jobs
             register_ai_hub_jobs(scheduler)         # V10.3.3: 置信度校准 (08:15) + 权重更新 (EOD)
         except ImportError:
