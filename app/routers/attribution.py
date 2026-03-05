@@ -44,7 +44,10 @@ async def list_attribution_trades(
     if days:
         from datetime import datetime, timedelta, timezone
         since = datetime.now(tz=timezone.utc) - timedelta(days=days)
-        stmt = stmt.where(TradeAttributionEntry.created_at >= since)
+        # 优先用 traded_at（实际平仓时间），无则降级到 created_at（入库时间）
+        stmt = stmt.where(
+            func.coalesce(TradeAttributionEntry.traded_at, TradeAttributionEntry.created_at) >= since
+        )
 
     total_stmt = select(func.count()).select_from(stmt.subquery())
     total = (await db.execute(total_stmt)).scalar_one_or_none() or 0
