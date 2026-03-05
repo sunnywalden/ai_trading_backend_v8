@@ -1,9 +1,11 @@
 # 后端架构设计文档
 
 > **AI量化交易闭环系统** - Backend Design  
-> 版本：V10.4.1 | 更新日期：2026-03-04
+> 版本：V10.4.2 | 更新日期：2026-03-05
 >
-> **V10.4 变更摘要（规划→实现）**：**M1 数据闭环治理**——`ReturnBackfillJob`（每日 21:30 ET，自动回填 `TradingSignal.actual_return`，回填率 ≥95%，触发 IC 增量重算）+ IC `data_quality` 字段全覆盖（`REAL`/`INSUFFICIENT`/`STALE`，移除 expected_return 代理收益）+ 因子敞口零快照（无持仓时写入 positions_count=0 快照，不跳过）+ `LLMCallGuard`（超时30s+指数退避重试+降级返回 degraded=true）+ `LlmCallLog` 表（model/latency/tokens/status 全量记录）；**M3 Copilot 上下文服务**——`GET /api/v1/copilot/context` 返回当前系统快照供浮层注入；**M4 自主循环稳定**——`AutonomyHealthMonitorService`（10分钟8项自检）+ `JobWatchdog`（Job 超时2x触发补跑）+ `register_m4_jobs()` 导入 main.py。
+> **V10.4.2 变更摘要（信号精英化）**：**五层信号漏斗**——`SignalQualityConfig`（Pydantic BaseSettings，支持热加载）+ `SignalConvictionScorer`（Conviction Score：composite×0.4 + resonance_bonus×0.25 + regime_alignment×0.15 + historical_ic×0.1 + timing_quality×0.1）+ `SignalQualityFunnel`（Layer 0 宇宙过滤 / Layer 1 体制门控 / Layer 2 组合预检 / Layer 3 多维共振 / Layer 4 置信度校准门）+ `anti_resonance_kill_switch`（tech/fundamental 对立 或 CRISIS 做多 → conviction 强制归零）+ **幽灵交易**——`GhostTradeService`（Layer 3/4 拒绝信号自动虚拟跟踪，每日价格更新，计算幽灵胜率 vs 实际胜率对比）+ **审计日志**——`SignalQualityAuditLog`（每个信号的漏斗结果全量记录）+ `AutonomousEngine` 决策前接入漏斗（硬约束 `MAX_CONCURRENT_POSITIONS=6` / `MAX_DAILY_SIGNALS=5`）+ 6 个新增 API 端点（`/api/v1/signals/quality-config`·`/audit-log`·`/funnel-stats`·`/ghost-trades`·`/ghost-trades/analysis`）+ `ghost_trade_jobs.py`（每日收盘后更新幽灵 PnL）+ 2 张新增 DB 表（`signal_quality_audit_logs` / `ghost_trades`）
+>
+> **V10.4.1 变更摘要**：**M1 数据闭环治理**——`ReturnBackfillJob`（每日 21:30 ET，自动回填 `TradingSignal.actual_return`，回填率 ≥95%，触发 IC 增量重算）+ IC `data_quality` 字段全覆盖（`REAL`/`INSUFFICIENT`/`STALE`，移除 expected_return 代理收益）+ 因子敞口零快照（无持仓时写入 positions_count=0 快照，不跳过）+ `LLMCallGuard`（超时30s+指数退避重试+降级返回 degraded=true）+ `LlmCallLog` 表（model/latency/tokens/status 全量记录）；**M3 Copilot 上下文服务**——`GET /api/v1/copilot/context` 返回当前系统快照供浮层注入；**M4 自主循环稳定**——`AutonomyHealthMonitorService`（10分钟8项自检）+ `JobWatchdog`（Job 超时2x触发补跑）+ `register_m4_jobs()` 导入 main.py。
 >
 > **V10.3.4 变更摘要**：稳定性与冷启动治理——全服务冷启动占位逻辑 + `market_universe` 表 + PostMortem 交易选择驱动 + REDUCE/EXIT 信号规则执行 + 事件去重索引 + 多账户 ID 兼容。
 >

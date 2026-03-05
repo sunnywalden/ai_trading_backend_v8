@@ -70,6 +70,7 @@ from app.routers import observability   # V10.3.3: 可观测性 2.0
 from app.routers import ai_hub          # V10.3.3: AI 中枢 2.0
 from app.routers import war_room        # V10.3.3: 战情室
 from app.routers import market_universe # 市场全量池状态
+from app.routers import signal_quality  # V10.4.2: 信号精英化漏斗
 # V9 routers
 from app.routers import dashboard as v9_dashboard
 from app.routers import dashboard_v2  # V10: 全新Dashboard
@@ -84,6 +85,7 @@ from app.jobs.quant_loop_jobs import register_quant_loop_jobs  # NEW: 闭环定�
 from app.jobs.task_config_jobs import register_task_config_jobs  # V10: 动态配置同步任务
 from app.jobs.paper_graduation_job import register_paper_graduation_job  # V10.1: Paper 毕业检查
 from app.jobs.regime_jobs import register_regime_jobs  # V10.2-M1: 市场体制分类任务
+from app.jobs.ghost_trade_jobs import update_ghost_trades_pnl  # V10.4.2: 幽灵交易追踪
 from app.core.proxy import apply_proxy_env, ProxyConfig
 from app.core.auth import get_current_user, login_for_access_token
 from fastapi.security import OAuth2PasswordRequestForm
@@ -257,6 +259,20 @@ async def lifespan(app: FastAPI):
             register_data_sync_jobs(scheduler)      # V10.4: 数据自动同步 (journal关闭/actual_return/归因)
         except ImportError:
             pass
+        # V10.4.2: 幽灵交易每日追踪（美东 16:35，盘后）
+        try:
+            scheduler.add_job(
+                update_ghost_trades_pnl,
+                "cron",
+                hour=20,     # UTC 20:35 = 美东 16:35（标准时间）
+                minute=35,
+                id="ghost_trade_daily_update",
+                replace_existing=True,
+                name="[V10.4.2] 幽灵交易PnL日度更新",
+            )
+            logger.info("[GhostTradeJob] Registered ghost trade daily update job (20:35 UTC)")
+        except Exception as _gj_err:
+            logger.warning(f"[GhostTradeJob] Failed to register job: {_gj_err}")
         start_scheduler()
         logger.info("Scheduler started with periodic tasks")
 
@@ -384,6 +400,7 @@ app.include_router(observability.router, dependencies=[Depends(get_current_user)
 app.include_router(ai_hub.router, dependencies=[Depends(get_current_user)])               # V10.3.3: AI 中枢 2.0
 app.include_router(war_room.router, dependencies=[Depends(get_current_user)])             # V10.3.3: 战情室
 app.include_router(market_universe.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
+app.include_router(signal_quality.router, dependencies=[Depends(get_current_user)])       # V10.4.2: 信号精英化漏斗
 
 
 @app.get("/health")
