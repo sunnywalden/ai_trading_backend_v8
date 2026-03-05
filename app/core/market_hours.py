@@ -38,10 +38,16 @@ _HK_ACTIVE_END = time(16, 0)     # 收盘
 def _now_utc() -> datetime:
     return datetime.now(tz=_UTC)
 
+def _ensure_aware_utc(dt: datetime | None) -> datetime:
+    if dt is None:
+        return _now_utc()
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=_UTC)
+    return dt
 
 def is_us_market_active(now_utc: datetime | None = None) -> bool:
     """是否在美股活跃时段（盘前~盘后，周一至周五）"""
-    now_et = (now_utc or _now_utc()).astimezone(_ET)
+    now_et = _ensure_aware_utc(now_utc).astimezone(_ET)
     if now_et.weekday() >= 5:   # 周六=5, 周日=6
         return False
     t = now_et.time()
@@ -50,7 +56,7 @@ def is_us_market_active(now_utc: datetime | None = None) -> bool:
 
 def is_hk_market_active(now_utc: datetime | None = None) -> bool:
     """是否在港股活跃时段（盘前~收盘，排除午休，周一至周五）"""
-    now_hkt = (now_utc or _now_utc()).astimezone(_HKT)
+    now_hkt = _ensure_aware_utc(now_utc).astimezone(_HKT)
     if now_hkt.weekday() >= 5:
         return False
     t = now_hkt.time()
@@ -77,7 +83,7 @@ def is_symbol_market_active(symbol: str, now_utc: datetime | None = None) -> boo
 
 def market_status_summary(now_utc: datetime | None = None) -> dict:
     """返回当前各市场活跃状态摘要（用于日志/健康检查）"""
-    ts = now_utc or _now_utc()
+    ts = _ensure_aware_utc(now_utc)
     return {
         "us_market_active": is_us_market_active(ts),
         "hk_market_active": is_hk_market_active(ts),

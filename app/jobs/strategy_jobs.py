@@ -47,6 +47,8 @@ def _now_iso() -> str:
 
 
 def _is_us_market_hours(ts_utc: datetime) -> bool:
+    if ts_utc.tzinfo is None:
+        ts_utc = ts_utc.replace(tzinfo=timezone.utc)
     ny = ts_utc.astimezone(ZoneInfo("America/New_York"))
     if ny.weekday() >= 5:
         return False
@@ -55,6 +57,8 @@ def _is_us_market_hours(ts_utc: datetime) -> bool:
 
 
 def _is_hk_market_hours(ts_utc: datetime) -> bool:
+    if ts_utc.tzinfo is None:
+        ts_utc = ts_utc.replace(tzinfo=timezone.utc)
     hk = ts_utc.astimezone(ZoneInfo("Asia/Hong_Kong"))
     if hk.weekday() >= 5:
         return False
@@ -137,7 +141,12 @@ async def _select_universe_symbols(session: AsyncSession, run: StrategyRun) -> t
         }
 
     # 自动按扫描时间选择市场
-    runtime = run.started_at if run.started_at else datetime.now(timezone.utc)
+    if run.started_at:
+        runtime = run.started_at
+        if runtime.tzinfo is None:
+            runtime = runtime.replace(tzinfo=timezone.utc)
+    else:
+        runtime = datetime.now(timezone.utc)
     market = _resolve_market_by_runtime(runtime)
     symbols = await _get_local_market_symbols(market)
     fallback_reason = None
