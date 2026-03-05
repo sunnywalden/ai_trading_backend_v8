@@ -307,10 +307,10 @@ class CopilotService:
                 context["market_regime"] = regime_data.regime
 
             # 2. 获取高置信度信号 (限 5 条，仅限美股/港股)
-            # 排除包含 .SZ 或 .SH 的标的
+            # 排除包含 .SZ 或 .SH 的标的，同时支持 account_id=user_id 时取用户的信号
             stmt = select(TradingSignal).where(
-                TradingSignal.account_id == account_id,
-                TradingSignal.status == SignalStatus.VALIDATED,
+                (TradingSignal.account_id == account_id) | (TradingSignal.user_id == account_id),
+                TradingSignal.status == "VALIDATED",
                 ~TradingSignal.symbol.like("%.SZ"),
                 ~TradingSignal.symbol.like("%.SH"),
             ).order_by(desc(TradingSignal.confidence)).limit(5)
@@ -318,11 +318,12 @@ class CopilotService:
             result = await db.execute(stmt)
             signals = result.scalars().all()
             for s in signals:
+                reason_text = s.notes[:50] if s.notes else "六维指标共振"
                 context["top_signals"].append({
                     "symbol": s.symbol,
                     "action": str(s.signal_type),
                     "confidence": s.confidence,
-                    "reason": s.research_summary[:50] if s.research_summary else "六维指标共振"
+                    "reason": reason_text
                 })
 
             # 3. 持仓与五因子敞口（与战情室同源，避免 Copilot 与页面口径不一致）
