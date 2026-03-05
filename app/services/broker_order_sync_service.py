@@ -149,6 +149,8 @@ async def reconcile_broker_order_status(
                 old_stage = plan.pipeline_stage
                 plan.pipeline_stage = new_stage
                 plan.stage_entered_at = datetime.now(timezone.utc)
+                # 同步持仓 FSM 状态
+                plan.position_fsm_state = "CLOSED" if new_stage >= 12 else "ENTERING"
                 if new_status:
                     plan.plan_status = new_status
                 

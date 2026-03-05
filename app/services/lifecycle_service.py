@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, desc, and_, true
+from sqlalchemy import select, func, desc, and_, true, update
 
 from app.models.trading_plan import TradingPlan
 from app.models.fsm_transition_log import FsmTransitionLog
@@ -49,6 +49,46 @@ POSITION_FSM_META: dict[str, dict] = {
     "STOP_LOSS_EXIT": {"label": "止损离场", "color": "#dc2626"},
     "CLOSED":         {"label": "已关闭",   "color": "#6b7280"},
 }
+
+
+def _derive_position_fsm_state(plan_status: Optional[str], pipeline_stage: Optional[int]) -> str:
+    """从 plan_status + pipeline_stage 推导持仓 FSM 状态。
+
+    用于 position_fsm_state 字段为 NULL 时的回退逻辑。
+    优先级：pipeline_stage > plan_status。
+    """
+    s = pipeline_stage or 0
+    ps = plan_status or ""
+
+    # 已终结状态
+    if ps in ("REVOKED", "FAILED", "CANCELLED", "EXPIRED") or s >= 12:
+        return "CLOSED"
+
+    # 进入执行阶段（下单/算法执行中） → 建仓中
+    if s in (7, 8):
+        return "ENTERING"
+
+    # 持仓监控 → 持有中
+    if s == 9:
+        return "HELD"
+
+    # 仓位调整 → 加仓或减仓，默认 SCALING_IN（无法精确区分时取加仓）
+    if s == 10:
+        return "SCALING_IN"
+
+    # 离场触发 → 全仓离场
+    if s == 11:
+        return "EXITING_FULL"
+
+    # 信号/计划已执行但无精确阶段 → 持有中
+    if ps == "EXECUTED":
+        return "HELD"
+
+    # 活跃中（待执行）→ 建仓中
+    if ps in ("ACTIVE", "AUTO_EXECUTING", "AI_GENERATED", "PENDING_CONFIRM"):
+        return "ENTERING"
+
+    return "HELD"  # 兜底
 
 
 class LifecycleService:
@@ -164,15 +204,21 @@ class LifecycleService:
     async def get_position_fsm_counts(self, db: AsyncSession) -> PositionFsmSummary:
         now = datetime.now(timezone.utc)
 
-        # 持仓 FSM 状态计数
-        stmt = select(
-            TradingPlan.position_fsm_state,
-            func.count().label("cnt")
-        ).where(
-            TradingPlan.position_fsm_state.isnot(None)
-        ).group_by(TradingPlan.position_fsm_state)
-        result = await db.execute(stmt)
-        rows = {r.position_fsm_state: r.cnt for r in result.all()}
+        # 拉取所有计划（含 position_fsm_state 为 NULL 的），推导状态
+        plans_result = await db.execute(
+            select(
+                TradingPlan.plan_status,
+                TradingPlan.pipeline_stage,
+                TradingPlan.position_fsm_state,
+            )
+        )
+        rows: dict[str, int] = {}
+        for p in plans_result.all():
+            # 优先用存储值，否则推导
+            state = p.position_fsm_state or _derive_position_fsm_state(
+                p.plan_status, p.pipeline_stage
+            )
+            rows[state] = rows.get(state, 0) + 1
 
         states: list[PositionFsmStateCount] = []
         total = 0
@@ -205,6 +251,28 @@ class LifecycleService:
         )
 
         return PositionFsmSummary(states=states, engine_stats=engine_stats, total=total, as_of=now)
+
+    async def sync_position_fsm_states(self, db: AsyncSession) -> int:
+        """批量将 position_fsm_state IS NULL 的计划按推导规则回写入库。
+
+        返回更新的行数。由 post_trade_pipeline_service / 定时任务调用。
+        """
+        plans = (
+            await db.execute(
+                select(TradingPlan).where(TradingPlan.position_fsm_state.is_(None))
+            )
+        ).scalars().all()
+
+        updated = 0
+        for plan in plans:
+            derived = _derive_position_fsm_state(plan.plan_status, plan.pipeline_stage)
+            plan.position_fsm_state = derived
+            updated += 1
+
+        if updated:
+            await db.flush()
+            logger.info("[LifecycleService] sync_position_fsm_states: updated %d plans", updated)
+        return updated
 
     # ─────────────────────────────────────────────────────────────────────────
     # FSM Events
