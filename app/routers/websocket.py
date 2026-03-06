@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
@@ -12,6 +13,8 @@ from jose import jwt, JWTError
 from app.core.config import settings
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+_shutdown_event = asyncio.Event()
 
 
 class ConnectionManager:
@@ -63,6 +66,18 @@ class ConnectionManager:
     def active_count(self) -> int:
         return len(self._connections)
 
+    async def close_all(self, *, code: int = 1012, reason: str = "Server reload") -> None:
+        async with self._lock:
+            connections = list(self._connections.items())
+            self._connections.clear()
+
+        for user_id, ws in connections:
+            try:
+                await ws.close(code=code, reason=reason)
+            except Exception:
+                pass
+            print(f"[WS] Disconnected: {user_id}, total: {len(self._connections)}")
+
 
 # 全局实例
 manager = ConnectionManager()
@@ -77,6 +92,23 @@ def _verify_ws_token(token: str) -> Optional[str]:
         return None
 
 
+def mark_shutdown_started() -> None:
+    _shutdown_event.set()
+
+
+def reset_shutdown_state() -> None:
+    _shutdown_event.clear()
+
+
+async def close_all_websockets() -> None:
+    mark_shutdown_started()
+    await asyncio.gather(
+        manager.close_all(),
+        sa_manager.close_all(),
+        return_exceptions=True,
+    )
+
+
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
     """WebSocket 端点：认证后建立长连接"""
@@ -87,8 +119,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
 
     await manager.connect(websocket, user_id)
     try:
-        while True:
-            data = await websocket.receive_text()
+        while not _shutdown_event.is_set():
+            try:
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
             # 处理客户端心跳
             if data == "ping":
                 await websocket.send_text("pong")
@@ -97,6 +132,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str = Query(...)):
                 pass
     except WebSocketDisconnect:
         await manager.disconnect(user_id)
+    except asyncio.CancelledError:
+        await manager.disconnect(user_id)
+        raise
     except Exception:
         await manager.disconnect(user_id)
 
@@ -134,6 +172,17 @@ class _SAConnectionManager:
     def active_count(self) -> int:
         return len(self._connections)
 
+    async def close_all(self, *, code: int = 1012, reason: str = "Server reload") -> None:
+        async with self._lock:
+            connections = list(self._connections)
+            self._connections.clear()
+
+        for ws in connections:
+            try:
+                await ws.close(code=code, reason=reason)
+            except Exception:
+                pass
+
 
 sa_manager = _SAConnectionManager()
 
@@ -158,7 +207,7 @@ async def sa_websocket_endpoint(
 
         prev_snapshot: Optional[SituationalAwarenessSnapshot] = None
 
-        while True:
+        while not _shutdown_event.is_set():
             try:
                 async with SessionLocal() as db:
                     snapshot = await situational_awareness_service.get_snapshot(db)
@@ -171,11 +220,21 @@ async def sa_websocket_endpoint(
                     prev_snapshot = snapshot
 
             except Exception as exc:
-                await websocket.send_json({"type": "error", "message": str(exc)})
+                if _shutdown_event.is_set():
+                    break
+                try:
+                    await websocket.send_json({"type": "error", "message": str(exc)})
+                except Exception:
+                    break
 
-            await asyncio.sleep(interval)
+            try:
+                await asyncio.wait_for(_shutdown_event.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
 
     except WebSocketDisconnect:
         pass
+    except asyncio.CancelledError:
+        raise
     finally:
         await sa_manager.disconnect(websocket)
