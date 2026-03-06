@@ -15,6 +15,68 @@ from app.models.execution_intent import AutonomousExecutionIntent
 from app.models.trading_signal import SignalStatus, TradingSignal
 
 
+_BROKER_RECONCILE_ACTIVE_STAGES = frozenset({7, 8})
+_POST_TRADE_STAGE_START = 12
+
+
+def _is_plan_reconcile_candidate(plan_stage: Optional[int], plan_status: Optional[str]) -> bool:
+    """仅对仍处在下单/执行阶段的计划做券商对账。
+
+    已进入 S12+ 的 post-trade 流水线应交由 PostTradePipelineService 推进，
+    券商对账不能再把它们拖回 S12，否则就会出现 S12/S13 来回横跳。
+    """
+    if plan_stage in _BROKER_RECONCILE_ACTIVE_STAGES:
+        return True
+    if plan_stage is None and plan_status in {"ACTIVE", "AUTO_EXECUTING", "EXECUTED"}:
+        return True
+    return False
+
+
+def _should_apply_stage_update(current_stage: Optional[int], new_stage: Optional[int]) -> bool:
+    """防止券商对账将已经推进的 post-trade 阶段回退。"""
+    if new_stage is None:
+        return False
+    if current_stage is None:
+        return True
+    if current_stage >= _POST_TRADE_STAGE_START and new_stage < current_stage:
+        return False
+    return new_stage != current_stage
+
+
+def _extract_live_position_symbols(raw_positions: list[Any]) -> set[str]:
+    """从券商持仓列表中提取当前真实持仓 symbol 集合。"""
+    symbols: set[str] = set()
+    for pos in raw_positions:
+        if isinstance(pos, dict):
+            symbol = pos.get("symbol") or pos.get("ticker")
+            qty = pos.get("quantity") or pos.get("qty") or 0
+        else:
+            symbol = getattr(pos, "symbol", None) or getattr(pos, "ticker", None)
+            qty = getattr(pos, "quantity", None) or getattr(pos, "qty", None) or 0
+
+        try:
+            qty_val = float(qty or 0)
+        except (TypeError, ValueError):
+            qty_val = 0.0
+
+        if symbol and abs(qty_val) > 0:
+            symbols.add(str(symbol))
+    return symbols
+
+
+def _derive_reconciled_stage(signal: TradingSignal, live_position_symbols: set[str]) -> tuple[Optional[int], Optional[str], Optional[str]]:
+    """根据最新信号状态与真实持仓推导计划阶段。"""
+    if signal.status == SignalStatus.EXECUTED:
+        if signal.symbol in live_position_symbols:
+            return 9, "EXECUTED", "HELD"
+        return 12, "EXECUTED", "CLOSED"
+    if signal.status == SignalStatus.CANCELLED:
+        return 16, "REVOKED", "CLOSED"
+    if signal.status == SignalStatus.REJECTED:
+        return 16, "FAILED", "CLOSED"
+    return None, None, None
+
+
 async def reconcile_broker_order_status(
     session: AsyncSession,
     account_id: Optional[str] = None,
@@ -105,19 +167,20 @@ async def reconcile_broker_order_status(
         from app.models.trading_plan import TradingPlan
         from app.models.fsm_transition_log import FsmTransitionLog
 
-        # 查寻所有处于活跃或异常中间态的计划 (S7, S8, S12)
+        try:
+            raw_positions = await broker.list_underlying_positions(real_account_id)
+        except Exception:
+            raw_positions = []
+        live_position_symbols = _extract_live_position_symbols(list(raw_positions or []))
+
+        # 只处理仍在下单/执行链路中的计划；S12+ 由 post-trade pipeline 负责推进。
         plans_res = await session.execute(
-            select(TradingPlan).where(
-                and_(
-                    TradingPlan.account_id == real_account_id,
-                    or_(
-                        TradingPlan.pipeline_stage.in_([7, 8, 12]),
-                        TradingPlan.plan_status.in_(["ACTIVE", "EXECUTED", "AUTO_EXECUTING"])
-                    )
-                )
-            )
+            select(TradingPlan).where(TradingPlan.account_id == real_account_id)
         )
         for plan in plans_res.scalars().all():
+            if not _is_plan_reconcile_candidate(plan.pipeline_stage, plan.plan_status):
+                continue
+
             # 查找该计划发出的最新信号
             sig_res = await session.execute(
                 select(TradingSignal)
@@ -130,38 +193,38 @@ async def reconcile_broker_order_status(
             sig = sig_res.scalar_one_or_none()
             if not sig: continue
 
-            new_stage = None
-            new_status = None
-            if sig.status == SignalStatus.EXECUTED:
-                new_stage = 12  # 持仓监控
-                new_status = "EXECUTED"
-            elif sig.status == SignalStatus.CANCELLED:
-                new_stage = 16  # 已归档
-                new_status = "REVOKED"
-            elif sig.status == SignalStatus.REJECTED:
-                new_stage = 16  # 已归档
-                new_status = "FAILED"
-            elif sig.status == SignalStatus.VALIDATED:
-                # 依然在验证中但没有 order_id，可以维持原状或根据业务逻辑重置
-                pass
+            new_stage, new_status, new_position_fsm_state = _derive_reconciled_stage(
+                sig,
+                live_position_symbols,
+            )
 
-            if new_stage is not None and (new_stage != plan.pipeline_stage or new_status != plan.plan_status):
+            should_update_stage = _should_apply_stage_update(plan.pipeline_stage, new_stage)
+            should_update_status = new_status is not None and new_status != plan.plan_status
+            should_update_position_fsm = (
+                new_position_fsm_state is not None and new_position_fsm_state != plan.position_fsm_state
+            )
+
+            if should_update_stage or should_update_status or should_update_position_fsm:
                 old_stage = plan.pipeline_stage
-                plan.pipeline_stage = new_stage
-                plan.stage_entered_at = datetime.now(timezone.utc)
-                # 同步持仓 FSM 状态
-                plan.position_fsm_state = "CLOSED" if new_stage >= 12 else "ENTERING"
+                applied_stage: Optional[int] = None
+                if should_update_stage and new_stage is not None:
+                    applied_stage = new_stage
+                    plan.pipeline_stage = applied_stage
+                    plan.stage_entered_at = datetime.now(timezone.utc)
+                if new_position_fsm_state is not None:
+                    plan.position_fsm_state = new_position_fsm_state
                 if new_status:
                     plan.plan_status = new_status
                 
                 # 记录 FSM 日志
-                session.add(FsmTransitionLog(
-                    plan_id=plan.id,
-                    fsm_type="PLAN",
-                    from_state=f"STAGE_{old_stage}" if old_stage is not None else "UNKNOWN",
-                    to_state=f"STAGE_{new_stage}",
-                    trigger_reason="Broker status sync (Manual Cancel/Fill Sync)",
-                ))
+                if applied_stage is not None:
+                    session.add(FsmTransitionLog(
+                        plan_id=plan.id,
+                        fsm_type="PLAN",
+                        from_state=f"STAGE_{old_stage}" if old_stage is not None else "UNKNOWN",
+                        to_state=f"STAGE_{applied_stage}",
+                        trigger_reason="Broker status sync (Manual Cancel/Fill Sync)",
+                    ))
 
     await session.commit()
 

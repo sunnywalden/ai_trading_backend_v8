@@ -1,8 +1,13 @@
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+from sqlalchemy.orm import configure_mappers
 
 from app.services.autonomous_engine import AutonomousEngine
 from app.models.execution_intent import AutonomousExecutionIntent
+from app.models.trading_signal import TradingSignal  # noqa: F401
+from app.models.strategy import Strategy, StrategyRun  # noqa: F401
+
+configure_mappers()
 
 
 @pytest.mark.asyncio

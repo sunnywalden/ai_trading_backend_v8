@@ -172,6 +172,30 @@ async def get_autonomy_status(
     )
     pipeline = {row[0].value: row[1] for row in pipeline_result.fetchall()}
 
+    today_signal_rows = await session.execute(
+        select(TradingSignal)
+        .where(
+            and_(
+                TradingSignal.account_id == account_id,
+                TradingSignal.created_at >= today,
+            )
+        )
+    )
+    today_signals = today_signal_rows.scalars().all()
+    closing_signals = [
+        s for s in today_signals
+        if s.signal_type.value in ("EXIT", "REDUCE")
+        or (isinstance(s.extra_metadata, dict) and bool(s.extra_metadata.get("force_exit")))
+    ]
+    force_exit_signals = [
+        s for s in closing_signals
+        if isinstance(s.extra_metadata, dict) and bool(s.extra_metadata.get("force_exit"))
+    ]
+    closing_failed = [
+        s for s in closing_signals
+        if s.status in {SignalStatus.REJECTED, SignalStatus.FAILED}
+    ]
+
     # 熔断：若今日已执行失败超过 3 笔，视为熔断触发
     fail_result = await session.execute(
         select(func.count(TradingSignal.id)).where(
@@ -238,6 +262,12 @@ async def get_autonomy_status(
         "failed_trades_today": failed_today,
         "cooldown_symbols": cooldown_symbols,
         "cooldown_minutes": cooldown_min,
+        "closing_flow": {
+            "closing_signals_today": len(closing_signals),
+            "fast_path_signals_today": len(closing_signals),
+            "force_exit_signals_today": len(force_exit_signals),
+            "closing_failures_today": len(closing_failed),
+        },
     }
 
 
@@ -340,6 +370,25 @@ async def get_audit_log(
                     if r.order_id and str(r.order_id) in signal_map
                     else None
                 ),
+                "execution_path": (
+                    ((r.risk_gate_detail or {}).get("execution_path"))
+                    or (((signal_map[str(r.order_id)].extra_metadata if r.order_id and str(r.order_id) in signal_map else {}) or {}).get("execution_path"))
+                    or "STANDARD"
+                ),
+                "closing_intent": bool(
+                    ((r.risk_gate_detail or {}).get("closing_intent"))
+                    or (((signal_map[str(r.order_id)].extra_metadata if r.order_id and str(r.order_id) in signal_map else {}) or {}).get("closing_intent"))
+                ),
+                "force_exit": bool(
+                    ((r.risk_gate_detail or {}).get("force_exit"))
+                    or (((signal_map[str(r.order_id)].extra_metadata if r.order_id and str(r.order_id) in signal_map else {}) or {}).get("force_exit"))
+                ),
+                "bypass_reason": (
+                    (r.risk_gate_detail or {}).get("bypass_reason")
+                    or (((signal_map[str(r.order_id)].extra_metadata if r.order_id and str(r.order_id) in signal_map else {}) or {}).get("bypass_reason"))
+                ),
+                "risk_gate_detail": r.risk_gate_detail,
+                "circuit_breaker_triggered": bool(r.circuit_breaker_triggered),
             }
             for r in rows
         ],
@@ -438,6 +487,23 @@ async def get_signal_pipeline(
                 "priority": s.priority,
                 "notes": intent_map.get(s.signal_id) or s.notes,
                 "order_id": s.order_id,
+                "execution_path": (
+                    (s.extra_metadata or {}).get("execution_path")
+                    if isinstance(s.extra_metadata, dict)
+                    else "STANDARD"
+                ) or "STANDARD",
+                "closing_intent": bool(
+                    s.signal_type.value in ("EXIT", "REDUCE")
+                    or (isinstance(s.extra_metadata, dict) and (s.extra_metadata or {}).get("closing_intent"))
+                ),
+                "force_exit": bool(
+                    isinstance(s.extra_metadata, dict) and (s.extra_metadata or {}).get("force_exit")
+                ),
+                "bypass_reason": (
+                    (s.extra_metadata or {}).get("bypass_reason")
+                    if isinstance(s.extra_metadata, dict)
+                    else None
+                ) or intent_map.get(s.signal_id),
                 "strategy_id": s.strategy_id,
                 "strategy_run_id": s.strategy_run_id,
                 "strategy_name": (

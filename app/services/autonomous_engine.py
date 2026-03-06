@@ -75,6 +75,56 @@ class AutonomousEngine:
             return "ai-hold"
         return "unknown-noop"
 
+    @staticmethod
+    def _signal_extra_metadata(signal: dict) -> dict[str, Any]:
+        meta = signal.get("extra_metadata")
+        return meta if isinstance(meta, dict) else {}
+
+    def _is_force_exit(self, signal: dict) -> bool:
+        meta = self._signal_extra_metadata(signal)
+        return bool(meta.get("force_exit"))
+
+    def _is_closing_intent(self, signal: dict, decision: dict, force_exit: bool = False) -> bool:
+        if force_exit:
+            return True
+        signal_type = str(signal.get("signal_type") or "").upper()
+        action = str(decision.get("action") or "").upper()
+        meta = self._signal_extra_metadata(signal)
+        meta_intent = str(meta.get("closing_intent") or "").upper()
+        return (
+            signal_type in {"EXIT", "REDUCE", "STOP_LOSS_EXIT", "TAKE_PROFIT_EXIT", "FORCE_EXIT"}
+            or action in {"SELL", "REDUCE", "EXIT", "BUY_TO_COVER"}
+            or meta_intent in {"EXIT", "REDUCE", "STOP_LOSS_EXIT", "TAKE_PROFIT_EXIT", "FORCE_EXIT"}
+        )
+
+    def _resolve_execution_path(self, is_closing: bool, is_force_exit: bool) -> str:
+        if is_force_exit:
+            return "FORCE_EXIT"
+        if is_closing:
+            return "FAST_CLOSE"
+        return "STANDARD"
+
+    def _annotate_gate_details(
+        self,
+        gate: Any,
+        *,
+        execution_path: str,
+        is_closing: bool,
+        is_force_exit: bool,
+        bypass_reason: Optional[str] = None,
+    ) -> None:
+        if gate is None:
+            return
+        details = getattr(gate, "details", None)
+        if not isinstance(details, dict):
+            details = {}
+            setattr(gate, "details", details)
+        details["execution_path"] = execution_path
+        details["closing_intent"] = is_closing
+        details["force_exit"] = is_force_exit
+        if bypass_reason:
+            details["bypass_reason"] = bypass_reason
+
     async def restore_state(self) -> None:
         """应用启动时从 Redis 恢复暂停状态，防止重启丢失互斥状态。"""
         try:
@@ -153,81 +203,96 @@ class AutonomousEngine:
         daily_signals_executed = 0  # V10.4.2: 当日已通过漏斗并成功执行的信号数
         for signal in signals:
             decision = await self._ai_decide(signal, current_positions, current_equity)
+            signal_meta = self._signal_extra_metadata(signal)
+            is_force_exit = self._is_force_exit(signal)
+            is_closing = self._is_closing_intent(signal, decision, is_force_exit)
+            execution_path = self._resolve_execution_path(is_closing, is_force_exit)
+            decision["execution_path"] = execution_path
 
             # ─────────────────────────────────────────────────────────────────
             # V10.4.2: 信号精英化漏斗 — RiskGate 前置的多维度品质过滤
             # ─────────────────────────────────────────────────────────────────
             _funnel_passed = True  # 默认通过（漏斗模块异常时不阻断主流程）
             try:
-                from app.services.signal_quality_funnel import (
-                    signal_quality_funnel, SignalFunnelInput,
-                )
-                _dims: list = signal.get("dimensions") or []
-
-                def _dim_dir(name: str) -> int:
-                    for _d in _dims:
-                        if isinstance(_d, dict) and _d.get("name") == name:
-                            return int(_d.get("direction", 0))
-                    return 0
-
-                def _dim_score(name: str) -> float:
-                    for _d in _dims:
-                        if isinstance(_d, dict) and _d.get("name") == name:
-                            return float(_d.get("score", 0.5))
-                    return 0.5
-
-                _action = str(decision.get("action", "HOLD")).upper()
-                _sq_dir = "LONG" if _action == "BUY" else ("SHORT" if _action == "SELL" else "HOLD")
-                _sq_conf = float(
-                    signal.get("confidence") or signal.get("fused_confidence") or 0.0
-                )
-                # 兼容 0-1 和 0-100 两种置信度格式
-                _composite = _sq_conf * 100 if _sq_conf <= 1.0 else _sq_conf
-
-                _funnel_input = SignalFunnelInput(
-                    signal_id                     = signal.get("id"),
-                    symbol                        = str(decision.get("symbol") or signal.get("symbol") or ""),
-                    direction                     = _sq_dir,
-                    regime                        = regime_at_decision or "SIDEWAYS",
-                    composite_score               = _composite,
-                    aligned_count                 = int(signal.get("aligned_count") or 0),
-                    aligned_dims                  = list(signal.get("aligned_dims") or []),
-                    opposing_dims                 = list(signal.get("opposing_dims") or []),
-                    tech_direction                = _dim_dir("technical"),
-                    fundamental_direction         = _dim_dir("fundamental"),
-                    macro_score                   = _dim_score("macro"),
-                    options_score                 = _dim_score("options"),
-                    adv_usd                       = float(signal.get("adv_usd") or 5_000_000),
-                    market_cap                    = float(signal.get("market_cap") or 5_000_000_000),
-                    max_correlation_with_existing = 0.0,  # 后续可接入相关性矩阵
-                    historical_ic                 = signal.get("historical_ic"),
-                    timing_quality                = signal.get("timing_quality"),
-                )
-                _funnel_decision = await signal_quality_funnel.evaluate(
-                    signal                  = _funnel_input,
-                    db                      = db,
-                    current_positions_count = len(current_positions),
-                    daily_signals_executed  = daily_signals_executed,
-                )
-                if not _funnel_decision.passed:
-                    _funnel_passed = False
-                    _reject_reason = (
-                        f"quality-funnel(L{_funnel_decision.rejected_at_layer},"
-                        f"{_funnel_decision.rejection_reason})"
-                    )
+                if is_closing:
                     logger.info(
-                        f"[AutonomousEngine] Signal {signal['id']} blocked by quality funnel: "
-                        f"{_reject_reason}"
+                        "[AutonomousEngine] Closing signal %s (%s) bypassing quality funnel via %s",
+                        signal.get("id"),
+                        signal.get("signal_type"),
+                        execution_path,
                     )
-                    await self._update_signal_status(db, signal["id"], _SS.REJECTED)
-                    results.append({
-                        "signal_id":           signal["id"],
-                        "decision":            decision,
-                        "gate_passed":         False,
-                        "order_id":            None,
-                        "execution_intent_id": None,
-                        "reason":              _reject_reason,
-                    })
+                else:
+                    from app.services.signal_quality_funnel import (
+                        signal_quality_funnel, SignalFunnelInput,
+                    )
+                    _dims: list = signal.get("dimensions") or []
+
+                    def _dim_dir(name: str) -> int:
+                        for _d in _dims:
+                            if isinstance(_d, dict) and _d.get("name") == name:
+                                return int(_d.get("direction", 0))
+                        return 0
+
+                    def _dim_score(name: str) -> float:
+                        for _d in _dims:
+                            if isinstance(_d, dict) and _d.get("name") == name:
+                                return float(_d.get("score", 0.5))
+                        return 0.5
+
+                    _action = str(decision.get("action", "HOLD")).upper()
+                    _sq_dir = "LONG" if _action == "BUY" else ("SHORT" if _action == "SELL" else "HOLD")
+                    _sq_conf = float(
+                        signal.get("confidence") or signal.get("fused_confidence") or 0.0
+                    )
+                    # 兼容 0-1 和 0-100 两种置信度格式
+                    _composite = _sq_conf * 100 if _sq_conf <= 1.0 else _sq_conf
+
+                    _funnel_input = SignalFunnelInput(
+                        signal_id                     = signal.get("id"),
+                        signal_type                   = str(signal.get("signal_type") or "ENTRY").upper(),
+                        symbol                        = str(decision.get("symbol") or signal.get("symbol") or ""),
+                        direction                     = _sq_dir,
+                        regime                        = regime_at_decision or "SIDEWAYS",
+                        composite_score               = _composite,
+                        aligned_count                 = int(signal.get("aligned_count") or 0),
+                        aligned_dims                  = list(signal.get("aligned_dims") or []),
+                        opposing_dims                 = list(signal.get("opposing_dims") or []),
+                        tech_direction                = _dim_dir("technical"),
+                        fundamental_direction         = _dim_dir("fundamental"),
+                        macro_score                   = _dim_score("macro"),
+                        options_score                 = _dim_score("options"),
+                        adv_usd                       = float(signal.get("adv_usd") or 5_000_000),
+                        market_cap                    = float(signal.get("market_cap") or 5_000_000_000),
+                        max_correlation_with_existing = 0.0,  # 后续可接入相关性矩阵
+                        historical_ic                 = signal.get("historical_ic"),
+                        timing_quality                = signal.get("timing_quality"),
+                    )
+                    _funnel_decision = await signal_quality_funnel.evaluate(
+                        signal                  = _funnel_input,
+                        db                      = db,
+                        current_positions_count = len(current_positions),
+                        daily_signals_executed  = daily_signals_executed,
+                    )
+                    if not _funnel_decision.passed:
+                        _funnel_passed = False
+                        _reject_reason = (
+                            f"quality-funnel(L{_funnel_decision.rejected_at_layer},"
+                            f"{_funnel_decision.rejection_reason})"
+                        )
+                        logger.info(
+                            f"[AutonomousEngine] Signal {signal['id']} blocked by quality funnel: "
+                            f"{_reject_reason}"
+                        )
+                        await self._update_signal_status(db, signal["id"], _SS.REJECTED)
+                        results.append({
+                            "signal_id":           signal["id"],
+                            "decision":            decision,
+                            "gate_passed":         False,
+                            "order_id":            None,
+                            "execution_intent_id": None,
+                            "execution_path":      execution_path,
+                            "reason":              _reject_reason,
+                        })
             except Exception as _sq_err:
                 logger.warning(
                     f"[AutonomousEngine] Signal quality funnel error (non-fatal, will proceed): {_sq_err}"
@@ -246,13 +311,21 @@ class AutonomousEngine:
                 current_positions=current_positions,
                 daily_trades_today=daily_trades,
                 daily_realized_pnl=daily_pnl,
+                signal_intent=(signal_meta.get("closing_intent") or signal.get("signal_type") or ("EXIT" if is_closing else "OPEN")),
+            )
+            self._annotate_gate_details(
+                gate,
+                execution_path=execution_path,
+                is_closing=is_closing,
+                is_force_exit=is_force_exit,
+                bypass_reason=("force_exit" if is_force_exit else signal_meta.get("closing_intent") if is_closing else None),
             )
 
             order_id: Optional[str] = None
             execution_intent_id: Optional[str] = None
             circuit_breaker = gate.circuit_breaker
 
-            if gate.circuit_breaker:
+            if gate.circuit_breaker and not gate.passed:
                 logger.critical(f"[AutonomousEngine] Circuit breaker triggered for {account_id}!")
                 execution_intent_id = await self._create_execution_intent(
                     db=db,
@@ -300,6 +373,7 @@ class AutonomousEngine:
                             "gate_passed": True,
                             "order_id": None,
                             "execution_intent_id": execution_intent_id,
+                            "execution_path": execution_path,
                             "reason": skip_reason,
                         }
                     )
@@ -311,7 +385,7 @@ class AutonomousEngine:
                     signal=signal,
                     decision=decision,
                     status="PENDING",
-                    reason="accepted-by-risk-gate",
+                    reason="force-exit-priority-path" if is_force_exit else ("closing-fast-path" if is_closing else "accepted-by-risk-gate"),
                 )
                 if not execution_intent_id:
                     await self._update_signal_status(db, signal["id"], _SS.REJECTED)
@@ -325,14 +399,24 @@ class AutonomousEngine:
                             "gate_passed": True,
                             "order_id": None,
                             "execution_intent_id": None,
+                            "execution_path": execution_path,
                             "reason": "duplicate-execution-intent",
                         }
                     )
                     continue
 
                 # 幂等防护：避免短时间内对同一 symbol 重复自动下单
-                cooldown_min = int(getattr(settings, "AUTONOMOUS_ORDER_COOLDOWN_MINUTES", 120) or 120)
-                if await self._has_recent_autonomous_execution(
+                cooldown_min = 0
+                if not is_force_exit:
+                    cooldown_min = int(
+                        getattr(
+                            settings,
+                            "EXIT_ORDER_COOLDOWN_MINUTES" if is_closing else "AUTONOMOUS_ORDER_COOLDOWN_MINUTES",
+                            5 if is_closing else 120,
+                        )
+                        or (5 if is_closing else 120)
+                    )
+                if cooldown_min > 0 and await self._has_recent_autonomous_execution(
                     db=db,
                     account_id=account_id,
                     symbol=str(decision.get("symbol") or ""),
@@ -351,7 +435,10 @@ class AutonomousEngine:
                         f"{decision.get('symbol')} {str(decision.get('action') or '').upper()} "
                         f"within {cooldown_min}m, signal={signal['id']}"
                     )
-                    _cd_decision = dict(decision, reasoning=f"[冷却保护] {cooldown_min}分钟内已执行同标的同方向订单，跳过本次下单")
+                    _cd_decision = dict(
+                        decision,
+                        reasoning=f"[冷却保护] {cooldown_min}分钟内已执行同标的同方向订单，跳过本次下单",
+                    )
                     try:
                         await self._write_audit_log(
                             db, account_id, level, _cd_decision, gate, None, False,
@@ -367,52 +454,73 @@ class AutonomousEngine:
                             "gate_passed": True,
                             "order_id": None,
                             "execution_intent_id": execution_intent_id,
+                            "execution_path": execution_path,
                             "reason": f"duplicate-order cooldown({cooldown_min}m)",
                         }
                     )
                     continue
 
                 # 并发防护（Redis 原子锁）：防止相邻任务/手动多开导致同标的同方向同时下单
-                lock_seconds = int(getattr(settings, "AUTONOMOUS_ORDER_LOCK_SECONDS", 180) or 180)
-                lock_key = await self._acquire_symbol_order_lock(
-                    account_id=account_id,
-                    symbol=str(decision.get("symbol") or ""),
-                    direction=str(decision.get("action") or "").upper(),
-                    lock_seconds=lock_seconds,
-                )
-                if not lock_key:
-                    await self._update_signal_status(db, signal["id"], _SS.REJECTED)
-                    await self._update_execution_intent(
-                        db,
-                        execution_intent_id,
-                        status="REJECTED",
-                        reason=f"redis-order-lock({lock_seconds}s)",
-                    )
-                    logger.warning(
-                        f"[AutonomousEngine] Redis order lock hit: "
-                        f"{decision.get('symbol')} {str(decision.get('action') or '').upper()} "
-                        f"within {lock_seconds}s, signal={signal['id']}"
-                    )
-                    _lock_decision = dict(decision, reasoning=f"[并发锁] {lock_seconds}秒内已有相同标的同方向任务正在处理，跳过并发下单")
-                    try:
-                        await self._write_audit_log(
-                            db, account_id, level, _lock_decision, gate, None, False,
-                            regime_at_decision=regime_at_decision,
-                            regime_confidence=regime_confidence,
+                lock_key: Optional[str] = None
+                lock_seconds = 0
+                if not is_force_exit:
+                    lock_seconds = int(
+                        getattr(
+                            settings,
+                            "EXIT_ORDER_LOCK_SECONDS" if is_closing else "AUTONOMOUS_ORDER_LOCK_SECONDS",
+                            30 if is_closing else 180,
                         )
-                    except Exception:
-                        pass
-                    results.append(
-                        {
-                            "signal_id": signal["id"],
-                            "decision": decision,
-                            "gate_passed": True,
-                            "order_id": None,
-                            "execution_intent_id": execution_intent_id,
-                            "reason": f"redis-order-lock({lock_seconds}s)",
-                        }
+                        or (30 if is_closing else 180)
                     )
-                    continue
+                    lock_key = await self._acquire_symbol_order_lock(
+                        account_id=account_id,
+                        symbol=str(decision.get("symbol") or ""),
+                        direction=str(decision.get("action") or "").upper(),
+                        lock_seconds=lock_seconds,
+                    )
+                else:
+                    logger.warning(
+                        "[AutonomousEngine] Force exit bypassing cooldown+redis lock for signal=%s symbol=%s",
+                        signal.get("id"),
+                        decision.get("symbol"),
+                    )
+                if not lock_key:
+                    if is_force_exit:
+                        lock_key = None
+                    else:
+                        await self._update_signal_status(db, signal["id"], _SS.REJECTED)
+                        await self._update_execution_intent(
+                            db,
+                            execution_intent_id,
+                            status="REJECTED",
+                            reason=f"redis-order-lock({lock_seconds}s)",
+                        )
+                        logger.warning(
+                            f"[AutonomousEngine] Redis order lock hit: "
+                            f"{decision.get('symbol')} {str(decision.get('action') or '').upper()} "
+                            f"within {lock_seconds}s, signal={signal['id']}"
+                        )
+                        _lock_decision = dict(decision, reasoning=f"[并发锁] {lock_seconds}秒内已有相同标的同方向任务正在处理，跳过并发下单")
+                        try:
+                            await self._write_audit_log(
+                                db, account_id, level, _lock_decision, gate, None, False,
+                                regime_at_decision=regime_at_decision,
+                                regime_confidence=regime_confidence,
+                            )
+                        except Exception:
+                            pass
+                        results.append(
+                            {
+                                "signal_id": signal["id"],
+                                "decision": decision,
+                                "gate_passed": True,
+                                "order_id": None,
+                                "execution_intent_id": execution_intent_id,
+                                "execution_path": execution_path,
+                                "reason": f"redis-order-lock({lock_seconds}s)",
+                            }
+                        )
+                        continue
 
                 if level == "ADVISORY":
                     await self._notify_suggestion(account_id, decision)
@@ -443,7 +551,7 @@ class AutonomousEngine:
                             db,
                             execution_intent_id,
                             status="SUCCESS",
-                            reason="order-submitted",
+                            reason="force-exit-submitted" if is_force_exit else ("closing-order-submitted" if is_closing else "order-submitted"),
                             order_id=order_id,
                         )
                         if level == "SEMI":
@@ -487,6 +595,7 @@ class AutonomousEngine:
                 "gate_passed": gate.passed,
                 "order_id": order_id,
                 "execution_intent_id": execution_intent_id,
+                "execution_path": execution_path,
                 "circuit_breaker": circuit_breaker,
                 "reason": gate.reason,
             })
@@ -1206,9 +1315,11 @@ class AutonomousEngine:
                     "quantity_mode": str(getattr(r, "quantity_mode", None) or "PCT_EQUITY").upper(),
                     "quantity_value": float(getattr(r, "quantity_value", None) or r.suggested_quantity or 0),
                     "quantity": float(r.suggested_quantity or 0),
+                    "suggested_price": float(r.suggested_price or 0) if r.suggested_price is not None else None,
                     "strategy": str(r.signal_source.value) if r.signal_source else "STRATEGY",
                     "status": r.status.value,
                     "notes": r.notes,
+                    "extra_metadata": r.extra_metadata if isinstance(r.extra_metadata, dict) else {},
                 }
                 for r in rows
             ]

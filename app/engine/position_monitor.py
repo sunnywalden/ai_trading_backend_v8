@@ -134,6 +134,7 @@ class PositionMonitor:
                         account_id=account_id,
                         symbol=symbol,
                         qty=qty,
+                        avg_cost=avg_cost,
                         current_price=current_price,
                         exit_reason=exit_reason,
                         unrealized_pnl_pct=unrealized_pnl_pct,
@@ -274,6 +275,7 @@ class PositionMonitor:
         account_id: str,
         symbol: str,
         qty: float,
+        avg_cost: float,
         current_price: float,
         exit_reason: str,
         unrealized_pnl_pct: float,
@@ -314,9 +316,17 @@ class PositionMonitor:
             priority=priority,
             expired_at=datetime.utcnow() + timedelta(hours=4),  # EXIT 信号 4 小时有效
             extra_metadata={
+                "force_exit": True,
+                "closing_intent": "STOP_LOSS_EXIT" if exit_reason == PositionExitReason.STOP_LOSS else "EXIT",
+                "execution_path": "FORCE_EXIT",
                 "exit_reason": exit_reason,
                 "unrealized_pnl_pct": round(unrealized_pnl_pct, 4),
                 "current_price": current_price,
+                "current_position": {
+                    "qty": abs(qty),
+                    "avg_cost": avg_cost,
+                    "price": current_price,
+                },
                 "trigger_threshold": (
                     -settings.POSITION_STOP_LOSS_PCT
                     if exit_reason == PositionExitReason.STOP_LOSS

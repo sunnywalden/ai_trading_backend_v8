@@ -40,6 +40,7 @@ class SignalFunnelInput:
     direction: str                   # "LONG" / "SHORT"
     regime:    str                   # 当前市场体制
     signal_id: Optional[int] = None
+    signal_type: str = "ENTRY"      # ENTRY / ADD / REDUCE / EXIT / STOP_LOSS_EXIT
 
     # ── 六维评分（来自 SignalFusionEngine）──
     composite_score:       float = 0.5     # 0-1
@@ -132,6 +133,7 @@ class SignalQualityFunnel:
             concurrent_positions = current_positions_count,
             daily_signals_used   = daily_signals_executed,
         )
+        is_closing = str(signal.signal_type or "ENTRY").upper() in {"REDUCE", "EXIT", "STOP_LOSS_EXIT", "TAKE_PROFIT_EXIT", "FORCE_EXIT"}
 
         # ── Layer 0: 宇宙过滤 ───────────────────────────────────────────────
         reject = self._layer0_universe(signal, cfg)
@@ -156,6 +158,7 @@ class SignalQualityFunnel:
             signal, regime_cfg,
             current_positions_count,
             daily_signals_executed,
+            is_closing=is_closing,
         )
         if reject:
             decision.rejected_at_layer = 2
@@ -267,10 +270,14 @@ class SignalQualityFunnel:
         regime_cfg: dict,
         current_positions: int,
         daily_executed: int,
+        is_closing: bool = False,
     ) -> Optional[tuple[str, str]]:
         max_pos   = regime_cfg.get("MAX_CONCURRENT_POSITIONS", 6)
         max_daily = regime_cfg.get("MAX_DAILY_SIGNALS", 5)
         max_corr  = regime_cfg.get("MAX_POSITION_CORRELATION", 0.70)
+
+        if is_closing:
+            return None
 
         if current_positions >= max_pos:
             return (

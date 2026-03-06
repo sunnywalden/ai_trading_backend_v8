@@ -6,7 +6,8 @@
 2. 根据信号类型和持仓状态过滤无效信号
 3. 提供详细的过滤统计和原因
 """
-from typing import List, Optional, Dict, Tuple
+import logging
+from typing import Any, List, Optional, Dict, Tuple, cast
 from dataclasses import dataclass
 from collections import defaultdict
 from datetime import datetime
@@ -17,6 +18,8 @@ from app.models.trading_signal import TradingSignal, SignalType, SignalStatus
 from app.broker.factory import make_option_broker_client
 from app.services.account_service import AccountService
 from app.providers.market_data_provider import MarketDataProvider
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -46,7 +49,7 @@ class SignalPositionFilter:
         except Exception as e:
             print(f"初始化broker失败: {e}")
             self.broker = None
-        self.account_svc = AccountService(session, self.broker)
+        self.account_svc = AccountService(session, cast(Any, self.broker))
         self.market_provider = MarketDataProvider()
     
     async def filter_signals_with_positions(
@@ -90,7 +93,7 @@ class SignalPositionFilter:
             filter_result = self._filter_single_signal(signal, position_map)
             
             # --- 3.2 港股碎股/LotSize过滤逻辑 ---
-            if filter_result.passed and signal.symbol.endswith(".HK"):
+            if filter_result.passed and signal.symbol.endswith(".HK") and signal.signal_type in {SignalType.ENTRY, SignalType.ADD}:
                 hk_lot_result = await self._check_hk_lot_size(signal, account_equity)
                 if not hk_lot_result.passed:
                     filter_result = hk_lot_result
@@ -249,19 +252,20 @@ class SignalPositionFilter:
             return FilterResult(passed=True)
         
         # 多头开仓：检查是否已有足够多头
+        suggested_qty = float(signal.suggested_quantity or 0)
         if signal.direction == "LONG":
-            if current_position.qty >= signal.suggested_quantity:
+            if current_position.qty >= suggested_qty > 0:
                 return FilterResult(
                     passed=False,
-                    reason=f"已有多头持仓{current_position.qty:.0f}，大于等于建议数量{signal.suggested_quantity:.0f}"
+                    reason=f"已有多头持仓{current_position.qty:.0f}，大于等于建议数量{suggested_qty:.0f}"
                 )
         
         # 空头开仓：检查是否已有足够空头
         elif signal.direction == "SHORT":
-            if current_position.qty <= -signal.suggested_quantity:
+            if suggested_qty > 0 and current_position.qty <= -suggested_qty:
                 return FilterResult(
                     passed=False,
-                    reason=f"已有空头持仓{abs(current_position.qty):.0f}，大于等于建议数量{signal.suggested_quantity:.0f}"
+                    reason=f"已有空头持仓{abs(current_position.qty):.0f}，大于等于建议数量{suggested_qty:.0f}"
                 )
         
         return FilterResult(passed=True)
@@ -337,12 +341,42 @@ class SignalPositionFilter:
                 passed=False,
                 reason="无持仓，无法减仓"
             )
-        
-        # 检查减仓数量是否超过持仓
-        if abs(current_position.qty) < signal.suggested_quantity:
+
+        if signal.direction == "LONG" and current_position.qty <= 0:
             return FilterResult(
                 passed=False,
-                reason=f"减仓数量{signal.suggested_quantity:.0f}超过持仓{abs(current_position.qty):.0f}（可转为平仓）"
+                reason="当前持有空仓，无法减多仓"
+            )
+
+        if signal.direction == "SHORT" and current_position.qty >= 0:
+            return FilterResult(
+                passed=False,
+                reason="当前持有多仓，无法减空仓"
+            )
+        
+        # 检查减仓数量是否超过持仓
+        requested_qty = float(signal.suggested_quantity or 0)
+        if requested_qty <= 0:
+            requested_qty = abs(current_position.qty)
+
+        if abs(current_position.qty) < requested_qty:
+            original_reduce_qty = requested_qty
+            adjusted_qty = abs(current_position.qty)
+            signal.suggested_quantity = adjusted_qty
+            signal.quantity_mode = "ABS_SHARES"
+            signal.quantity_value = adjusted_qty
+            signal.signal_type = SignalType.EXIT
+            if not signal.extra_metadata:
+                signal.extra_metadata = {}
+            signal.extra_metadata["auto_adjusted_to_exit"] = True
+            signal.extra_metadata["original_reduce_qty"] = original_reduce_qty
+            signal.extra_metadata["closing_intent"] = "EXIT"
+            signal.extra_metadata["execution_path"] = "FAST_CLOSE"
+            logger.warning(
+                "[SignalPositionFilter] %s reduce qty %.4f > held %.4f, auto-adjusted to EXIT",
+                signal.symbol,
+                original_reduce_qty,
+                adjusted_qty,
             )
         
         return FilterResult(passed=True)
