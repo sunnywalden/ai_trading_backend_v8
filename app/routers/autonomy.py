@@ -758,6 +758,38 @@ async def trigger_rebalance_scan(
     return {"success": True, "result": result}
 
 
+@router.post("/trigger-capacity-guard")
+async def trigger_capacity_guard(
+    session: AsyncSession = Depends(get_session),
+    current_user: str = Depends(get_current_user),
+):
+    """手动触发一次容量守卫扫描（超出并发持仓上限时自动生成 EXIT 信号）。"""
+    from app.engine.position_rebalance_monitor import PositionRebalanceMonitor
+    from app.services.regime_classifier import RegimeClassifier
+    from app.services.signal_quality_config import get_regime_adjusted_config, get_signal_quality_config
+
+    account_id = await _resolve_account_id()
+    current_regime = await RegimeClassifier.get_current_regime(session)
+    regime_name = current_regime.regime if current_regime else None
+    sq_cfg = get_signal_quality_config()
+    regime_cfg = get_regime_adjusted_config(regime_name) if regime_name else {}
+    max_positions = int(regime_cfg.get("MAX_CONCURRENT_POSITIONS", sq_cfg.MAX_CONCURRENT_POSITIONS))
+
+    monitor = PositionRebalanceMonitor(session)
+    result = await monitor.enforce_position_capacity(
+        account_id=account_id,
+        max_positions=max_positions,
+        force_refresh_scores=True,
+    )
+    return {
+        "success": True,
+        "account_id": account_id,
+        "regime": regime_name,
+        "max_positions": max_positions,
+        "result": result,
+    }
+
+
 @router.post("/trigger-decision-cycle")
 async def trigger_decision_cycle(
     rescue_queued: bool = True,
