@@ -1,15 +1,7 @@
-import asyncio
-import json
+"""兼容入口：脚本已归档到 archived/v10_4_3/。"""
 
-from app.models.db import SessionLocal
-from app.services.broker_order_sync_service import reconcile_broker_order_status
-
-
-async def main() -> None:
-    async with SessionLocal() as db:
-        result = await reconcile_broker_order_status(db)
-    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+from _run_archived import run_archived_script
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    run_archived_script("_tmp_run_broker_sync.py")
