@@ -103,6 +103,26 @@ _shutdown_in_progress = False
 _shutdown_cleanup_task: asyncio.Task | None = None
 
 
+def _task_origin(task: asyncio.Task) -> str:
+    try:
+        coro = task.get_coro()
+        code = getattr(coro, "cr_code", None)
+        if code is not None:
+            return str(getattr(code, "co_filename", "") or "")
+    except Exception:
+        pass
+    return ""
+
+
+def _is_app_owned_task(task: asyncio.Task) -> bool:
+    origin = _task_origin(task)
+    if not origin:
+        return False
+    workspace_app_root = "/Users/admin/IdeaProjects/ai_trading_backend_v8/app/"
+    workspace_scripts_root = "/Users/admin/IdeaProjects/ai_trading_backend_v8/scripts/"
+    return origin.startswith(workspace_app_root) or origin.startswith(workspace_scripts_root)
+
+
 def _track_startup_task(task: asyncio.Task) -> None:
     _tracked_startup_tasks.add(task)
 
@@ -144,15 +164,21 @@ async def _force_cancel_pending_tasks(delay: float = 2.0) -> None:
     for task in asyncio.all_tasks():
         if task is current or task.done():
             continue
+        if task is _shutdown_cleanup_task:
+            continue
+        if not _is_app_owned_task(task):
+            continue
         pending.append(task)
 
     if not pending:
         return
 
-    task_names = [task.get_name() for task in pending]
+    task_names = [f"{task.get_name()}@{_task_origin(task)}" for task in pending]
     logger.warning("[Shutdown] Force-cancelling pending tasks: %s", task_names)
     for task in pending:
         task.cancel()
+
+    await asyncio.gather(*pending, return_exceptions=True)
 
 
 def _begin_fast_shutdown(source: str) -> None:
@@ -451,7 +477,10 @@ async def lifespan(app: FastAPI):
     _begin_fast_shutdown("lifespan")
     await _cancel_tracked_startup_tasks()
     if _shutdown_cleanup_task is not None:
-        await asyncio.gather(_shutdown_cleanup_task, return_exceptions=True)
+        try:
+            await asyncio.shield(_shutdown_cleanup_task)
+        except asyncio.CancelledError:
+            logger.info("[Shutdown] Cleanup task cancelled during finalization")
     _restore_signal_handlers()
     
     if redis_client:

@@ -506,6 +506,7 @@ async def _build_data_flow_payload(db: AsyncSession, window_minutes: int) -> tup
     exceptions = lifecycle.exceptions
     snapshot = await situational_awareness_service.get_snapshot(db)
     now = _now()
+    has_active_pipeline = lifecycle.headline.active_intents > 0
 
     signal_ts = await _load_latest_timestamp(db, ["SELECT MAX(created_at) FROM trading_signals"])
     market_ts = await _load_latest_timestamp(db, [
@@ -515,6 +516,17 @@ async def _build_data_flow_payload(db: AsyncSession, window_minutes: int) -> tup
 
     signal_lag = (now - signal_ts).total_seconds() if signal_ts else None
     market_lag = (now - market_ts).total_seconds() if market_ts else None
+
+    signal_status = (
+        "HEALTHY"
+        if (not has_active_pipeline) or signal_lag is None or signal_lag <= 1800
+        else ("WARN" if signal_lag <= 3600 else "CRITICAL")
+    )
+    market_status = (
+        "HEALTHY"
+        if (not has_active_pipeline) or market_lag is None or market_lag <= 1800
+        else ("WARN" if market_lag <= 3600 else "CRITICAL")
+    )
 
     def _stage_node(stage_id: int, key: str, label: str, upstream: Iterable[str], downstream: Iterable[str]) -> DataFlowNodeStatus:
         metric = lifecycle_stage_map.get(stage_id)
@@ -546,15 +558,15 @@ async def _build_data_flow_payload(db: AsyncSession, window_minutes: int) -> tup
         _make_node(
             "signal_generation",
             "Signal Generation",
-            status="HEALTHY" if signal_lag is None or signal_lag <= 1800 else ("WARN" if signal_lag <= 3600 else "CRITICAL"),
+            status=signal_status,
             heartbeat_at=signal_ts,
             last_success_at=signal_ts,
-            lag_seconds=signal_lag,
+            lag_seconds=signal_lag if has_active_pipeline else 0.0,
             queue_depth=lifecycle_stage_map.get(1).active_count if lifecycle_stage_map.get(1) else 0,
             throughput_1m=float(lifecycle_stage_map.get(1).active_count or 0) if lifecycle_stage_map.get(1) else None,
             throughput_5m=float(lifecycle_stage_map.get(3).active_count or 0) if lifecycle_stage_map.get(3) else None,
-            last_error_code="SIGNAL_STALE" if signal_lag and signal_lag > 1800 else None,
-            last_error_message="信号生成长时间无更新" if signal_lag and signal_lag > 1800 else None,
+            last_error_code="SIGNAL_STALE" if has_active_pipeline and signal_lag and signal_lag > 1800 else None,
+            last_error_message="信号生成长时间无更新" if has_active_pipeline and signal_lag and signal_lag > 1800 else None,
             downstream_nodes=["portfolio_decision"],
         ),
         _stage_node(5, "portfolio_decision", "Portfolio Decision", ["signal_generation"], ["risk_gate"]),
@@ -567,15 +579,15 @@ async def _build_data_flow_payload(db: AsyncSession, window_minutes: int) -> tup
         _make_node(
             "market_data",
             "Market Data",
-            status="HEALTHY" if market_lag is None or market_lag <= 1800 else ("WARN" if market_lag <= 3600 else "CRITICAL"),
+            status=market_status,
             heartbeat_at=market_ts,
             last_success_at=market_ts,
-            lag_seconds=market_lag,
+            lag_seconds=market_lag if has_active_pipeline else 0.0,
             queue_depth=None,
             throughput_1m=None,
             throughput_5m=None,
-            last_error_code="MARKET_DATA_STALE" if market_lag and market_lag > 1800 else None,
-            last_error_message="市场数据长时间无更新" if market_lag and market_lag > 1800 else None,
+            last_error_code="MARKET_DATA_STALE" if has_active_pipeline and market_lag and market_lag > 1800 else None,
+            last_error_message="市场数据长时间无更新" if has_active_pipeline and market_lag and market_lag > 1800 else None,
             downstream_nodes=["regime_classification"],
         ),
         _make_node(
