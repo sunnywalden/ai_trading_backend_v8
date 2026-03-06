@@ -10,14 +10,16 @@ Endpoints:
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
 from app.models.db import get_session
+from app.models.trading_signal import SignalSource, SignalStatus, SignalType, TradingSignal
 from app.models.trading_plan import TradingPlan
 from app.services.regime_classifier import RegimeClassifier
 from app.services.signal_quality_config import (
@@ -179,6 +181,7 @@ async def get_funnel_stats(
     - effective_max_concurrent_positions: 当前体制下生效的最大并发仓位
     - current_regime: 当前体制
     - regime_confidence: 当前体制置信度
+    - capacity_guard: 最近容量守卫自动减仓动作摘要
     """
     stats = await signal_audit_log_service.get_funnel_stats(db, since_days=since_days)
 
@@ -203,6 +206,56 @@ async def get_funnel_stats(
     )
     stats["current_regime"] = regime_name
     stats["regime_confidence"] = current_regime.confidence if current_regime else None
+
+    guard_cutoff = datetime.now(timezone.utc) - timedelta(days=max(since_days, 7))
+    capacity_stmt = (
+        select(TradingSignal)
+        .where(
+            and_(
+                TradingSignal.signal_source == SignalSource.RISK_MGMT,
+                TradingSignal.signal_type == SignalType.EXIT,
+                TradingSignal.created_at >= guard_cutoff,
+            )
+        )
+        .order_by(desc(TradingSignal.created_at))
+        .limit(50)
+    )
+    capacity_rows = (await db.execute(capacity_stmt)).scalars().all()
+
+    capacity_actions = []
+    for row in capacity_rows:
+        meta = row.extra_metadata or {}
+        if not isinstance(meta, dict) or not meta.get("capacity_guard"):
+            continue
+        capacity_actions.append({
+            "signal_id": row.signal_id,
+            "symbol": row.symbol,
+            "status": row.status.value if hasattr(row.status, "value") else str(row.status),
+            "quantity": row.suggested_quantity,
+            "priority": row.priority,
+            "recommendation": meta.get("recommendation"),
+            "risk_level": meta.get("risk_level"),
+            "target_position": meta.get("target_position"),
+            "overflow": meta.get("capacity_guard_overflow"),
+            "target_max": meta.get("capacity_guard_target_max"),
+            "rank": meta.get("capacity_guard_rank"),
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+            "executed_at": row.executed_at.isoformat() if row.executed_at else None,
+            "notes": row.notes,
+        })
+
+    open_statuses = {
+        SignalStatus.GENERATED.value,
+        SignalStatus.VALIDATED.value,
+        SignalStatus.QUEUED.value,
+        SignalStatus.EXECUTING.value,
+    }
+    stats["capacity_guard"] = {
+        "recent_generated_count": len(capacity_actions),
+        "open_signal_count": sum(1 for item in capacity_actions if item["status"] in open_statuses),
+        "last_action_at": capacity_actions[0]["created_at"] if capacity_actions else None,
+        "recent_actions": capacity_actions[:8],
+    }
 
     return stats
 
