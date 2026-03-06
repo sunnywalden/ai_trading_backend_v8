@@ -13,6 +13,7 @@ from typing import Any
 
 from pydantic_settings import BaseSettings
 from pydantic import Field
+from app.core.config import ENV_FILE
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +160,13 @@ class SignalQualityConfig(BaseSettings):
         description="临时绕过密钥（极谨慎使用，仅 SUPERADMIN 权限）",
     )
 
-    model_config = {"env_prefix": "SQ_", "extra": "ignore"}
+    model_config = {
+        "env_prefix": "SQ_",
+        "extra": "ignore",
+        "env_file": str(ENV_FILE) if ENV_FILE else ".env",
+        "env_file_encoding": "utf-8",
+        "case_sensitive": True,
+    }
 
 
 # ── 运行时可变副本（由 API 热更新写入）────────────────────────────────────────────

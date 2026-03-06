@@ -71,6 +71,7 @@ from app.routers import ai_hub          # V10.3.3: AI 中枢 2.0
 from app.routers import war_room        # V10.3.3: 战情室
 from app.routers import market_universe # 市场全量池状态
 from app.routers import signal_quality  # V10.4.2: 信号精英化漏斗
+from app.routers import system_monitor  # V10.4.3: 系统监控增强
 # V9 routers
 from app.routers import dashboard as v9_dashboard
 from app.routers import dashboard_v2  # V10: 全新Dashboard
@@ -401,6 +402,7 @@ app.include_router(ai_hub.router, dependencies=[Depends(get_current_user)])     
 app.include_router(war_room.router, dependencies=[Depends(get_current_user)])             # V10.3.3: 战情室
 app.include_router(market_universe.router, prefix="/api/v1", dependencies=[Depends(get_current_user)])
 app.include_router(signal_quality.router, dependencies=[Depends(get_current_user)])       # V10.4.2: 信号精英化漏斗
+app.include_router(system_monitor.router, dependencies=[Depends(get_current_user)])       # V10.4.3: 系统监控增强
 
 
 @app.get("/health")
