@@ -213,6 +213,7 @@ class Settings(BaseSettings):
     POSITION_STOP_LOSS_PCT: float = 0.05    # 止损阈值：浮亏 >= 5% 触发 EXIT 信号
     POSITION_TAKE_PROFIT_PCT: float = 0.15  # 止盈阈值：浮盈 >= 15% 触发 EXIT 信号
     POSITION_MONITOR_INTERVAL_MINUTES: int = 15  # 持仓扫描间隔（分钟）
+    POSITION_CAPACITY_GUARD_INTERVAL_MINUTES: int = 15  # 超并发持仓主动降载扫描间隔（分钟）
 
     # 券商订单状态自动对账（用于回写手动撤单/成交结果）
     BROKER_ORDER_SYNC_INTERVAL_MINUTES: int = 10
