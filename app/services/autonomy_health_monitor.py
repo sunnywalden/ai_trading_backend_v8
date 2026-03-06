@@ -77,6 +77,17 @@ class AutonomyHealthMonitor:
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
 
+    async def _has_operational_plans(self, db) -> bool:
+        from sqlalchemy import text
+
+        row = (await db.execute(
+            text(
+                "SELECT COUNT(*) FROM trading_plan "
+                "WHERE UPPER(plan_status) IN ('AI_GENERATED','AUTO_EXECUTING','PENDING_CONFIRM','ACTIVE','PARTIAL')"
+            )
+        )).fetchone()
+        return bool(int(row[0] or 0)) if row else False
+
     # ── 检查 1: FSM 卡死检测 ────────────────────────────────────
     async def check_fsm_stuck(self, db) -> HealthCheckResult:
         name = "fsm_stuck"
@@ -128,6 +139,7 @@ class AutonomyHealthMonitor:
         name = "equity_snapshot_freshness"
         try:
             from sqlalchemy import text
+            operational_active = await self._has_operational_plans(db)
             row = (await db.execute(
                 text("SELECT MAX(created_at) FROM equity_snapshots")
             )).fetchone()
@@ -164,6 +176,13 @@ class AutonomyHealthMonitor:
                                          message="快照时间字段类型异常，已跳过该检查")
 
             age_min = (datetime.now(tz=timezone.utc) - latest_dt).total_seconds() / 60
+            if not operational_active:
+                return HealthCheckResult(
+                    name=name,
+                    status="OK",
+                    message=f"无运行中计划，快照检查降级（最新 {age_min:.1f}min 前）",
+                    detail={"age_minutes": age_min, "source": source, "degraded_due_to_idle": True},
+                )
             if age_min <= 5:
                 return HealthCheckResult(name=name, status="OK",
                                          message=f"快照 {age_min:.1f}min 前更新",

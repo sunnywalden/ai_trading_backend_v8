@@ -26,6 +26,14 @@ from app.schemas.lifecycle import (
 
 logger = logging.getLogger(__name__)
 
+_OPERATIONAL_PLAN_STATUSES = frozenset({
+    "AI_GENERATED",
+    "AUTO_EXECUTING",
+    "PENDING_CONFIRM",
+    "ACTIVE",
+})
+_EXECUTED_ACTIVE_STAGES = frozenset({8, 9, 10, 11, 12, 13, 14, 15})
+
 # ── Plan FSM 状态显示配置 ──────────────────────────────────────────────────────
 PLAN_FSM_META: dict[str, dict] = {
     "AI_GENERATED":    {"label": "AI已生成",   "color": "#a78bfa"},
@@ -110,11 +118,20 @@ class LifecycleService:
         """查询当前各 Pipeline 阶段的任务分布。"""
         now = datetime.now(timezone.utc)
 
-        # 查询所有未关闭计划（pipeline_stage 不为 None）
+        # 仅统计“仍在运行中的流水线”计划，避免历史终态/脏数据污染系统监控。
+        # - AI_GENERATED / AUTO_EXECUTING / PENDING_CONFIRM / ACTIVE：天然属于活跃链路
+        # - EXECUTED：仅当已经推进到 S8+（执行后/持仓监控/后处理）才视为流水线仍活跃
         stmt = select(TradingPlan).where(
             and_(
                 TradingPlan.pipeline_stage.isnot(None),
-                TradingPlan.plan_status.notin_(["CANCELLED", "EXPIRED", "FAILED"]),
+                TradingPlan.pipeline_stage < 16,
+                (
+                    TradingPlan.plan_status.in_(tuple(_OPERATIONAL_PLAN_STATUSES))
+                    | and_(
+                        TradingPlan.plan_status == "EXECUTED",
+                        TradingPlan.pipeline_stage.in_(tuple(_EXECUTED_ACTIVE_STAGES)),
+                    )
+                ),
             )
         )
         result = await db.execute(stmt)
