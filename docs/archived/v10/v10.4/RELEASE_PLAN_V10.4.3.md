@@ -586,7 +586,42 @@ async def test_force_exit_bypasses_all_guards():
 
 ---
 
-## 8. 后续演进方向（V10.4.4+ 的候选特性）
+## 8.A 补充需求：System Monitor 增强
+
+### 8.A.1 目标
+
+在 V10.4.3 的风险优先执行基础上，系统监控页需要从“基础健康面板”升级为“交易系统作战监控台”，新增三块能力：
+
+1. **交易生命周期状态监测**：能看到 17 阶段流水线、Plan/Position FSM、stuck intents、异常跳转和阶段耗时
+2. **系统主要数据流转详细状态**：能追踪 `DataHub → Signal → Decision → Risk → Execution → Monitoring → Attribution/Post-Mortem` 每一跳是否阻塞、延迟、报错
+3. **系统主要模块及细粒度服务状态**：能看到模块树与服务树的健康状态、降级状态和最近错误
+
+### 8.A.2 验收标准
+
+| 监控项 | 目标 | 最低验收口径 |
+|-------|------|-------------|
+| 生命周期监测 | `/system` 可展示 17 阶段分布 + FSM 分布 + stuck intents | 任一异常 intent 可在 2 次点击内定位到异常阶段 |
+| 数据流监测 | 关键节点显示 `heartbeat/lag/queue_depth/last_error` | 任一主链路节点异常时，1 个刷新周期内可见 |
+| 服务状态树 | 模块/服务状态统一为 `HEALTHY/WARN/CRITICAL/UNKNOWN` | 至少覆盖 DB / Redis / Tiger / LLM / Scheduler / WebSocket / Autonomy / Observability |
+
+### 8.A.3 建议接口
+
+```text
+GET /api/v1/system-monitor/lifecycle
+GET /api/v1/system-monitor/lifecycle/{intent_id}
+GET /api/v1/system-monitor/data-flows
+GET /api/v1/system-monitor/data-flows/{flow_name}
+GET /api/v1/system-monitor/services
+GET /api/v1/system-monitor/services/{service_name}
+```
+
+### 8.A.4 前端形态
+
+- 生命周期 Tab：阶段热力条 + FSM 分布 + 异常列表
+- 数据流 Tab：节点 DAG + 节点详情抽屉 + 最近失败样本
+- 服务状态 Tab：模块卡片 + 细粒度服务表格 + 仅异常筛选
+
+## 9. 后续演进方向（V10.4.4+ 的候选特性）
 
 1. **智能分批平仓**：大仓位平仓时自动分批（TWAP/VWAP），避免过大市场冲击
 2. **对冲式止损**：止损触发时，先买入对应 Put 做保护，再逐步平仓（避免急速抛售）

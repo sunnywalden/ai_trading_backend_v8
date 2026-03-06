@@ -4,7 +4,7 @@
 
 > **AI量化交易闭环系统** - 个人美港股智能交易平台  
 > 版本：V10.4.3（开发中）| 更新日期：2026-03-06  
-> 变更摘要（V10.4.3）：**风险降低优先执行（Risk-Reducing Priority Execution）**——新增减仓/平仓快速通道：`REDUCE/EXIT` 信号绕过开仓型质量漏斗、熔断期间允许风险降低类订单、减仓/平仓不占用 `MAX_DAILY_TRADES` / `MAX_DAILY_SIGNALS` 配额；`PositionMonitor` 止损/止盈信号写入 `force_exit=true`，`AutonomousEngine` 识别后跳过冷却与 Redis 并发锁直接执行；`SignalPositionFilter` 在减仓数量超持仓时自动升级为全平；`OrderExecutor` 以实际持仓数量为准执行 EXIT/REDUCE，并为港股退出保留 odd-lot 平仓能力；`AutonomyPage` 新增“减仓/平仓优先通道”状态卡与快速通道/强制出场徽章。  
+> 变更摘要（V10.4.3）：**风险降低优先执行（Risk-Reducing Priority Execution）**——新增减仓/平仓快速通道：`REDUCE/EXIT` 信号绕过开仓型质量漏斗、熔断期间允许风险降低类订单、减仓/平仓不占用 `MAX_DAILY_TRADES` / `MAX_DAILY_SIGNALS` 配额；`PositionMonitor` 止损/止盈信号写入 `force_exit=true`，`AutonomousEngine` 识别后跳过冷却与 Redis 并发锁直接执行；`SignalPositionFilter` 在减仓数量超持仓时自动升级为全平；`OrderExecutor` 以实际持仓数量为准执行 EXIT/REDUCE，并为港股退出保留 odd-lot 平仓能力；`AutonomyPage` 新增“减仓/平仓优先通道”状态卡与快速通道/强制出场徽章。**追加需求**：`/system` 系统监控页需补齐三类可观测能力——交易生命周期状态监测、系统主要数据流转详细状态、主要模块及细粒度服务状态。  
 > 变更摘要（V10.4.1）：**巩固、治理与完整性**——M1 数据闭环治理（actual_return 自动回填 Job + IC 真实化 + 因子快照自动化 + 2026 事件日历 + LLM 降级）；M2 UI 大清洗（47→≤38 页面 + 导航 6→4 组 + 执行三合一 + 双仪表盘合并）；M3 Copilot 全局浮窗（Cmd+K 任意页面唤起 + 页面上下文注入 + 实时系统状态 System Prompt）；M4 自主循环稳定增强（AutonomyHealthMonitor + Job Watchdog + Multi-Agent 真实并发 + 三新熔断 + WebSocket 重连）；M5 移动触达（Dashboard/Alert/Copilot 竖屏可用）；M6 文档重构（PRODUCT.md 拆分为模块化多文件，主文件 ≤300 行）  
 > 变更摘要（V10.3.4）：**稳定性与冷启动治理（Stability & Cold-Start Governance）**——全服务冷启动双保险（Dashboard / 代理运行状态 / 执行质量记录 / 置信度校准补全零数据占位逻辑，消除前端 404 抖动）；**市场全量股票池（Market Universe Pool）**——新增 `market_universe` 表，支持美股/港股全量标的同步与缓存；**AI 决策深化**——自主引擎支持 REDUCE/EXIT 信号规则执行，`HOLD/qty≤0` 语义纠偏为 SKIPPED（no-op 原因落库），信号管道新增 `quantity_mode/quantity_value` 标准化；**决策事后剖析升级**——从手工录入升级为交易选择驱动；**多账户兼容**——告警/归因/仪表板接口统一账户 ID 解析；**事件去重**——事件表唯一索引 + 重复写入保护  
 > 变更摘要（V10.3.3）：**P0 可观测性 2.0（Observability 2.0）**——Execution Microscope 执行显微镜（IS 成本四分解：迟延成本/市场冲击/机会成本/时机成本）+ Signal Intelligence Observatory 信号情报观察站（Alpha Decay Monitor 信号半衰期曲线 + Factor Correlation Matrix + Crowding Detector）+ Risk Observability Cluster（实时因子敞口条 + Tail Risk ES 仪表 + 相关性骤升告警）；**P1 AI中枢 2.0（AI Hub 2.0）**——Multi-Agent Orchestration 五智能体协作框架（市场分析 / 风险挑战 / 执行优化 / 深度研究 / Orchestrator 总协调）+ AI Confidence Calibration 置信度校准系统（Reliability Diagram + 自适应降评）+ Adaptive Factor Framework 自适应因子框架（Kalman Filter实时权重更新 + 因子拥挤度检测）+ Decision Post-Mortem Engine 决策事后剖析（反事实分析 + 洞察反哺 InsightService）；**P2 指挥室演进（War Room Dashboard）**——War Room Mode 全屏六格指挥视图 + real-time P&L Ticker + Intelligence Feed AI情报流 + Portfolio Exposure Center 组合敞口中枢 + Smart Alert Center 智能告警分级中枢
@@ -51,6 +51,12 @@
 - [ ] `JobWatchdog` 在 Job 超时 2× 预期间隔时自动重注册并补跑
 - [ ] `MultiAgentOrchestrator` 在每次决策周期真实并发调用 5 Agent，`agent_communication_log` 可查
 - [ ] WebSocket 前端指数退避重连（初始 1s，最大 30s），断线 ≤ 30s 恢复推送
+
+#### M4.1 — 系统监控增强（追加需求）
+
+- [ ] `/system` 支持交易生命周期监测：展示 17 阶段流水线滞留数、Plan/Position FSM 分布、异常跳转、`stuck_intents` 与最近失败阶段
+- [ ] `/system` 支持系统主要数据流转详细状态：覆盖 `DataHub → Signal Generation/Fusion → Portfolio Decision → RiskGate → Execution → Position Monitor → Attribution/Post-Mortem`，展示 `heartbeat / last_success_at / lag_seconds / queue_depth / last_error`
+- [ ] `/system` 支持主要模块及细粒度服务状态：按模块树展示 `DB / Redis / Tiger / LLM / Scheduler / WebSocket / Autonomy / Observability` 等核心模块及下钻服务的 `HEALTHY/WARN/CRITICAL/UNKNOWN` 状态、最近 24h 错误计数与降级标记
 
 #### M5 — 移动触达
 
