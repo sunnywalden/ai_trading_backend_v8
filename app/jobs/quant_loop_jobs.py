@@ -16,7 +16,8 @@ from app.engine.quant_trading_loop import QuantTradingLoop
 from app.core.config import settings
 from app.core.market_hours import is_any_market_active
 from app.broker.factory import make_option_broker_client
-from app.services.signal_quality_config import get_signal_quality_config
+from app.services.regime_classifier import RegimeClassifier
+from app.services.signal_quality_config import get_regime_adjusted_config, get_signal_quality_config
 
 logger = logging.getLogger(__name__)
 
@@ -275,7 +276,10 @@ async def run_position_capacity_guard():
 
             account_id = await _resolve_runtime_account_id()
             sq_cfg = get_signal_quality_config()
-            max_positions = int(sq_cfg.MAX_CONCURRENT_POSITIONS)
+            current_regime = await RegimeClassifier.get_current_regime(session)
+            regime_name = current_regime.regime if current_regime else None
+            regime_cfg = get_regime_adjusted_config(regime_name) if regime_name else {}
+            max_positions = int(regime_cfg.get("MAX_CONCURRENT_POSITIONS", sq_cfg.MAX_CONCURRENT_POSITIONS))
 
             monitor = PositionRebalanceMonitor(session)
             result = await monitor.enforce_position_capacity(
@@ -287,6 +291,7 @@ async def run_position_capacity_guard():
             if result["status"] not in ("within-limit", "pending-exits-sufficient"):
                 logger.info(
                     "[quant_jobs] Position capacity guard OK — "
+                    f"regime={regime_name or 'BASE'} "
                     f"current={result['current_positions']} "
                     f"max={result['max_positions']} "
                     f"overflow={result['overflow']} "

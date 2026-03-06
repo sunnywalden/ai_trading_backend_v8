@@ -19,8 +19,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import get_current_user
 from app.models.db import get_session
 from app.models.trading_plan import TradingPlan
+from app.services.regime_classifier import RegimeClassifier
 from app.services.signal_quality_config import (
     apply_runtime_override,
+    get_regime_adjusted_config,
     get_signal_quality_config,
     reset_runtime_overrides,
 )
@@ -173,7 +175,10 @@ async def get_funnel_stats(
     - rejection_breakdown: 按拒绝原因统计
     - daily_trend: 近 N 天每日精英率趋势
     - current_positions_count: 当前 HELD 持仓数量
-    - max_concurrent_positions_cfg: 当前配置的最大并发仓位
+    - max_concurrent_positions_cfg: 基础配置的最大并发仓位
+    - effective_max_concurrent_positions: 当前体制下生效的最大并发仓位
+    - current_regime: 当前体制
+    - regime_confidence: 当前体制置信度
     """
     stats = await signal_audit_log_service.get_funnel_stats(db, since_days=since_days)
 
@@ -187,8 +192,17 @@ async def get_funnel_stats(
     current_positions_count = (await db.execute(held_count_stmt)).scalar_one_or_none() or 0
 
     cfg = get_signal_quality_config()
+    current_regime = await RegimeClassifier.get_current_regime(db)
+    regime_name = current_regime.regime if current_regime else None
+    effective_cfg = get_regime_adjusted_config(regime_name) if regime_name else {}
+
     stats["current_positions_count"] = current_positions_count
     stats["max_concurrent_positions_cfg"] = cfg.MAX_CONCURRENT_POSITIONS
+    stats["effective_max_concurrent_positions"] = int(
+        effective_cfg.get("MAX_CONCURRENT_POSITIONS", cfg.MAX_CONCURRENT_POSITIONS)
+    )
+    stats["current_regime"] = regime_name
+    stats["regime_confidence"] = current_regime.confidence if current_regime else None
 
     return stats
 
