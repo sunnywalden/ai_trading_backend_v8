@@ -422,8 +422,9 @@ class AutonomyHealthMonitor:
 
             WATCHED_JOBS = {
                 "observability_factor_snapshot": 10,   # 预期每 5min 运行，10min 窗口
-                "m1_return_backfill": 26 * 60,          # 预期每天运行，26h 窗口
+                "signal_return_backfill_extra": 8 * 60, # 预期每 6h 运行，8h 窗口
                 "refresh_technical_indicators": 90,     # 预期每 1h 运行，90min 窗口
+                "broker_order_sync_job": 30,            # 预期每 10min 运行，30min 窗口
             }
 
             missing = [jid for jid in WATCHED_JOBS if jid not in job_ids]

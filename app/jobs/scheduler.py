@@ -183,22 +183,24 @@ def get_job(job_id: str):
 def format_job(job):
     if job is None:
         return None
-    next_run = job.next_run_time.strftime('%Y-%m-%d %H:%M:%S') if job.next_run_time else None
-    trigger_repr = str(job.trigger)
+    next_run_time = getattr(job, 'next_run_time', None)
+    next_run = next_run_time.strftime('%Y-%m-%d %H:%M:%S') if next_run_time else None
+    trigger_repr = str(getattr(job, 'trigger', ''))
     tz = None
     try:
-        tz_attr = getattr(job.trigger, 'timezone', None)
+        trigger = getattr(job, 'trigger', None)
+        tz_attr = getattr(trigger, 'timezone', None)
         if tz_attr:
             tz = tz_attr.zone if hasattr(tz_attr, 'zone') else str(tz_attr)
     except Exception:
         tz = None
     return {
-        'id': job.id,
-        'name': job.name,
+        'id': getattr(job, 'id', None),
+        'name': getattr(job, 'name', None),
         'next_run_time': next_run,
         'trigger': trigger_repr,
         'timezone': tz,
-        'status': 'active' if job.next_run_time else 'paused',
+        'status': 'active' if next_run_time else 'paused',
     }
 
 
