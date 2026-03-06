@@ -314,6 +314,71 @@ Base URL 以你的启动参数为准（示例：`http://localhost:8088`）。
 - GET `/api/v1/monitoring/health` - 监控服务健康检查
   - 响应关键字段：`{ status, last_updated, ... }`
 
+### System Monitor 增强端点（V10.4.3 追加需求）
+
+用于 `/system` 页的生命周期、数据流和服务拓扑统一监控。
+
+#### GET `/api/v1/system-monitor/lifecycle`
+
+- 用途：获取交易生命周期总览
+- Query：`window_minutes?: int = 60`, `only_exceptions?: bool = false`, `stage_id?: int`, `symbol?: str`
+- 响应：`LifecycleOverviewResponse`
+- 响应关键字段：
+  - `meta{ generated_at, window_minutes, refresh_interval_seconds }`
+  - `headline{ active_intents, stuck_intents, exception_count, p95_stage_seconds }`
+  - `pipeline[]`：每个阶段的 `active_count/stuck_count/warn_count/critical_count/avg_seconds/p50_seconds/p95_seconds`
+  - `plan_fsm[]` / `position_fsm[]`
+  - `exceptions[]`：异常 intent 摘要
+
+#### GET `/api/v1/system-monitor/lifecycle/{intent_id}`
+
+- 用途：获取单个 execution intent 的生命周期明细
+- 响应：`LifecycleIntentDetailResponse`
+- 响应关键字段：
+  - `intent_id`, `idempotency_key`, `plan_id`, `symbol`, `action`, `signal_type`
+  - `current_stage_id/current_stage_key/current_stage_label`
+  - `plan_fsm_state`, `position_fsm_state`
+  - `timeline[]`：阶段轨迹与状态转换事件
+  - `latest_errors[]`
+
+#### GET `/api/v1/system-monitor/data-flows`
+
+- 用途：获取关键数据流链路总览
+- Query：`window_minutes?: int = 60`, `include_healthy?: bool = true`
+- 响应：`DataFlowOverviewResponse`
+- 响应关键字段：
+  - `flows[]`
+  - `flows[].nodes[]`：每个节点的 `heartbeat_at/last_success_at/lag_seconds/queue_depth/error_count_24h/degraded`
+
+#### GET `/api/v1/system-monitor/data-flows/{flow_name}`
+
+- 用途：获取单条数据流的节点详情与失败样本
+- Query：`window_minutes?: int = 60`, `limit_failures?: int = 20`
+- 响应：`DataFlowDetailResponse`
+- 响应关键字段：`nodes[]`, `failures[]`
+
+#### GET `/api/v1/system-monitor/services`
+
+- 用途：获取模块树与细粒度服务状态总览
+- Query：`window_minutes?: int = 60`, `module?: str`, `status?: str`, `degraded_only?: bool = false`
+- 响应：`ServiceOverviewResponse`
+- 响应关键字段：
+  - `modules[]`：模块级聚合状态
+  - `services[]`：服务级明细，字段含 `service_kind/status/latency_ms/error_count_24h/last_recovered_at/dependencies[]`
+
+#### GET `/api/v1/system-monitor/services/{service_name}`
+
+- 用途：获取单服务健康时间线与最近失败样本
+- Query：`window_minutes?: int = 60`, `limit_failures?: int = 20`
+- 响应：`ServiceDetailResponse`
+
+#### DTO 约束（定稿）
+
+- 所有状态枚举统一为：`HEALTHY | WARN | CRITICAL | UNKNOWN`
+- 所有时间戳统一返回 ISO8601 UTC 字符串
+- `lag_seconds`, `queue_depth`, `latency_ms` 等不适用时返回 `null`
+- 不返回格式化百分比字符串，全部返回数值型原始字段
+
 #### 示例（部分）
 
 获取 NewsAPI 的限制状态：

@@ -1454,6 +1454,20 @@ scheduler.add_job(
 - `CRITICAL`：心跳丢失、队列阻塞、连续错误超阈值或核心依赖不可用
 - `UNKNOWN`：冷启动或当前采集数据不足
 
+**契约文件（定稿）**：
+
+- 后端 Pydantic：`app/schemas/system_monitor.py`
+- 前端 TypeScript：`src/types/systemMonitor.ts`
+
+**后端响应模型建议映射**：
+
+- `/system-monitor/lifecycle` → `LifecycleOverviewResponse`
+- `/system-monitor/lifecycle/{intent_id}` → `LifecycleIntentDetailResponse`
+- `/system-monitor/data-flows` → `DataFlowOverviewResponse`
+- `/system-monitor/data-flows/{flow_name}` → `DataFlowDetailResponse`
+- `/system-monitor/services` → `ServiceOverviewResponse`
+- `/system-monitor/services/{service_name}` → `ServiceDetailResponse`
+
 ### 11.3 告警机制
 
 - API 超限告警
