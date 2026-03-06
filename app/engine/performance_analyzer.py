@@ -9,7 +9,7 @@
 5. 为自我优化提供数据基础
 """
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any
 from decimal import Decimal
 import statistics
@@ -32,6 +32,15 @@ class PerformanceAnalyzer:
         self.session = session
         self.benchmark_service = BenchmarkService(session)
         self.calculator = AlphaBetaCalculator()
+
+    @staticmethod
+    def _safe_number(value: Any, default: float = 0.0) -> float:
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
     
     async def evaluate_daily_performance(
         self,
@@ -43,7 +52,7 @@ class PerformanceAnalyzer:
         在每个交易日结束时运行,评估当天的交易表现
         """
         if not target_date:
-            target_date = datetime.utcnow()
+            target_date = datetime.now(timezone.utc)
         
         date_start = target_date.replace(hour=0, minute=0, second=0, microsecond=0)
         date_end = target_date.replace(hour=23, minute=59, second=59, microsecond=999999)
@@ -81,10 +90,10 @@ class PerformanceAnalyzer:
             "date": target_date.date().isoformat(),
             "account_id": account_id,
             "signals_executed": len(executed_signals),
-            "total_equity": float(equity_snapshot.total_equity) if equity_snapshot else 0,
-            "daily_pnl": float(equity_snapshot.realized_pnl) if equity_snapshot else 0,
-            "daily_return": float(equity_snapshot.daily_return) if equity_snapshot else 0,
-            "cumulative_return": float(equity_snapshot.cumulative_return) if equity_snapshot else 0,
+            "total_equity": self._safe_number(equity_snapshot.total_equity) if equity_snapshot else 0,
+            "daily_pnl": self._safe_number(equity_snapshot.realized_pnl) if equity_snapshot else 0,
+            "daily_return": self._safe_number(equity_snapshot.daily_return) if equity_snapshot else 0,
+            "cumulative_return": self._safe_number(equity_snapshot.cumulative_return) if equity_snapshot else 0,
         }
         
         # 4. 分析信号表现
@@ -124,8 +133,8 @@ class PerformanceAnalyzer:
                 by_strategy[signal.strategy_id].append(signal)
         
         # 计算整体统计
-        avg_confidence = statistics.mean([s.confidence for s in signals])
-        avg_signal_strength = statistics.mean([s.signal_strength for s in signals])
+        avg_confidence = statistics.mean([self._safe_number(s.confidence) for s in signals])
+        avg_signal_strength = statistics.mean([self._safe_number(s.signal_strength) for s in signals])
         
         # 执行质量
         slippages = [s.execution_slippage for s in signals if s.execution_slippage is not None]
@@ -181,7 +190,7 @@ class PerformanceAnalyzer:
         生成策略性能报告
         用于评估策略的长期表现
         """
-        period_start = datetime.utcnow() - timedelta(days=days)
+        period_start = datetime.now(timezone.utc) - timedelta(days=days)
         
         # 获取策略信息
         stmt = select(Strategy).where(Strategy.id == strategy_id)
@@ -229,8 +238,8 @@ class PerformanceAnalyzer:
         avg_evaluation_score = statistics.mean([s.evaluation_score for s in evaluated_signals])
         
         # 信号质量
-        avg_confidence = statistics.mean([s.confidence for s in signals])
-        avg_signal_strength = statistics.mean([s.signal_strength for s in signals])
+        avg_confidence = statistics.mean([self._safe_number(s.confidence) for s in signals])
+        avg_signal_strength = statistics.mean([self._safe_number(s.signal_strength) for s in signals])
         
         # 执行质量
         rejection_rate = len([s for s in signals if s.status == SignalStatus.REJECTED]) / total_signals
@@ -290,7 +299,7 @@ class PerformanceAnalyzer:
         识别改进机会
         分析失败模式,为优化提供依据
         """
-        period_start = datetime.utcnow() - timedelta(days=days)
+        period_start = datetime.now(timezone.utc) - timedelta(days=days)
         
         # 获取表现不佳的信号
         stmt = (
@@ -392,7 +401,7 @@ class PerformanceAnalyzer:
         from datetime import date
         
         # 获取历史权益快照
-        period_start_date = (datetime.utcnow() - timedelta(days=days)).date()
+        period_start_date = (datetime.now(timezone.utc) - timedelta(days=days)).date()
         
         stmt = (
             select(EquitySnapshot)
@@ -568,7 +577,7 @@ class PerformanceAnalyzer:
         Returns:
             信号胜率详细统计
         """
-        period_start = datetime.utcnow() - timedelta(days=days)
+        period_start = datetime.now(timezone.utc) - timedelta(days=days)
         
         # 获取已平仓的信号（有is_winner标记）
         stmt = (

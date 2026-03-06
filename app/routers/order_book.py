@@ -8,8 +8,10 @@
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,10 +23,19 @@ from app.schemas.order_book import (
     OrderBookFilter,
     StopLossUpdateRequest, StopLossUpdateResponse,
 )
-from app.schemas.situational_awareness import SituationalAwarenessSnapshot
+from app.schemas.situational_awareness import (
+    SituationalAwarenessSnapshot,
+    RegimeBlock,
+    VarBlock,
+    ActiveFencesBlock,
+    ActiveExecutionsBlock,
+    PendingConfirmsBlock,
+    AutonomyBlock,
+)
 from app.services.situational_awareness_service import situational_awareness_service
 
 router = APIRouter(prefix="/api/v1/order-book", tags=["V10.3 智能订单簿"])
+logger = logging.getLogger(__name__)
 
 
 @router.get("", response_model=OrderBookResponse, summary="全量订单视图")
@@ -98,4 +109,22 @@ async def get_situational_awareness(
     db: AsyncSession = Depends(get_session),
 ):
     """REST 轮询备用接口（推荐使用 WebSocket /api/v1/ws/situational-awareness）。"""
-    return await situational_awareness_service.get_snapshot(db)
+    try:
+        return await asyncio.wait_for(
+            situational_awareness_service.get_snapshot(db),
+            timeout=5.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("[OrderBook] situational-awareness snapshot timed out, returning degraded payload")
+    except Exception as exc:
+        logger.warning("[OrderBook] situational-awareness snapshot failed: %s", exc)
+
+    return SituationalAwarenessSnapshot(
+        regime=RegimeBlock(),
+        var=VarBlock(),
+        active_fences=ActiveFencesBlock(),
+        active_executions=ActiveExecutionsBlock(),
+        pending_confirms=PendingConfirmsBlock(),
+        autonomy=AutonomyBlock(),
+        as_of=datetime.now(timezone.utc),
+    )

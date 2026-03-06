@@ -26,6 +26,10 @@ from app.services.signal_quality_funnel import signal_quality_funnel, SignalQual
 
 router = APIRouter(prefix="/autonomy", tags=["V10-Autonomy"])
 
+_ACCOUNT_ID_CACHE_TTL_SECONDS = 300
+_cached_account_id: Optional[str] = None
+_cached_account_expires_at: Optional[datetime] = None
+
 
 class AutonomyLevelUpdate(BaseModel):
     level: str  # FULL / SEMI / ADVISORY
@@ -37,14 +41,22 @@ class RevokeRequest(BaseModel):
 
 async def _resolve_account_id() -> str:
     """优先解析 Tiger 实际账户号，避免 settings.TIGER_ACCOUNT 与真实账户不一致。"""
+    global _cached_account_id, _cached_account_expires_at
+    now = datetime.now(timezone.utc)
+    if _cached_account_id and _cached_account_expires_at and _cached_account_expires_at > now:
+        return _cached_account_id
     try:
         broker = make_option_broker_client()
-        real_acc = await broker.get_account_id()
+        real_acc = await asyncio.wait_for(broker.get_account_id(), timeout=2.0)
         if real_acc:
-            return str(real_acc)
+            _cached_account_id = str(real_acc)
+            _cached_account_expires_at = now + timedelta(seconds=_ACCOUNT_ID_CACHE_TTL_SECONDS)
+            return _cached_account_id
     except Exception:
         pass
-    return settings.TIGER_ACCOUNT
+    _cached_account_id = str(settings.TIGER_ACCOUNT or "")
+    _cached_account_expires_at = now + timedelta(seconds=_ACCOUNT_ID_CACHE_TTL_SECONDS)
+    return _cached_account_id
 
 
 def _coerce_dt(value) -> Optional[datetime]:
@@ -190,7 +202,7 @@ async def _count_broker_filled_today(account_id: str) -> Optional[int]:
             except TypeError:
                 return trade_client.get_orders(account=account_id)
 
-        orders = await asyncio.to_thread(_fetch_orders)
+        orders = await asyncio.wait_for(asyncio.to_thread(_fetch_orders), timeout=3.0)
         if not orders:
             return 0
 
@@ -269,14 +281,23 @@ async def get_autonomy_status(
         s for s in closing_signals
         if s.status in {SignalStatus.REJECTED, SignalStatus.FAILED}
     ]
-    quality_snapshots = [_build_signal_quality_snapshot(s) for s in today_signals]
-    elite_signals_today = [item for item in quality_snapshots if item["signal_quality_tier"] == SignalQualityTier.ELITE]
-    high_quality_signals_today = [item for item in quality_snapshots if item["signal_quality_tier"] in {SignalQualityTier.ELITE, SignalQualityTier.HIGH}]
-    pending_elite_signals = [
-        s for s in today_signals
-        if _build_signal_quality_snapshot(s)["signal_quality_tier"] == SignalQualityTier.ELITE
-        and s.status in {SignalStatus.GENERATED, SignalStatus.VALIDATED, SignalStatus.QUEUED}
-    ]
+    quality_snapshots: list[dict[str, object]] = []
+    elite_count = 0
+    high_quality_count = 0
+    quota_exempt_count = 0
+    pending_elite_count = 0
+    for signal in today_signals:
+        snapshot = _build_signal_quality_snapshot(signal)
+        quality_snapshots.append(snapshot)
+        tier = snapshot.get("signal_quality_tier")
+        if tier == SignalQualityTier.ELITE:
+            elite_count += 1
+            if signal.status in {SignalStatus.GENERATED, SignalStatus.VALIDATED, SignalStatus.QUEUED}:
+                pending_elite_count += 1
+        if tier in {SignalQualityTier.ELITE, SignalQualityTier.HIGH}:
+            high_quality_count += 1
+        if bool(snapshot.get("signal_quality_quota_exempt")):
+            quota_exempt_count += 1
 
     # 熔断：若今日已执行失败超过 3 笔，视为熔断触发
     fail_result = await session.execute(
@@ -351,10 +372,10 @@ async def get_autonomy_status(
             "closing_failures_today": len(closing_failed),
         },
         "signal_quality": {
-            "elite_signals_today": len(elite_signals_today),
-            "high_quality_signals_today": len(high_quality_signals_today),
-            "pending_elite_signals": len(pending_elite_signals),
-            "quota_exempt_signals_today": len([item for item in quality_snapshots if item["signal_quality_quota_exempt"]]),
+            "elite_signals_today": elite_count,
+            "high_quality_signals_today": high_quality_count,
+            "pending_elite_signals": pending_elite_count,
+            "quota_exempt_signals_today": quota_exempt_count,
         },
     }
 
