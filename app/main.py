@@ -100,6 +100,7 @@ logger = logging.getLogger(__name__)
 _tracked_startup_tasks: set[asyncio.Task] = set()
 _original_signal_handlers: dict[int, Any] = {}
 _shutdown_in_progress = False
+_shutdown_cleanup_task: asyncio.Task | None = None
 
 
 def _track_startup_task(task: asyncio.Task) -> None:
@@ -135,13 +136,47 @@ async def _cancel_tracked_startup_tasks() -> None:
     await asyncio.gather(*tasks, return_exceptions=True)
 
 
+async def _force_cancel_pending_tasks(delay: float = 2.0) -> None:
+    await asyncio.sleep(delay)
+
+    current = asyncio.current_task()
+    pending: list[asyncio.Task] = []
+    for task in asyncio.all_tasks():
+        if task is current or task.done():
+            continue
+        pending.append(task)
+
+    if not pending:
+        return
+
+    task_names = [task.get_name() for task in pending]
+    logger.warning("[Shutdown] Force-cancelling pending tasks: %s", task_names)
+    for task in pending:
+        task.cancel()
+
+
 def _begin_fast_shutdown(source: str) -> None:
-    global _shutdown_in_progress
+    global _shutdown_in_progress, _shutdown_cleanup_task
     if _shutdown_in_progress:
         return
     _shutdown_in_progress = True
 
     logger.info("[Shutdown] Fast shutdown triggered by %s", source)
+
+    try:
+        from app.routers.websocket import mark_shutdown_started, close_all_websockets
+
+        mark_shutdown_started()
+        loop = asyncio.get_running_loop()
+        loop.create_task(close_all_websockets(), name="shutdown-close-websockets")
+        if _shutdown_cleanup_task is None or _shutdown_cleanup_task.done():
+            _shutdown_cleanup_task = loop.create_task(
+                _force_cancel_pending_tasks(),
+                name="shutdown-force-cancel-pending-tasks",
+            )
+    except Exception as exc:
+        logger.warning("[Shutdown] Failed to schedule websocket/task cleanup: %s", exc)
+
     if not settings.ENABLE_SCHEDULER:
         return
 
@@ -272,9 +307,15 @@ async def _bootstrap_market_universe() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理：启动时初始化调度器，关闭时清理"""
-    global _shutdown_in_progress
+    global _shutdown_in_progress, _shutdown_cleanup_task
     _shutdown_in_progress = False
+    _shutdown_cleanup_task = None
     _install_signal_handlers()
+    try:
+        from app.routers.websocket import reset_shutdown_state
+        reset_shutdown_state()
+    except Exception:
+        pass
 
     # 启动时执行
     apply_proxy_env(
@@ -409,6 +450,8 @@ async def lifespan(app: FastAPI):
     # 关闭时执行
     _begin_fast_shutdown("lifespan")
     await _cancel_tracked_startup_tasks()
+    if _shutdown_cleanup_task is not None:
+        await asyncio.gather(_shutdown_cleanup_task, return_exceptions=True)
     _restore_signal_handlers()
     
     if redis_client:
