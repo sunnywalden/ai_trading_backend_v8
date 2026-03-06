@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 from datetime import datetime, timezone, timedelta
@@ -26,6 +27,8 @@ from app.schemas.situational_awareness import (
 )
 
 logger = logging.getLogger(__name__)
+
+_ACCOUNT_ID_CACHE_TTL_SECONDS = 300
 
 
 def _safe_float(val: Any, default: float = 0.0) -> float:
@@ -61,16 +64,30 @@ VAR_LIMIT_PCT = 2.0
 
 
 class SituationalAwarenessService:
+    def __init__(self) -> None:
+        self._cached_account_id: Optional[str] = None
+        self._cached_account_expires_at: Optional[datetime] = None
 
     async def _resolve_account_id(self, account_id: Optional[str]) -> Optional[str]:
         if account_id:
             return str(account_id)
+        now = datetime.now(timezone.utc)
+        if self._cached_account_id and self._cached_account_expires_at and self._cached_account_expires_at > now:
+            return self._cached_account_id
         try:
             broker = make_option_broker_client()
-            resolved = await broker.get_account_id()
-            return str(resolved) if resolved else None
+            resolved = await asyncio.wait_for(broker.get_account_id(), timeout=2.0)
+            if resolved:
+                self._cached_account_id = str(resolved)
+                self._cached_account_expires_at = now + timedelta(seconds=_ACCOUNT_ID_CACHE_TTL_SECONDS)
+                return self._cached_account_id
         except Exception:
-            return None
+            pass
+        fallback = str(getattr(settings, "TIGER_ACCOUNT", "") or "").strip() or None
+        if fallback:
+            self._cached_account_id = fallback
+            self._cached_account_expires_at = now + timedelta(seconds=_ACCOUNT_ID_CACHE_TTL_SECONDS)
+        return fallback
 
     async def get_snapshot(self, db: AsyncSession, account_id: Optional[str] = None) -> SituationalAwarenessSnapshot:
         now = datetime.now(timezone.utc)
