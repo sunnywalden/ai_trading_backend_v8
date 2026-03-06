@@ -16,8 +16,15 @@ class SafetyGuard:
         self.limits = limits
         self.session = session
 
-    async def check_order(self, side: str, notional_usd: float, est_daily_pnl_pct=None) -> SafetyCheckResult:
-        if notional_usd > self.limits.max_order_notional_usd:
+    async def check_order(
+        self,
+        side: str,
+        notional_usd: float,
+        est_daily_pnl_pct=None,
+        signal_intent: str = "OPEN",
+    ) -> SafetyCheckResult:
+        is_closing = str(signal_intent or "OPEN").upper() in {"REDUCE", "EXIT", "STOP_LOSS_EXIT", "FORCE_EXIT"}
+        if not is_closing and notional_usd > self.limits.max_order_notional_usd:
             return SafetyCheckResult(False, f"订单名义金额超限: {notional_usd:.2f} > {self.limits.max_order_notional_usd:.2f}")
         return SafetyCheckResult(True)
 

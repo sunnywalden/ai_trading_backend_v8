@@ -41,6 +41,11 @@ class RiskGateService:
         self._regime_var_multiplier: float = 1.0
         self._current_regime: str = "UNKNOWN"
 
+    @staticmethod
+    def _is_closing_intent(signal_intent: Optional[str]) -> bool:
+        intent = str(signal_intent or "OPEN").upper()
+        return intent in {"REDUCE", "EXIT", "STOP_LOSS_EXIT", "TAKE_PROFIT_EXIT", "FORCE_EXIT"}
+
     async def check(
         self,
         account_id: str,
@@ -51,12 +56,34 @@ class RiskGateService:
         current_positions: dict,  # {symbol: {"qty": float, "price": float}}
         daily_trades_today: int = 0,
         daily_realized_pnl: float = 0.0,
+        signal_intent: str = "OPEN",
     ) -> RiskGateResult:
         details = {}
+        is_closing = self._is_closing_intent(signal_intent)
+        details["signal_intent"] = str(signal_intent or "OPEN").upper()
+        details["is_closing_intent"] = is_closing
 
         # ── 1. 熔断检查（最优先）──
         daily_loss_pct = abs(daily_realized_pnl) / current_equity if daily_realized_pnl < 0 else 0
         if daily_loss_pct >= settings.MAX_DAILY_LOSS_PCT:
+            if is_closing and getattr(settings, "ALLOW_CLOSING_DURING_CIRCUIT_BREAKER", True):
+                details.update(
+                    {
+                        "daily_loss_pct": daily_loss_pct,
+                        "bypass_reason": "closing_intent",
+                        "circuit_breaker_active": True,
+                    }
+                )
+                logger.warning(
+                    "[RiskGate] Circuit breaker active but allowing risk-reducing order: "
+                    f"{symbol} intent={signal_intent} daily_loss={daily_loss_pct:.1%}"
+                )
+                return RiskGateResult(
+                    passed=True,
+                    reason="circuit-breaker-active-but-closing-allowed",
+                    circuit_breaker=True,
+                    details=details,
+                )
             logger.warning(
                 f"[RiskGate] Circuit breaker triggered. daily_loss={daily_loss_pct:.1%} >= {settings.MAX_DAILY_LOSS_PCT:.1%}"
             )
@@ -68,7 +95,7 @@ class RiskGateService:
             )
 
         # ── 2. 日交易笔数限制 ──
-        if daily_trades_today >= settings.MAX_DAILY_TRADES:
+        if not is_closing and daily_trades_today >= settings.MAX_DAILY_TRADES:
             return RiskGateResult(
                 passed=False,
                 reason=f"Max daily trades reached: {daily_trades_today}/{settings.MAX_DAILY_TRADES}",
@@ -94,28 +121,34 @@ class RiskGateService:
                 )
 
         # ── 4. VaR@95% 估算（简化：正态分布假设）──
-        var_pct = self._estimate_var(current_positions, current_equity)
-        details["estimated_var_pct"] = round(var_pct, 4)
-        # V10.2-M1: 应用体制感知 VaR 倍数
-        effective_var_limit = settings.MAX_VAR_PCT * self._regime_var_multiplier
-        details["regime_var_multiplier"] = self._regime_var_multiplier
-        details["effective_var_limit"] = round(effective_var_limit, 4)
-        if var_pct > effective_var_limit:
-            return RiskGateResult(
-                passed=False,
-                reason=f"VaR limit: {var_pct:.1%} > {effective_var_limit:.1%} (regime={self._current_regime}, ×{self._regime_var_multiplier:.2f})",
-                details=details,
-            )
+        if not is_closing:
+            var_pct = self._estimate_var(current_positions, current_equity)
+            details["estimated_var_pct"] = round(var_pct, 4)
+            # V10.2-M1: 应用体制感知 VaR 倍数
+            effective_var_limit = settings.MAX_VAR_PCT * self._regime_var_multiplier
+            details["regime_var_multiplier"] = self._regime_var_multiplier
+            details["effective_var_limit"] = round(effective_var_limit, 4)
+            if var_pct > effective_var_limit:
+                return RiskGateResult(
+                    passed=False,
+                    reason=f"VaR limit: {var_pct:.1%} > {effective_var_limit:.1%} (regime={self._current_regime}, ×{self._regime_var_multiplier:.2f})",
+                    details=details,
+                )
+        else:
+            details["var_check_skipped"] = True
 
         # ── 5. 内置压力测试（GFC 场景 -50%，检查组合损失）──
-        stress_loss_pct = self._estimate_stress_loss(current_positions, current_equity)
-        details["stress_loss_pct"] = round(stress_loss_pct, 4)
-        if stress_loss_pct > settings.MAX_STRESS_LOSS_PCT:
-            return RiskGateResult(
-                passed=False,
-                reason=f"Stress test limit: {stress_loss_pct:.1%} > {settings.MAX_STRESS_LOSS_PCT:.1%}",
-                details=details,
-            )
+        if not is_closing:
+            stress_loss_pct = self._estimate_stress_loss(current_positions, current_equity)
+            details["stress_loss_pct"] = round(stress_loss_pct, 4)
+            if stress_loss_pct > settings.MAX_STRESS_LOSS_PCT:
+                return RiskGateResult(
+                    passed=False,
+                    reason=f"Stress test limit: {stress_loss_pct:.1%} > {settings.MAX_STRESS_LOSS_PCT:.1%}",
+                    details=details,
+                )
+        else:
+            details["stress_check_skipped"] = True
 
         logger.info(f"[RiskGate] PASSED for {symbol} {side} qty={qty:.2f}. details={details}")
         return RiskGateResult(passed=True, details=details)

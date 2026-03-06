@@ -264,7 +264,7 @@ class PositionRebalanceMonitor:
             user_id           = account_id,   # 系统生成信号，user_id 复用 account_id
             symbol            = symbol,
             signal_type       = signal_type,
-            signal_source     = SignalSource.STRATEGY,
+            signal_source     = SignalSource.RISK_MGMT,
             status            = SignalStatus.GENERATED,
             direction         = direction,
             quantity_mode     = "ABS_SHARES",
@@ -280,6 +280,16 @@ class PositionRebalanceMonitor:
             ),
             max_holding_days  = None,
             created_at        = datetime.utcnow(),
+            extra_metadata    = {
+                "closing_intent": signal_type.value,
+                "execution_path": "FAST_CLOSE",
+                "generated_by": "PositionRebalanceMonitor",
+                "recommendation": recommendation,
+                "current_position": {
+                    "qty": abs(qty),
+                    "price": None,
+                },
+            },
         )
         self.session.add(signal)
         return signal

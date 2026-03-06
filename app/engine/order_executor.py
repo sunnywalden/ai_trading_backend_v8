@@ -18,7 +18,7 @@ from decimal import Decimal
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.trading_signal import TradingSignal, SignalStatus
+from app.models.trading_signal import TradingSignal, SignalStatus, SignalType
 from app.broker.factory import make_option_broker_client
 from app.services.account_service import AccountService
 from app.services.risk_event_logger import log_risk_event
@@ -240,6 +240,13 @@ class OrderExecutor:
         account_equity: float
     ) -> Dict[str, Any]:
         """计算订单参数 (包含碎股/一手限制逻辑)"""
+        signal_meta = signal.extra_metadata or {}
+        current_position = signal_meta.get("current_position") or {}
+        current_position_qty = abs(float(current_position.get("qty") or 0))
+        is_closing_signal = signal.signal_type in {SignalType.EXIT, SignalType.REDUCE}
+        execution_direction = signal.direction
+        if is_closing_signal:
+            execution_direction = "SHORT" if signal.direction == "LONG" else "LONG"
         
         # 1. 确定价格和订单类型
         # 如果建议价格为空，认为是市价单
@@ -254,7 +261,19 @@ class OrderExecutor:
         # 💡 这里解决一个关键的歧义：suggested_quantity 是股份单位还是比例？
         # 如果大于 1.0，认为是绝对股数（由 QuickTrade 发起）；如果小于 1.0，认为是账户占比（由量化策略发起）
         quantity = 0
-        if signal.suggested_quantity and signal.suggested_quantity >= 1.0:
+        if is_closing_signal and current_position_qty > 0:
+            if signal.signal_type == SignalType.EXIT:
+                quantity = int(round(current_position_qty))
+                print(f"[OrderExecutor] Using actual position qty for EXIT: {quantity}")
+            else:
+                requested_qty = float(signal.quantity_value or signal.suggested_quantity or 0)
+                if requested_qty <= 0:
+                    requested_qty = current_position_qty * 0.3
+                elif requested_qty < 1.0:
+                    requested_qty = current_position_qty * requested_qty
+                quantity = int(round(min(requested_qty, current_position_qty)))
+                print(f"[OrderExecutor] Using adjusted REDUCE qty: {quantity} (held={current_position_qty})")
+        elif signal.suggested_quantity and signal.suggested_quantity >= 1.0:
             # 认为是绝对股数
             quantity = int(signal.suggested_quantity)
             print(f"[OrderExecutor] Using absolute quantity from signal: {quantity}")
@@ -266,7 +285,7 @@ class OrderExecutor:
             print(f"[OrderExecutor] Calculated quantity from account ratio ({position_size_pct:.2%}): {quantity}")
         
         # --- 港股一手限制处理 ---
-        if signal.symbol.endswith(".HK"):
+        if signal.symbol.endswith(".HK") and not is_closing_signal:
             lot_size = await self.market_provider.get_lot_size(signal.symbol)
             if lot_size > 1:
                 # 向下取整到 lot_size 的倍数
@@ -286,7 +305,7 @@ class OrderExecutor:
         else:
             # 限价单：优化价格策略 (买入时略高于市价，卖出时略低于市价，提高成交率)
             order_type = "LIMIT"
-            if signal.direction == "LONG":
+            if execution_direction == "LONG":
                 limit_price = current_price * 1.002  # 买入时略高于市价
             else:
                 limit_price = current_price * 0.998  # 卖出时略低于市价
@@ -294,7 +313,7 @@ class OrderExecutor:
         
         return {
             "symbol": signal.symbol,
-            "direction": signal.direction,
+            "direction": execution_direction,
             "quantity": max(1, quantity),  # 至少1股
             "price": limit_price,
             "order_type": order_type,
