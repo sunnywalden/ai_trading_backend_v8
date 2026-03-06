@@ -32,7 +32,8 @@ _OPERATIONAL_PLAN_STATUSES = frozenset({
     "PENDING_CONFIRM",
     "ACTIVE",
 })
-_EXECUTED_ACTIVE_STAGES = frozenset({8, 9, 10, 11, 12, 13, 14, 15})
+# EXECUTED 状态只要 pipeline_stage < 16 就视为仍在流水线中（含 S7 下单执行中）
+_EXECUTED_ACTIVE_STAGES = frozenset({7, 8, 9, 10, 11, 12, 13, 14, 15})
 
 # ── Plan FSM 状态显示配置 ──────────────────────────────────────────────────────
 PLAN_FSM_META: dict[str, dict] = {
@@ -120,7 +121,7 @@ class LifecycleService:
 
         # 仅统计“仍在运行中的流水线”计划，避免历史终态/脏数据污染系统监控。
         # - AI_GENERATED / AUTO_EXECUTING / PENDING_CONFIRM / ACTIVE：天然属于活跃链路
-        # - EXECUTED：仅当已经推进到 S8+（执行后/持仓监控/后处理）才视为流水线仍活跃
+        # - EXECUTED：只要仍停留在 S7-S15，就说明仍在执行/持仓/后处理链路中
         stmt = select(TradingPlan).where(
             and_(
                 TradingPlan.pipeline_stage.isnot(None),

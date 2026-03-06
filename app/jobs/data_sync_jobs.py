@@ -27,6 +27,8 @@ from typing import Optional
 from sqlalchemy import and_, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -344,6 +346,41 @@ async def attribution_daily_backfill_job() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Job ④ : broker_order_sync_job
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def broker_order_sync_job() -> None:
+    """Job ④: 定时执行券商订单状态对账，并修复 stage7/stage8 残留计划。"""
+    from app.models.db import SessionLocal
+    from app.services.broker_order_sync_service import reconcile_broker_order_status
+    from app.services.lifecycle_service import lifecycle_service
+
+    try:
+        async with SessionLocal() as session:
+            result = await reconcile_broker_order_status(
+                session,
+                account_id=None,
+                lookback_days=int(getattr(settings, "BROKER_ORDER_SYNC_LOOKBACK_DAYS", 3) or 3),
+            )
+            repaired_position_fsm = await lifecycle_service.sync_position_fsm_states(session)
+            if repaired_position_fsm:
+                await session.commit()
+
+        logger.info(
+            "[DataSync] broker_order_sync: synced_executing=%s updates=%s cancelled_synced=%s filled_synced=%s orphan_fixed=%s journal_created=%s repaired_position_fsm=%s",
+            result.get("synced_executing", 0),
+            result.get("synced_updates", 0),
+            result.get("cancelled_synced", 0),
+            result.get("filled_synced", 0),
+            result.get("orphan_fixed", 0),
+            result.get("journal_created", 0),
+            repaired_position_fsm,
+        )
+    except Exception as exc:
+        logger.error("[DataSync] broker_order_sync_job FAILED: %s", exc, exc_info=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 注册函数
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -353,6 +390,7 @@ def register_data_sync_jobs(scheduler) -> None:
     ① journal_auto_close:          每 30 分钟  — 出场信号 → 关闭 DRAFT 日志
     ② signal_return_backfill_extra: 每 6 小时  — 多路径补填 actual_return
     ③ attribution_daily_backfill:   每天 23:30 — 增量写入 TradeAttributionEntry
+    ④ broker_order_sync:            每 N 分钟   — 券商订单状态对账，推进 stage7/stage8 计划
     """
     # ① 每 30 分钟关闭 DRAFT 日志
     scheduler.add_job(
@@ -385,7 +423,19 @@ def register_data_sync_jobs(scheduler) -> None:
         replace_existing=True,
     )
 
+    # ④ 每 N 分钟执行券商订单状态对账
+    scheduler.add_job(
+        broker_order_sync_job,
+        trigger="interval",
+        minutes=max(1, int(getattr(settings, 'BROKER_ORDER_SYNC_INTERVAL_MINUTES', 10) or 10)),
+        id="broker_order_sync_job",
+        name="[DataSync] Broker Order Sync (reconcile pipeline stage 7/8)",
+        replace_existing=True,
+        next_run_time=datetime.now() + timedelta(seconds=45),
+    )
+
     logger.info("[DataSync] Data sync jobs registered:")
     logger.info("  ① journal_auto_close:           every 30m (exit signal closes DRAFT)")
     logger.info("  ② signal_return_backfill_extra:  every 6h  (actual_return multi-path)")
     logger.info("  ③ attribution_daily_backfill:    23:30 daily")
+    logger.info("  ④ broker_order_sync:             every %sm (broker reconcile + lifecycle repair)", getattr(settings, 'BROKER_ORDER_SYNC_INTERVAL_MINUTES', 10))
