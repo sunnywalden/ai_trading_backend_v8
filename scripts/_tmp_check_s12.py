@@ -1,17 +1,7 @@
-import asyncio, app.models.strategy
-from sqlalchemy import select, func
-from app.models.db import SessionLocal
-from app.models.trading_plan import TradingPlan
+"""兼容入口：脚本已归档到 archived/v10_4_3/。"""
 
-async def main():
-    async with SessionLocal() as db:
-        rows = (await db.execute(
-            select(TradingPlan.plan_status, TradingPlan.pipeline_stage, func.count().label('cnt'))
-            .where(TradingPlan.pipeline_stage.in_([12,13,14,15]))
-            .group_by(TradingPlan.plan_status, TradingPlan.pipeline_stage)
-            .order_by(TradingPlan.pipeline_stage, func.count().desc())
-        )).all()
-        for r in rows:
-            print(f'  S{r.pipeline_stage} status={r.plan_status!r} cnt={r.cnt}')
+from _run_archived import run_archived_script
 
-asyncio.run(main())
+
+if __name__ == "__main__":
+    run_archived_script("_tmp_check_s12.py")
