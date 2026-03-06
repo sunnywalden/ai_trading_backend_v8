@@ -1428,6 +1428,32 @@ scheduler.add_job(
 - GET `/health` - 服务状态
 - GET `/api/v1/monitoring/health` - 详细健康检查
 
+### 11.2.1 System Monitor 增强（V10.4.3 追加需求）
+
+**目标**：在现有 API/健康检查监控之外，补齐交易系统内部链路的“阶段、流转、服务”三级可观测性。
+
+**监控域**：
+
+- **交易生命周期状态**：基于 `autonomous_execution_intent`、Plan FSM、Position FSM 聚合 17 阶段分布、异常跳转、stuck intents、P95 阶段耗时
+- **主要数据流转状态**：覆盖 `DataHub → Signal Generation/Fusion → Portfolio Decision → RiskGate → Execution → Position Monitor → Attribution/Post-Mortem`，对每个节点输出 `heartbeat / lag_seconds / queue_depth / last_success_at / last_error`
+- **模块与细粒度服务状态**：按模块树输出 `Infrastructure / Market Data / Autonomy / Execution / Observability` 下的服务状态，统一状态枚举为 `HEALTHY / WARN / CRITICAL / UNKNOWN`
+
+**建议接口**：
+
+- GET `/api/v1/system-monitor/lifecycle`
+- GET `/api/v1/system-monitor/lifecycle/{intent_id}`
+- GET `/api/v1/system-monitor/data-flows`
+- GET `/api/v1/system-monitor/data-flows/{flow_name}`
+- GET `/api/v1/system-monitor/services`
+- GET `/api/v1/system-monitor/services/{service_name}`
+
+**状态聚合规则**：
+
+- `HEALTHY`：心跳正常、无积压、无连续错误
+- `WARN`：存在延迟升高、轻微积压或进入降级模式
+- `CRITICAL`：心跳丢失、队列阻塞、连续错误超阈值或核心依赖不可用
+- `UNKNOWN`：冷启动或当前采集数据不足
+
 ### 11.3 告警机制
 
 - API 超限告警

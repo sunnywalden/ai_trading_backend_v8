@@ -142,6 +142,21 @@ PATCH /api/v1/war-room/alerts/{alert_id}               — 更新告警处理状
 GET  /api/v1/war-room/alerts/stats                     — 告警统计（按等级/类别/处理状态）
 ```
 
+### 8.13 系统监控增强（V10.4.3 追加需求）
+```
+# Lifecycle Monitor — 交易生命周期监控
+GET  /api/v1/system-monitor/lifecycle                  — 17阶段分布、Plan/Position FSM、stuck intents、异常阶段摘要
+GET  /api/v1/system-monitor/lifecycle/{intent_id}      — 单笔 intent 的阶段轨迹、最近异常、耗时明细
+
+# Data Flow Monitor — 关键数据流链路监控
+GET  /api/v1/system-monitor/data-flows                 — 主链路节点状态（heartbeat/lag/queue_depth/last_error）
+GET  /api/v1/system-monitor/data-flows/{flow_name}     — 单条数据流详情与最近失败样本
+
+# Service Topology Monitor — 模块与细粒度服务状态
+GET  /api/v1/system-monitor/services                   — 模块树状态（DB/Redis/Tiger/LLM/Scheduler/WebSocket/Autonomy/Observability）
+GET  /api/v1/system-monitor/services/{service_name}    — 单服务健康详情、24h 错误计数、降级与恢复时间线
+```
+
 ---
 
 ## 附录

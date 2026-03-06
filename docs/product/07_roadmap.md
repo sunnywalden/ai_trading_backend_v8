@@ -66,6 +66,7 @@
 - **M2 UI 大清洗**：47 页 → ≤38 页，6 导航组 → 4 组，执行三页合并，双仪表盘合并，系统监控整合
 - **M3 Copilot 全局化**：全局浮窗（Cmd+K）+ 页面上下文注入 + 实时系统状态 System Prompt
 - **M4 自主循环稳定增强**：AutonomyHealthMonitor 自检 + JobWatchdog + Multi-Agent 真实并发 + WebSocket 重连
+- **M4.1 系统监控增强**：`/system` 补齐交易生命周期监测、主数据流链路监测、模块与细粒度服务状态树，形成统一运维视图
 - **M5 移动触达**：Dashboard/Alert/Copilot 三场景 375px 竖屏可用
 - **M6 文档重构**：PRODUCT.md 拆分为模块化多文件，主文件 ≤300 行
 - **★ V10.4.2 信号精英化**：五层信号漏斗 + Conviction Score + 多维共振门控 + 幽灵交易追踪 → 详细规划：[docs/archived/v10/v10.4/RELEASE_PLAN_V10.4.2.md](../archived/v10/v10.4/RELEASE_PLAN_V10.4.2.md)
