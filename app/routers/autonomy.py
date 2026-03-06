@@ -22,6 +22,7 @@ from app.models.trading_signal import TradingSignal, SignalStatus
 from app.models.autonomy_audit_log import AutonomyAuditLog
 from app.models.strategy import Strategy, StrategyRun, HistoricalStrategyRun
 from app.services.autonomous_engine import autonomous_engine
+from app.services.signal_quality_funnel import signal_quality_funnel, SignalQualityTier
 
 router = APIRouter(prefix="/autonomy", tags=["V10-Autonomy"])
 
@@ -100,6 +101,79 @@ def _get_order_status(order) -> str:
     if "." in s:
         s = s.split(".")[-1]
     return s
+
+
+def _build_signal_quality_snapshot(signal: TradingSignal) -> dict[str, object]:
+    signal_type = signal.signal_type.value if signal.signal_type else "ENTRY"
+    extra_meta = signal.extra_metadata if isinstance(signal.extra_metadata, dict) else {}
+    factor_scores = signal.factor_scores if isinstance(signal.factor_scores, dict) else {}
+    if signal_type in ("EXIT", "REDUCE") or bool(extra_meta.get("force_exit")):
+        return {
+            "signal_quality_tier": None,
+            "signal_quality_score": None,
+            "signal_quality_quota_exempt": False,
+        }
+
+    dimensions = extra_meta.get("dimensions") or factor_scores.get("dimensions") or []
+
+    def _dim_dir(name: str) -> int:
+        for item in dimensions:
+            if isinstance(item, dict) and item.get("name") == name:
+                try:
+                    return int(item.get("direction", 0))
+                except Exception:
+                    return 0
+        return 0
+
+    def _dim_score(name: str) -> float:
+        for item in dimensions:
+            if isinstance(item, dict) and item.get("name") == name:
+                try:
+                    score = float(item.get("score", 0.5))
+                except Exception:
+                    score = 0.5
+                return score / 100.0 if score > 1.0 else score
+        raw = extra_meta.get(f"{name}_score")
+        if raw is None:
+            raw = factor_scores.get(f"{name}_score")
+        if raw is None:
+            return 0.5
+        try:
+            score = float(raw)
+        except Exception:
+            return 0.5
+        return score / 100.0 if score > 1.0 else score
+
+    from app.services.signal_quality_funnel import SignalFunnelInput
+
+    profile = signal_quality_funnel.preview_quality(
+        SignalFunnelInput(
+            signal_id=signal.id,
+            signal_type=signal_type,
+            signal_strength=float(signal.signal_strength or 0.0),
+            symbol=signal.symbol,
+            direction=str(signal.direction or "LONG").upper(),
+            regime=str(extra_meta.get("regime") or "SIDEWAYS"),
+            composite_score=float(signal.confidence or 0.0),
+            aligned_count=int(extra_meta.get("aligned_count") or factor_scores.get("aligned_count") or 0),
+            aligned_dims=list(extra_meta.get("aligned_dims") or factor_scores.get("aligned_dims") or []),
+            opposing_dims=list(extra_meta.get("opposing_dims") or factor_scores.get("opposing_dims") or []),
+            neutral_dims=list(extra_meta.get("neutral_dims") or factor_scores.get("neutral_dims") or []),
+            tech_direction=_dim_dir("technical"),
+            fundamental_direction=_dim_dir("fundamental"),
+            macro_score=_dim_score("macro"),
+            options_score=_dim_score("options"),
+            adv_usd=extra_meta.get("adv_usd") or factor_scores.get("adv_usd"),
+            market_cap=extra_meta.get("market_cap") or factor_scores.get("market_cap"),
+            historical_ic=extra_meta.get("historical_ic") or factor_scores.get("historical_ic"),
+            timing_quality=extra_meta.get("timing_quality") or factor_scores.get("timing_quality"),
+        )
+    )
+    return {
+        "signal_quality_tier": profile.tier,
+        "signal_quality_score": profile.score,
+        "signal_quality_quota_exempt": profile.quota_exempt,
+    }
 
 
 async def _count_broker_filled_today(account_id: str) -> Optional[int]:
@@ -195,6 +269,14 @@ async def get_autonomy_status(
         s for s in closing_signals
         if s.status in {SignalStatus.REJECTED, SignalStatus.FAILED}
     ]
+    quality_snapshots = [_build_signal_quality_snapshot(s) for s in today_signals]
+    elite_signals_today = [item for item in quality_snapshots if item["signal_quality_tier"] == SignalQualityTier.ELITE]
+    high_quality_signals_today = [item for item in quality_snapshots if item["signal_quality_tier"] in {SignalQualityTier.ELITE, SignalQualityTier.HIGH}]
+    pending_elite_signals = [
+        s for s in today_signals
+        if _build_signal_quality_snapshot(s)["signal_quality_tier"] == SignalQualityTier.ELITE
+        and s.status in {SignalStatus.GENERATED, SignalStatus.VALIDATED, SignalStatus.QUEUED}
+    ]
 
     # 熔断：若今日已执行失败超过 3 笔，视为熔断触发
     fail_result = await session.execute(
@@ -267,6 +349,12 @@ async def get_autonomy_status(
             "fast_path_signals_today": len(closing_signals),
             "force_exit_signals_today": len(force_exit_signals),
             "closing_failures_today": len(closing_failed),
+        },
+        "signal_quality": {
+            "elite_signals_today": len(elite_signals_today),
+            "high_quality_signals_today": len(high_quality_signals_today),
+            "pending_elite_signals": len(pending_elite_signals),
+            "quota_exempt_signals_today": len([item for item in quality_snapshots if item["signal_quality_quota_exempt"]]),
         },
     }
 
@@ -389,6 +477,21 @@ async def get_audit_log(
                 ),
                 "risk_gate_detail": r.risk_gate_detail,
                 "circuit_breaker_triggered": bool(r.circuit_breaker_triggered),
+                "signal_quality_tier": (
+                    _build_signal_quality_snapshot(signal_map[str(r.order_id)])["signal_quality_tier"]
+                    if r.order_id and str(r.order_id) in signal_map
+                    else None
+                ),
+                "signal_quality_score": (
+                    _build_signal_quality_snapshot(signal_map[str(r.order_id)])["signal_quality_score"]
+                    if r.order_id and str(r.order_id) in signal_map
+                    else None
+                ),
+                "signal_quality_quota_exempt": bool(
+                    _build_signal_quality_snapshot(signal_map[str(r.order_id)])["signal_quality_quota_exempt"]
+                    if r.order_id and str(r.order_id) in signal_map
+                    else False
+                ),
             }
             for r in rows
         ],
@@ -580,6 +683,7 @@ async def get_signal_pipeline(
                 ),
                 "executed_at": s.executed_at.isoformat() if s.executed_at else None,
                 "created_at": s.created_at.isoformat() if s.created_at else None,
+                **_build_signal_quality_snapshot(s),
             }
             for s in signals
         ]

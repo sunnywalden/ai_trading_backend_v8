@@ -33,6 +33,13 @@ from app.models.signal_quality_audit_log import RejectionReason, FunnelResult
 logger = logging.getLogger(__name__)
 
 
+class SignalQualityTier:
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    ELITE = "ELITE"
+
+
 @dataclass
 class SignalFunnelInput:
     """输入漏斗的信号元数据"""
@@ -41,6 +48,7 @@ class SignalFunnelInput:
     regime:    str                   # 当前市场体制
     signal_id: Optional[int] = None
     signal_type: str = "ENTRY"      # ENTRY / ADD / REDUCE / EXIT / STOP_LOSS_EXIT
+    signal_strength: float = 0.0     # 0-100，原始信号强度
 
     # ── 六维评分（来自 SignalFusionEngine）──
     composite_score:       float = 0.5     # 0-1
@@ -82,11 +90,23 @@ class FunnelDecision:
 
     # Conviction Score 详情（仅 Layer 3+ 评估后有值）
     conviction: Optional[ConvictionComponents] = None
+    signal_quality_tier: str = SignalQualityTier.LOW
+    signal_quality_score: float = 0.0
+    quota_exempt: bool = False
 
     # 上下文快照
     concurrent_positions: int = 0
     daily_signals_used:   int = 0
     regime:               str = ""
+
+
+@dataclass
+class SignalQualityProfile:
+    """供排队与日配额豁免使用的信号质量画像。"""
+    tier: str
+    score: float
+    quota_exempt: bool
+    conviction: ConvictionComponents
 
 
 class SignalQualityFunnel:
@@ -134,6 +154,11 @@ class SignalQualityFunnel:
             daily_signals_used   = daily_signals_executed,
         )
         is_closing = str(signal.signal_type or "ENTRY").upper() in {"REDUCE", "EXIT", "STOP_LOSS_EXIT", "TAKE_PROFIT_EXIT", "FORCE_EXIT"}
+        quality_profile = self.preview_quality(signal, cfg=cfg, regime_cfg=regime_cfg)
+        decision.conviction = quality_profile.conviction
+        decision.signal_quality_tier = quality_profile.tier
+        decision.signal_quality_score = quality_profile.score
+        decision.quota_exempt = quality_profile.quota_exempt
 
         # ── Layer 0: 宇宙过滤 ───────────────────────────────────────────────
         reject = self._layer0_universe(signal, cfg)
@@ -159,6 +184,7 @@ class SignalQualityFunnel:
             current_positions_count,
             daily_signals_executed,
             is_closing=is_closing,
+            quality_profile=quality_profile,
         )
         if reject:
             decision.rejected_at_layer = 2
@@ -178,22 +204,7 @@ class SignalQualityFunnel:
             return decision
 
         # ── Layer 4: 置信度校准门 ─────────────────────────────────────────────
-        conviction = signal_conviction_scorer.compute(
-            symbol             = signal.symbol,
-            signal_direction   = signal.direction,
-            regime             = signal.regime,
-            composite_score    = signal.composite_score,
-            aligned_count      = signal.aligned_count,
-            aligned_dims       = signal.aligned_dims,
-            opposing_dims      = signal.opposing_dims,
-            neutral_dims       = signal.neutral_dims,
-            tech_direction     = signal.tech_direction,
-            fundamental_direction = signal.fundamental_direction,
-            macro_score        = signal.macro_score,
-            options_score      = signal.options_score,
-            historical_ic      = signal.historical_ic,
-            timing_quality     = signal.timing_quality,
-        )
+        conviction = quality_profile.conviction
         decision.conviction = conviction
 
         threshold = regime_cfg.get("SIGNAL_CONFIDENCE_THRESHOLD",
@@ -213,9 +224,92 @@ class SignalQualityFunnel:
         await self._write_audit(decision, signal, cfg, db)
         logger.info(
             f"[SignalFunnel] ✅ PASSED {signal.symbol} {signal.direction}@{signal.regime} "
-            f"conviction={conviction.conviction_score:.1f}"
+            f"conviction={conviction.conviction_score:.1f} quality={quality_profile.tier}"
         )
         return decision
+
+    def preview_quality(
+        self,
+        signal: SignalFunnelInput,
+        *,
+        cfg: Optional[SignalQualityConfig] = None,
+        regime_cfg: Optional[dict] = None,
+    ) -> SignalQualityProfile:
+        """在真正进入漏斗前预估信号质量，用于队列排序和日配额豁免。"""
+        cfg = cfg or get_signal_quality_config()
+        regime_cfg = regime_cfg or get_regime_adjusted_config(signal.regime)
+        conviction = self._compute_conviction(signal)
+        tier = self._classify_quality_tier(signal, conviction, cfg)
+        score = round(conviction.conviction_score, 2)
+        quota_exempt = tier == SignalQualityTier.ELITE
+        logger.debug(
+            "[SignalFunnel] preview quality %s %s -> %s score=%.1f quota_exempt=%s",
+            signal.symbol,
+            signal.direction,
+            tier,
+            score,
+            quota_exempt,
+        )
+        return SignalQualityProfile(
+            tier=tier,
+            score=score,
+            quota_exempt=quota_exempt,
+            conviction=conviction,
+        )
+
+    def _compute_conviction(self, signal: SignalFunnelInput) -> ConvictionComponents:
+        return signal_conviction_scorer.compute(
+            symbol             = signal.symbol,
+            signal_direction   = signal.direction,
+            regime             = signal.regime,
+            composite_score    = self._normalize_ratio(signal.composite_score, default=0.5),
+            aligned_count      = signal.aligned_count,
+            aligned_dims       = signal.aligned_dims,
+            opposing_dims      = signal.opposing_dims,
+            neutral_dims       = signal.neutral_dims,
+            tech_direction     = signal.tech_direction,
+            fundamental_direction = signal.fundamental_direction,
+            macro_score        = self._normalize_ratio(signal.macro_score, default=0.5),
+            options_score      = self._normalize_ratio(signal.options_score, default=0.5),
+            historical_ic      = self._normalize_optional_ratio(signal.historical_ic),
+            timing_quality     = self._normalize_optional_ratio(signal.timing_quality),
+        )
+
+    @staticmethod
+    def _normalize_ratio(value: Optional[float], *, default: float = 0.0) -> float:
+        if value is None:
+            return default
+        val = float(value)
+        if val > 1.0:
+            val = val / 100.0
+        return max(0.0, min(1.0, val))
+
+    @classmethod
+    def _normalize_optional_ratio(cls, value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        return cls._normalize_ratio(value)
+
+    def _classify_quality_tier(
+        self,
+        signal: SignalFunnelInput,
+        conviction: ConvictionComponents,
+        cfg: SignalQualityConfig,
+    ) -> str:
+        if conviction.anti_resonance_killed:
+            return SignalQualityTier.LOW
+
+        if (
+            conviction.conviction_score >= cfg.ELITE_SIGNAL_SCORE
+            and conviction.calibrated_lower_bound >= cfg.ELITE_SIGNAL_FLOOR
+            and signal.aligned_count >= cfg.ELITE_MIN_ALIGNED_DIMS
+        ):
+            return SignalQualityTier.ELITE
+        if conviction.conviction_score >= cfg.HIGH_QUALITY_SIGNAL_SCORE:
+            return SignalQualityTier.HIGH
+        if conviction.conviction_score >= cfg.MEDIUM_QUALITY_SIGNAL_SCORE:
+            return SignalQualityTier.MEDIUM
+        return SignalQualityTier.LOW
 
     # ──────────────────────────────────────────────────────────────────────────
     # Layer 0: 宇宙过滤
@@ -271,6 +365,7 @@ class SignalQualityFunnel:
         current_positions: int,
         daily_executed: int,
         is_closing: bool = False,
+        quality_profile: Optional[SignalQualityProfile] = None,
     ) -> Optional[tuple[str, str]]:
         max_pos   = regime_cfg.get("MAX_CONCURRENT_POSITIONS", 6)
         max_daily = regime_cfg.get("MAX_DAILY_SIGNALS", 5)
@@ -285,10 +380,19 @@ class SignalQualityFunnel:
                 f"当前持仓数 {current_positions} 已达上限 {max_pos}",
             )
         if daily_executed >= max_daily:
-            return (
-                RejectionReason.DAILY_QUOTA_EXHAUSTED,
-                f"今日已推进信号 {daily_executed} 个，已达日配额 {max_daily}",
-            )
+            if quality_profile and quality_profile.quota_exempt:
+                logger.info(
+                    "[SignalFunnel] ELITE signal bypassing daily quota: %s score=%.1f used=%s/%s",
+                    signal.symbol,
+                    quality_profile.score,
+                    daily_executed,
+                    max_daily,
+                )
+            else:
+                return (
+                    RejectionReason.DAILY_QUOTA_EXHAUSTED,
+                    f"今日已推进信号 {daily_executed} 个，已达日配额 {max_daily}",
+                )
         if (signal.max_correlation_with_existing is not None
                 and signal.max_correlation_with_existing >= max_corr):
             return (

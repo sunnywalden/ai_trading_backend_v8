@@ -104,6 +104,143 @@ class AutonomousEngine:
             return "FAST_CLOSE"
         return "STANDARD"
 
+    def _is_closing_signal_preview(self, signal: dict) -> bool:
+        signal_type = str(signal.get("signal_type") or "").upper()
+        meta = self._signal_extra_metadata(signal)
+        meta_intent = str(meta.get("closing_intent") or "").upper()
+        return signal_type in {"EXIT", "REDUCE", "STOP_LOSS_EXIT", "TAKE_PROFIT_EXIT", "FORCE_EXIT"} or meta_intent in {
+            "EXIT", "REDUCE", "STOP_LOSS_EXIT", "TAKE_PROFIT_EXIT", "FORCE_EXIT"
+        }
+
+    @staticmethod
+    def _safe_dict(value: Any) -> dict[str, Any]:
+        return value if isinstance(value, dict) else {}
+
+    @classmethod
+    def _extract_dimension_payload(cls, signal: dict) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+        factor_scores = cls._safe_dict(signal.get("factor_scores"))
+        extra_meta = cls._safe_dict(signal.get("extra_metadata"))
+        dimensions = signal.get("dimensions")
+        if not isinstance(dimensions, list):
+            dimensions = extra_meta.get("dimensions")
+        if not isinstance(dimensions, list):
+            dimensions = factor_scores.get("dimensions")
+        if not isinstance(dimensions, list):
+            dimensions = []
+        return dimensions, factor_scores, extra_meta
+
+    def _build_signal_funnel_input(self, signal: dict, regime: Optional[str]) -> Any:
+        from app.services.signal_quality_funnel import SignalFunnelInput
+
+        dimensions, factor_scores, extra_meta = self._extract_dimension_payload(signal)
+
+        def _from_sources(key: str, default: Any = None) -> Any:
+            if key in signal and signal.get(key) is not None:
+                return signal.get(key)
+            if key in extra_meta and extra_meta.get(key) is not None:
+                return extra_meta.get(key)
+            if key in factor_scores and factor_scores.get(key) is not None:
+                return factor_scores.get(key)
+            signal_dims = self._safe_dict(factor_scores.get("signal_dimensions"))
+            if key in signal_dims and signal_dims.get(key) is not None:
+                return signal_dims.get(key)
+            return default
+
+        def _dim_dir(name: str) -> int:
+            for item in dimensions:
+                if isinstance(item, dict) and item.get("name") == name:
+                    try:
+                        return int(item.get("direction", 0))
+                    except Exception:
+                        return 0
+            return 0
+
+        def _dim_score(name: str) -> float:
+            for item in dimensions:
+                if isinstance(item, dict) and item.get("name") == name:
+                    try:
+                        score = float(item.get("score", 0.5))
+                    except Exception:
+                        score = 0.5
+                    return score / 100.0 if score > 1.0 else score
+            raw = _from_sources(f"{name}_score", None)
+            if raw is None:
+                return 0.5
+            try:
+                value = float(raw)
+            except Exception:
+                return 0.5
+            return value / 100.0 if value > 1.0 else value
+
+        confidence = float(signal.get("confidence") or signal.get("fused_confidence") or 0.0)
+        if confidence > 1.0:
+            confidence = confidence / 100.0
+
+        return SignalFunnelInput(
+            signal_id                     = signal.get("id"),
+            signal_type                   = str(signal.get("signal_type") or "ENTRY").upper(),
+            signal_strength               = float(signal.get("signal_strength") or 0.0),
+            symbol                        = str(signal.get("symbol") or ""),
+            direction                     = str(signal.get("direction") or "LONG").upper(),
+            regime                        = regime or "SIDEWAYS",
+            composite_score               = confidence,
+            aligned_count                 = int(_from_sources("aligned_count", 0) or 0),
+            aligned_dims                  = list(_from_sources("aligned_dims", []) or []),
+            opposing_dims                 = list(_from_sources("opposing_dims", []) or []),
+            neutral_dims                  = list(_from_sources("neutral_dims", []) or []),
+            tech_direction                = _dim_dir("technical"),
+            fundamental_direction         = _dim_dir("fundamental"),
+            macro_score                   = _dim_score("macro"),
+            options_score                 = _dim_score("options"),
+            adv_usd                       = _from_sources("adv_usd", None),
+            market_cap                    = _from_sources("market_cap", None),
+            max_correlation_with_existing = _from_sources("max_correlation_with_existing", 0.0),
+            historical_ic                 = _from_sources("historical_ic", None),
+            timing_quality                = _from_sources("timing_quality", None),
+            generated_at                  = signal.get("created_at") or signal.get("generated_at"),
+        )
+
+    def _rank_signals_for_processing(self, signals: list[dict], regime: Optional[str]) -> list[dict]:
+        from app.services.signal_quality_funnel import signal_quality_funnel
+
+        ranked: list[dict] = []
+        for signal in signals:
+            is_force_exit = self._is_force_exit(signal)
+            is_closing = self._is_closing_signal_preview(signal)
+            execution_path = self._resolve_execution_path(is_closing, is_force_exit)
+            queue_meta = {
+                "execution_path": execution_path,
+                "is_force_exit": is_force_exit,
+                "is_closing": is_closing,
+                "signal_quality_tier": None,
+                "signal_quality_score": None,
+                "signal_quality_quota_exempt": False,
+            }
+            if not is_closing:
+                funnel_input = self._build_signal_funnel_input(signal, regime)
+                quality_profile = signal_quality_funnel.preview_quality(funnel_input)
+                queue_meta.update({
+                    "signal_quality_tier": quality_profile.tier,
+                    "signal_quality_score": quality_profile.score,
+                    "signal_quality_quota_exempt": quality_profile.quota_exempt,
+                })
+            signal.update(queue_meta)
+            ranked.append(signal)
+
+        def _sort_key(item: dict) -> tuple[int, float, int, float, int]:
+            path = str(item.get("execution_path") or "STANDARD").upper()
+            path_rank = 3 if path == "FORCE_EXIT" else 2 if path == "FAST_CLOSE" else 1
+            quality_score = float(item.get("signal_quality_score") or 0.0)
+            quota_rank = 1 if item.get("signal_quality_quota_exempt") else 0
+            priority = int(item.get("priority") or 0)
+            confidence = float(item.get("confidence") or 0.0)
+            return (path_rank, quality_score, quota_rank, confidence, priority)
+
+        ranked.sort(key=_sort_key, reverse=True)
+        for idx, signal in enumerate(ranked, start=1):
+            signal["signal_queue_rank"] = idx
+        return ranked
+
     def _annotate_gate_details(
         self,
         gate: Any,
@@ -184,6 +321,8 @@ class AutonomousEngine:
             logger.info(f"[AutonomousEngine] No pending signals (GENERATED/VALIDATED) for {account_id} — cycle skipped")
             return []
 
+        signals = self._rank_signals_for_processing(signals, regime_at_decision)[:10]
+
         # ⚘️ 竞争防护：立刻将所有信号标记为 QUEUED，防止运行相邻 jobs 重复拥取
         #  (run_daily_trading_cycle 在 08:00 + run_autonomous_decision_cycle 每 30m 均可能调用这里)
         from sqlalchemy import update as sa_update
@@ -208,6 +347,10 @@ class AutonomousEngine:
             is_closing = self._is_closing_intent(signal, decision, is_force_exit)
             execution_path = self._resolve_execution_path(is_closing, is_force_exit)
             decision["execution_path"] = execution_path
+            decision["signal_quality_tier"] = signal.get("signal_quality_tier")
+            decision["signal_quality_score"] = signal.get("signal_quality_score")
+            decision["signal_quality_quota_exempt"] = bool(signal.get("signal_quality_quota_exempt"))
+            decision["signal_queue_rank"] = signal.get("signal_queue_rank")
 
             # ─────────────────────────────────────────────────────────────────
             # V10.4.2: 信号精英化漏斗 — RiskGate 前置的多维度品质过滤
@@ -225,48 +368,10 @@ class AutonomousEngine:
                     from app.services.signal_quality_funnel import (
                         signal_quality_funnel, SignalFunnelInput,
                     )
-                    _dims: list = signal.get("dimensions") or []
-
-                    def _dim_dir(name: str) -> int:
-                        for _d in _dims:
-                            if isinstance(_d, dict) and _d.get("name") == name:
-                                return int(_d.get("direction", 0))
-                        return 0
-
-                    def _dim_score(name: str) -> float:
-                        for _d in _dims:
-                            if isinstance(_d, dict) and _d.get("name") == name:
-                                return float(_d.get("score", 0.5))
-                        return 0.5
-
+                    _funnel_input = self._build_signal_funnel_input(signal, regime_at_decision)
                     _action = str(decision.get("action", "HOLD")).upper()
-                    _sq_dir = "LONG" if _action == "BUY" else ("SHORT" if _action == "SELL" else "HOLD")
-                    _sq_conf = float(
-                        signal.get("confidence") or signal.get("fused_confidence") or 0.0
-                    )
-                    # 兼容 0-1 和 0-100 两种置信度格式
-                    _composite = _sq_conf * 100 if _sq_conf <= 1.0 else _sq_conf
-
-                    _funnel_input = SignalFunnelInput(
-                        signal_id                     = signal.get("id"),
-                        signal_type                   = str(signal.get("signal_type") or "ENTRY").upper(),
-                        symbol                        = str(decision.get("symbol") or signal.get("symbol") or ""),
-                        direction                     = _sq_dir,
-                        regime                        = regime_at_decision or "SIDEWAYS",
-                        composite_score               = _composite,
-                        aligned_count                 = int(signal.get("aligned_count") or 0),
-                        aligned_dims                  = list(signal.get("aligned_dims") or []),
-                        opposing_dims                 = list(signal.get("opposing_dims") or []),
-                        tech_direction                = _dim_dir("technical"),
-                        fundamental_direction         = _dim_dir("fundamental"),
-                        macro_score                   = _dim_score("macro"),
-                        options_score                 = _dim_score("options"),
-                        adv_usd                       = float(signal.get("adv_usd") or 5_000_000),
-                        market_cap                    = float(signal.get("market_cap") or 5_000_000_000),
-                        max_correlation_with_existing = 0.0,  # 后续可接入相关性矩阵
-                        historical_ic                 = signal.get("historical_ic"),
-                        timing_quality                = signal.get("timing_quality"),
-                    )
+                    _funnel_input.direction = "LONG" if _action == "BUY" else ("SHORT" if _action == "SELL" else _funnel_input.direction)
+                    _funnel_input.symbol = str(decision.get("symbol") or _funnel_input.symbol)
                     _funnel_decision = await signal_quality_funnel.evaluate(
                         signal                  = _funnel_input,
                         db                      = db,
@@ -291,6 +396,9 @@ class AutonomousEngine:
                             "order_id":            None,
                             "execution_intent_id": None,
                             "execution_path":      execution_path,
+                            "signal_quality_tier": _funnel_decision.signal_quality_tier,
+                            "signal_quality_score": _funnel_decision.signal_quality_score,
+                            "signal_quality_quota_exempt": _funnel_decision.quota_exempt,
                             "reason":              _reject_reason,
                         })
             except Exception as _sq_err:
@@ -374,6 +482,9 @@ class AutonomousEngine:
                             "order_id": None,
                             "execution_intent_id": execution_intent_id,
                             "execution_path": execution_path,
+                            "signal_quality_tier": signal.get("signal_quality_tier"),
+                            "signal_quality_score": signal.get("signal_quality_score"),
+                            "signal_quality_quota_exempt": bool(signal.get("signal_quality_quota_exempt")),
                             "reason": skip_reason,
                         }
                     )
@@ -400,6 +511,9 @@ class AutonomousEngine:
                             "order_id": None,
                             "execution_intent_id": None,
                             "execution_path": execution_path,
+                            "signal_quality_tier": signal.get("signal_quality_tier"),
+                            "signal_quality_score": signal.get("signal_quality_score"),
+                            "signal_quality_quota_exempt": bool(signal.get("signal_quality_quota_exempt")),
                             "reason": "duplicate-execution-intent",
                         }
                     )
@@ -455,6 +569,9 @@ class AutonomousEngine:
                             "order_id": None,
                             "execution_intent_id": execution_intent_id,
                             "execution_path": execution_path,
+                            "signal_quality_tier": signal.get("signal_quality_tier"),
+                            "signal_quality_score": signal.get("signal_quality_score"),
+                            "signal_quality_quota_exempt": bool(signal.get("signal_quality_quota_exempt")),
                             "reason": f"duplicate-order cooldown({cooldown_min}m)",
                         }
                     )
@@ -517,6 +634,9 @@ class AutonomousEngine:
                                 "order_id": None,
                                 "execution_intent_id": execution_intent_id,
                                 "execution_path": execution_path,
+                                "signal_quality_tier": signal.get("signal_quality_tier"),
+                                "signal_quality_score": signal.get("signal_quality_score"),
+                                "signal_quality_quota_exempt": bool(signal.get("signal_quality_quota_exempt")),
                                 "reason": f"redis-order-lock({lock_seconds}s)",
                             }
                         )
@@ -596,6 +716,9 @@ class AutonomousEngine:
                 "order_id": order_id,
                 "execution_intent_id": execution_intent_id,
                 "execution_path": execution_path,
+                "signal_quality_tier": signal.get("signal_quality_tier"),
+                "signal_quality_score": signal.get("signal_quality_score"),
+                "signal_quality_quota_exempt": bool(signal.get("signal_quality_quota_exempt")),
                 "circuit_breaker": circuit_breaker,
                 "reason": gate.reason,
             })
@@ -1299,7 +1422,7 @@ class AutonomousEngine:
                     )
                 )
                 .order_by(sa_desc(TradingSignal.priority), sa_desc(TradingSignal.confidence))
-                .limit(10)
+                .limit(30)
             )
             result = await db.execute(stmt)
             rows = result.scalars().all()
@@ -1319,6 +1442,49 @@ class AutonomousEngine:
                     "strategy": str(r.signal_source.value) if r.signal_source else "STRATEGY",
                     "status": r.status.value,
                     "notes": r.notes,
+                    "priority": int(r.priority or 0),
+                    "factor_scores": r.factor_scores if isinstance(r.factor_scores, dict) else {},
+                    "dimensions": (
+                        ((r.extra_metadata or {}).get("dimensions") if isinstance(r.extra_metadata, dict) else None)
+                        or ((r.factor_scores or {}).get("dimensions") if isinstance(r.factor_scores, dict) else None)
+                        or []
+                    ),
+                    "aligned_count": (
+                        ((r.extra_metadata or {}).get("aligned_count") if isinstance(r.extra_metadata, dict) else None)
+                        or ((r.factor_scores or {}).get("aligned_count") if isinstance(r.factor_scores, dict) else None)
+                        or 0
+                    ),
+                    "aligned_dims": (
+                        ((r.extra_metadata or {}).get("aligned_dims") if isinstance(r.extra_metadata, dict) else None)
+                        or ((r.factor_scores or {}).get("aligned_dims") if isinstance(r.factor_scores, dict) else None)
+                        or []
+                    ),
+                    "opposing_dims": (
+                        ((r.extra_metadata or {}).get("opposing_dims") if isinstance(r.extra_metadata, dict) else None)
+                        or ((r.factor_scores or {}).get("opposing_dims") if isinstance(r.factor_scores, dict) else None)
+                        or []
+                    ),
+                    "neutral_dims": (
+                        ((r.extra_metadata or {}).get("neutral_dims") if isinstance(r.extra_metadata, dict) else None)
+                        or ((r.factor_scores or {}).get("neutral_dims") if isinstance(r.factor_scores, dict) else None)
+                        or []
+                    ),
+                    "adv_usd": (
+                        ((r.extra_metadata or {}).get("adv_usd") if isinstance(r.extra_metadata, dict) else None)
+                        or ((r.factor_scores or {}).get("adv_usd") if isinstance(r.factor_scores, dict) else None)
+                    ),
+                    "market_cap": (
+                        ((r.extra_metadata or {}).get("market_cap") if isinstance(r.extra_metadata, dict) else None)
+                        or ((r.factor_scores or {}).get("market_cap") if isinstance(r.factor_scores, dict) else None)
+                    ),
+                    "historical_ic": (
+                        ((r.extra_metadata or {}).get("historical_ic") if isinstance(r.extra_metadata, dict) else None)
+                        or ((r.factor_scores or {}).get("historical_ic") if isinstance(r.factor_scores, dict) else None)
+                    ),
+                    "timing_quality": (
+                        ((r.extra_metadata or {}).get("timing_quality") if isinstance(r.extra_metadata, dict) else None)
+                        or ((r.factor_scores or {}).get("timing_quality") if isinstance(r.factor_scores, dict) else None)
+                    ),
                     "extra_metadata": r.extra_metadata if isinstance(r.extra_metadata, dict) else {},
                 }
                 for r in rows
