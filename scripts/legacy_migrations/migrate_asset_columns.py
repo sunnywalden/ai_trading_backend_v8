@@ -2,7 +2,7 @@ import os
 import sys
 
 # Add the project root to sys.path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from app.core.config import settings
 from sqlalchemy import create_engine, text

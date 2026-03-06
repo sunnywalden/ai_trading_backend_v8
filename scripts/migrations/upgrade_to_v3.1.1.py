@@ -296,7 +296,7 @@ class DatabaseUpgrader:
             
             print("\n📋 后续步骤：")
             print("  1. 运行验证脚本: python scripts/migrations/verify_v3.1.1.py")
-            print("  2. 初始化新策略: python scripts/init_strategies.py")
+            print("  2. 初始化新策略: python scripts/bootstrap/init_strategies.py")
             print("  3. 重启应用服务")
             print("  4. 监控应用日志")
             
