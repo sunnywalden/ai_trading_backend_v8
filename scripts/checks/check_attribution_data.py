@@ -1,4 +1,11 @@
 """检查归因分析数据状态"""
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import asyncio
 import app.models.strategy
 from datetime import datetime, timedelta, timezone

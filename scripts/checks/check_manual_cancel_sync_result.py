@@ -1,4 +1,11 @@
 """检查手动撤单同步后的关键状态。"""
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import asyncio
 
 from sqlalchemy import desc, select

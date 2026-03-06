@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """V10.4.1 验收测试脚本"""
-import asyncio
+from pathlib import Path
 import sys
-import os
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import asyncio
 import app.models.strategy  # noqa: F401 — 触发模型注册
 
 from sqlalchemy import text, select, func

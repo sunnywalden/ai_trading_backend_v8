@@ -3,6 +3,13 @@
 
 创建所有必需的数据库表并预置内置策略
 """
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import asyncio
 from datetime import datetime
 from typing import Sequence

@@ -12,7 +12,7 @@ fix_account_id_data.py
 
 运行顺序
 ────────
-1. 先执行 `scripts/migrate_user_id_to_account_id.sql`（ALTER TABLE / 索引重命名）
+1. 先执行 `scripts/sql/migrate_user_id_to_account_id.sql`（ALTER TABLE / 索引重命名）
 2. 再执行本脚本修复历史数据
 
 也可在 ALTER TABLE **之前** 执行本脚本（脚本会自动检测列名）。
@@ -20,13 +20,13 @@ fix_account_id_data.py
 使用场景
 ────────
   # 仅预览（默认 dry-run，不修改数据）
-  python scripts/fix_account_id_data.py
+    python scripts/maintenance/fix_account_id_data.py
 
   # 实际执行
-  python scripts/fix_account_id_data.py --apply
+    python scripts/maintenance/fix_account_id_data.py --apply
 
   # 指定额外的用户→账号映射（覆盖自动检测）
-  python scripts/fix_account_id_data.py --apply --map admin=21272246230273657
+    python scripts/maintenance/fix_account_id_data.py --apply --map admin=21272246230273657
 
 修复策略
 ────────
@@ -44,10 +44,16 @@ decision_post_mortems            无唯一约束 → UPDATE
 """
 from __future__ import annotations
 
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import argparse
 import asyncio
 import logging
-import sys
 from typing import Any
 
 from sqlalchemy import text

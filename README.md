@@ -195,7 +195,7 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 ### 交易生命周期数据修复（上线辅助）
 
-当版本上线前需要对交易生命周期数据做一次巡检/收敛时，可使用：`scripts/reconcile_lifecycle_rollout.py`
+当版本上线前需要对交易生命周期数据做一次巡检/收敛时，可使用：`scripts/maintenance/reconcile_lifecycle_rollout.py`
 
 特性：
 - 默认 `dry-run`，只输出建议，不写库
@@ -207,13 +207,13 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 ```bash
 # 默认 dry-run：查看建议动作
-python scripts/reconcile_lifecycle_rollout.py
+python scripts/maintenance/reconcile_lifecycle_rollout.py
 
 # 对指定账户执行修复（含券商对账）
-python scripts/reconcile_lifecycle_rollout.py --account-id 21272246230273657 --apply
+python scripts/maintenance/reconcile_lifecycle_rollout.py --account-id 21272246230273657 --apply
 
 # 仅修复指定计划，不触发券商对账
-python scripts/reconcile_lifecycle_rollout.py --plan-ids 49,50,53 --skip-broker-sync --apply
+python scripts/maintenance/reconcile_lifecycle_rollout.py --plan-ids 49,50,53 --skip-broker-sync --apply
 ```
 
 ### 运行行为评分任务

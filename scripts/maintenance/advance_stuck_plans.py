@@ -2,20 +2,23 @@
 
 用法:
   # 预览（不写库）
-  python scripts/advance_stuck_plans.py --dry-run
+    python scripts/maintenance/advance_stuck_plans.py --dry-run
 
   # 实际执行（直接流转到规则允许的最终阶段）
-  python scripts/advance_stuck_plans.py
+    python scripts/maintenance/advance_stuck_plans.py
 
   # 强制跳过等待时间，将 S12-S15 全部直接推到 S16
-  python scripts/advance_stuck_plans.py --force-complete
+    python scripts/maintenance/advance_stuck_plans.py --force-complete
 """
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import asyncio
 import argparse
-import sys
-import os
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import app.models.strategy  # noqa — 预加载关系
 from app.models.db import SessionLocal

@@ -6,24 +6,27 @@
 3. 默认 dry-run，仅输出建议；显式传 --apply 才会写库
 
 示例：
-  python scripts/reconcile_lifecycle_rollout.py
+    python scripts/maintenance/reconcile_lifecycle_rollout.py
     # 不指定 --account-id 时，自动获取当前券商账户
-  python scripts/reconcile_lifecycle_rollout.py --account-id 21272246230273657 --apply
-  python scripts/reconcile_lifecycle_rollout.py --plan-ids 49,50,53 --apply --skip-broker-sync
+    python scripts/maintenance/reconcile_lifecycle_rollout.py --account-id 21272246230273657 --apply
+    python scripts/maintenance/reconcile_lifecycle_rollout.py --plan-ids 49,50,53 --apply --skip-broker-sync
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import argparse
 import asyncio
 import json
-import os
-import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import app.models.strategy  # noqa: F401
 from sqlalchemy import and_, or_, select

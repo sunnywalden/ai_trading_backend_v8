@@ -1,4 +1,11 @@
 """深度诊断：追踪 actual_return 无法回填的具体断点"""
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import asyncio
 import sys
 sys.path.insert(0, "/Users/admin/IdeaProjects/ai_trading_backend_v8")
