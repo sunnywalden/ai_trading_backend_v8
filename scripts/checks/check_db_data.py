@@ -9,11 +9,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import asyncio
-import sys
 import os
-
-# 将项目根目录添加到 sys.path
-sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
 async def check_data():
     from app.models.db import engine

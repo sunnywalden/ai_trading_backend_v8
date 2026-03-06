@@ -1,7 +1,7 @@
 """Upgrade script: extend `macd_status` column length to avoid "Data too long" errors.
 
 Usage:
-    ./venv/bin/python scripts/upgrade_macd_status.py
+    ./venv/bin/python scripts/legacy_migrations/upgrade_macd_status.py
 
 This script is safe to run multiple times; it will check current length and only ALTER when needed.
 """
@@ -9,8 +9,8 @@ import asyncio
 import os
 import sys
 
-# Ensure the parent directory is in sys.path so 'app' can be found
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+# Ensure the project root directory is in sys.path so 'app' can be found
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
 from sqlalchemy import text
 from app.models.db import engine
