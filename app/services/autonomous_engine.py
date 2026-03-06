@@ -1550,6 +1550,23 @@ class AutonomousEngine:
                 reasoning=str(decision.get("reasoning", ""))[:2000],
                 autonomy_action="AUTO_EXECUTE",
                 source="AI_AUTONOMOUS",
+                plan_tags={
+                    "signal_id": str(signal.get("signal_id") or signal.get("id") or "") or None,
+                    "signal_db_id": signal.get("id"),
+                    "order_id": str(order_id or "") or None,
+                    "algo_type": decision.get("algo"),
+                },
+                provenance_snapshot={
+                    "execution_ref": {
+                        "signal_id": str(signal.get("signal_id") or signal.get("id") or "") or None,
+                        "signal_db_id": signal.get("id"),
+                        "order_id": str(order_id or "") or None,
+                    },
+                    "exec_progress": {
+                        "algo_type": decision.get("algo"),
+                        "submitted": True,
+                    },
+                },
                 pipeline_stage=7,           # S7: 下单执行（已完成）
                 stage_entered_at=datetime.now(timezone.utc),
                 position_fsm_state="ENTERING",  # 初始持仓状态

@@ -17,6 +17,7 @@ from app.models.db import get_session, redis_client
 from app.models.fsm_transition_log import FsmTransitionLog
 from app.models.trading_plan import TradingPlan
 from app.routers.api_monitoring import monitoring_health_check
+from app.core.market_hours import is_symbol_market_active
 from app.schemas.lifecycle import PIPELINE_P50_BENCHMARKS, PIPELINE_STAGE_NAMES
 from app.schemas.system_monitor import (
     DataFlowDetailResponse,
@@ -174,6 +175,13 @@ def _build_exception_from_plan(plan: TradingPlan, severity: str, last_error_mess
     )
 
 
+def _is_terminal_resolved_plan(plan: TradingPlan) -> bool:
+    stage_id = int(plan.pipeline_stage or 0)
+    status = str(plan.plan_status or "").upper()
+    position_state = str(plan.position_fsm_state or "").upper()
+    return stage_id >= 16 and status in {"FAILED", "REVOKED", "EXPIRED", "CANCELLED"} and position_state in {"CLOSED", ""}
+
+
 async def _load_recent_plans(db: AsyncSession, window_minutes: int) -> list[TradingPlan]:
     cutoff = _now() - timedelta(minutes=window_minutes)
     stmt = (
@@ -251,6 +259,8 @@ async def _build_lifecycle_overview(db: AsyncSession, window_minutes: int, only_
     cutoff = _now() - timedelta(minutes=window_minutes)
     for plan in recent_plans:
         if str(plan.plan_status or "").upper() != "FAILED":
+            continue
+        if _is_terminal_resolved_plan(plan):
             continue
         updated_at = _to_utc(plan.updated_at)
         if updated_at and updated_at < cutoff:
@@ -507,6 +517,16 @@ async def _build_data_flow_payload(db: AsyncSession, window_minutes: int) -> tup
     snapshot = await situational_awareness_service.get_snapshot(db)
     now = _now()
     has_active_pipeline = lifecycle.headline.active_intents > 0
+    recent_plans = await _load_recent_plans(db, window_minutes)
+    active_market_symbols = {
+        plan.symbol
+        for plan in recent_plans
+        if plan.symbol
+        and plan.pipeline_stage is not None
+        and plan.pipeline_stage < 16
+        and is_symbol_market_active(plan.symbol, now)
+    }
+    requires_live_market_data = has_active_pipeline and bool(active_market_symbols)
 
     signal_ts = await _load_latest_timestamp(db, ["SELECT MAX(created_at) FROM trading_signals"])
     market_ts = await _load_latest_timestamp(db, [
@@ -519,12 +539,12 @@ async def _build_data_flow_payload(db: AsyncSession, window_minutes: int) -> tup
 
     signal_status = (
         "HEALTHY"
-        if (not has_active_pipeline) or signal_lag is None or signal_lag <= 1800
+        if (not requires_live_market_data) or signal_lag is None or signal_lag <= 1800
         else ("WARN" if signal_lag <= 3600 else "CRITICAL")
     )
     market_status = (
         "HEALTHY"
-        if (not has_active_pipeline) or market_lag is None or market_lag <= 1800
+        if (not requires_live_market_data) or market_lag is None or market_lag <= 1800
         else ("WARN" if market_lag <= 3600 else "CRITICAL")
     )
 
@@ -561,12 +581,12 @@ async def _build_data_flow_payload(db: AsyncSession, window_minutes: int) -> tup
             status=signal_status,
             heartbeat_at=signal_ts,
             last_success_at=signal_ts,
-            lag_seconds=signal_lag if has_active_pipeline else 0.0,
+            lag_seconds=signal_lag if requires_live_market_data else 0.0,
             queue_depth=lifecycle_stage_map.get(1).active_count if lifecycle_stage_map.get(1) else 0,
             throughput_1m=float(lifecycle_stage_map.get(1).active_count or 0) if lifecycle_stage_map.get(1) else None,
             throughput_5m=float(lifecycle_stage_map.get(3).active_count or 0) if lifecycle_stage_map.get(3) else None,
-            last_error_code="SIGNAL_STALE" if has_active_pipeline and signal_lag and signal_lag > 1800 else None,
-            last_error_message="信号生成长时间无更新" if has_active_pipeline and signal_lag and signal_lag > 1800 else None,
+            last_error_code="SIGNAL_STALE" if requires_live_market_data and signal_lag and signal_lag > 1800 else None,
+            last_error_message="信号生成长时间无更新" if requires_live_market_data and signal_lag and signal_lag > 1800 else None,
             downstream_nodes=["portfolio_decision"],
         ),
         _stage_node(5, "portfolio_decision", "Portfolio Decision", ["signal_generation"], ["risk_gate"]),
@@ -582,12 +602,12 @@ async def _build_data_flow_payload(db: AsyncSession, window_minutes: int) -> tup
             status=market_status,
             heartbeat_at=market_ts,
             last_success_at=market_ts,
-            lag_seconds=market_lag if has_active_pipeline else 0.0,
+            lag_seconds=market_lag if requires_live_market_data else 0.0,
             queue_depth=None,
             throughput_1m=None,
             throughput_5m=None,
-            last_error_code="MARKET_DATA_STALE" if has_active_pipeline and market_lag and market_lag > 1800 else None,
-            last_error_message="市场数据长时间无更新" if has_active_pipeline and market_lag and market_lag > 1800 else None,
+            last_error_code="MARKET_DATA_STALE" if requires_live_market_data and market_lag and market_lag > 1800 else None,
+            last_error_message="市场数据长时间无更新" if requires_live_market_data and market_lag and market_lag > 1800 else None,
             downstream_nodes=["regime_classification"],
         ),
         _make_node(

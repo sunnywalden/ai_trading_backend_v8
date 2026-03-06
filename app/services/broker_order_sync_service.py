@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from sqlalchemy import and_, desc, distinct, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +17,7 @@ from app.models.trading_signal import SignalStatus, TradingSignal
 
 _BROKER_RECONCILE_ACTIVE_STAGES = frozenset({7, 8})
 _POST_TRADE_STAGE_START = 12
+_STAGE7_STALE_CLOSE_AFTER = timedelta(hours=6)
 
 
 def _is_plan_reconcile_candidate(plan_stage: Optional[int], plan_status: Optional[str]) -> bool:
@@ -75,6 +76,163 @@ def _derive_reconciled_stage(signal: TradingSignal, live_position_symbols: set[s
     if signal.status == SignalStatus.REJECTED:
         return 16, "FAILED", "CLOSED"
     return None, None, None
+
+
+def _normalize_utc(value: Any) -> datetime | None:
+    if not isinstance(value, datetime):
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _reason_implies_failed(reason: str | None) -> bool:
+    text = str(reason or "").lower()
+    if not text:
+        return False
+    keywords = (
+        "failed",
+        "reject",
+        "rejected",
+        "refused",
+        "insufficient",
+        "expired",
+        "exceeds your current holdings",
+        "券商拒绝",
+        "可用资金不足",
+        "失败",
+        "拒绝",
+        "过期",
+    )
+    return any(keyword in text for keyword in keywords)
+
+
+def _classify_terminal_status(reason: str | None) -> str:
+    text = str(reason or "").lower()
+    if not text:
+        return "REVOKED"
+    if "expired" in text or "过期" in text:
+        return "EXPIRED"
+    if "cancel" in text or "撤" in text:
+        return "REVOKED"
+    if _reason_implies_failed(reason):
+        return "FAILED"
+    return "REVOKED"
+
+
+async def _find_plan_signal(session: AsyncSession, real_account_id: str, plan: Any) -> TradingSignal | None:
+    plan_tags = cast(dict[str, Any], getattr(plan, "plan_tags", None) or {}) if isinstance(getattr(plan, "plan_tags", None), dict) else {}
+    snapshot = cast(dict[str, Any], getattr(plan, "provenance_snapshot", None) or {}) if isinstance(getattr(plan, "provenance_snapshot", None), dict) else {}
+    raw_exec_ref = snapshot.get("execution_ref")
+    exec_ref = cast(dict[str, Any], raw_exec_ref or {}) if isinstance(raw_exec_ref, dict) else {}
+
+    signal_db_id = plan_tags.get("signal_db_id") or exec_ref.get("signal_db_id")
+    if signal_db_id:
+        sig = (
+            await session.execute(select(TradingSignal).where(TradingSignal.id == int(signal_db_id)).limit(1))
+        ).scalar_one_or_none()
+        if sig is not None:
+            return sig
+
+    signal_id = plan_tags.get("signal_id") or exec_ref.get("signal_id")
+    if signal_id:
+        sig = (
+            await session.execute(select(TradingSignal).where(TradingSignal.signal_id == str(signal_id)).limit(1))
+        ).scalar_one_or_none()
+        if sig is not None:
+            return sig
+
+    order_id = plan_tags.get("order_id") or exec_ref.get("order_id")
+    if order_id:
+        sig = (
+            await session.execute(select(TradingSignal).where(TradingSignal.order_id == str(order_id)).limit(1))
+        ).scalar_one_or_none()
+        if sig is not None:
+            return sig
+
+    plan_created_at = _normalize_utc(getattr(plan, "created_at", None))
+    if plan_created_at is None:
+        return None
+    window_start = plan_created_at - timedelta(minutes=15)
+    window_end = plan_created_at + timedelta(minutes=15)
+    return (
+        await session.execute(
+            select(TradingSignal)
+            .where(TradingSignal.account_id == real_account_id)
+            .where(TradingSignal.symbol == plan.symbol)
+            .where(TradingSignal.created_at >= window_start.replace(tzinfo=None))
+            .where(TradingSignal.created_at <= window_end.replace(tzinfo=None))
+            .order_by(desc(TradingSignal.created_at), desc(TradingSignal.id))
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+async def _find_plan_intent_and_audit(session: AsyncSession, real_account_id: str, plan: Any) -> tuple[AutonomousExecutionIntent | None, AutonomyAuditLog | None]:
+    plan_created_at = _normalize_utc(getattr(plan, "created_at", None)) or datetime.now(timezone.utc)
+    window_start = plan_created_at - timedelta(minutes=15)
+    window_end = plan_created_at + timedelta(minutes=15)
+
+    intent = (
+        await session.execute(
+            select(AutonomousExecutionIntent)
+            .where(AutonomousExecutionIntent.account_id == real_account_id)
+            .where(AutonomousExecutionIntent.symbol == plan.symbol)
+            .where(AutonomousExecutionIntent.created_at >= window_start.replace(tzinfo=None))
+            .where(AutonomousExecutionIntent.created_at <= window_end.replace(tzinfo=None))
+            .order_by(desc(AutonomousExecutionIntent.created_at), desc(AutonomousExecutionIntent.id))
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    audit = (
+        await session.execute(
+            select(AutonomyAuditLog)
+            .where(AutonomyAuditLog.account_id == real_account_id)
+            .where(AutonomyAuditLog.symbol == plan.symbol)
+            .where(AutonomyAuditLog.created_at >= window_start.replace(tzinfo=None))
+            .where(AutonomyAuditLog.created_at <= window_end.replace(tzinfo=None))
+            .order_by(desc(AutonomyAuditLog.created_at), desc(AutonomyAuditLog.id))
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return intent, audit
+
+
+async def _derive_plan_resolution(
+    session: AsyncSession,
+    real_account_id: str,
+    plan: Any,
+    live_position_symbols: set[str],
+) -> tuple[Optional[int], Optional[str], Optional[str], Optional[str]]:
+    signal = await _find_plan_signal(session, real_account_id, plan)
+    if signal is not None:
+        stage, status, position_state = _derive_reconciled_stage(signal, live_position_symbols)
+        if stage is not None:
+            return stage, status, position_state, f"signal:{signal.status.value}"
+
+    intent, audit = await _find_plan_intent_and_audit(session, real_account_id, plan)
+    audit_revoked = audit is not None and audit.revoked_at is not None
+    intent_failed = intent is not None and str(intent.status or "").upper() == "FAILED"
+
+    if audit_revoked or intent_failed:
+        audit_reason = audit.revoke_reason if audit is not None and audit_revoked else None
+        intent_reason = intent.reason if intent is not None and intent_failed else None
+        reason = audit_reason or intent_reason
+        return 16, _classify_terminal_status(reason), "CLOSED", reason
+
+    if plan.symbol in live_position_symbols:
+        return 9, "EXECUTED", "HELD", "live-position"
+
+    stage_entered_at = _normalize_utc(getattr(plan, "stage_entered_at", None))
+    if (
+        str(getattr(plan, "plan_status", "") or "").upper() == "EXECUTED"
+        and stage_entered_at is not None
+        and datetime.now(timezone.utc) - stage_entered_at >= _STAGE7_STALE_CLOSE_AFTER
+    ):
+        return 12, "EXECUTED", "CLOSED", "stale-executed-no-position"
+
+    return None, None, None, None
 
 
 async def reconcile_broker_order_status(
@@ -163,68 +321,63 @@ async def reconcile_broker_order_status(
             filled_synced += 1
 
     # 3) 【关键修正】同步 TradingPlan 的 Pipeline 阶段 (针对 V10.3 看板)
-    if cancelled_synced > 0 or filled_synced > 0:
-        from app.models.trading_plan import TradingPlan
-        from app.models.fsm_transition_log import FsmTransitionLog
+    from app.models.trading_plan import TradingPlan
+    from app.models.fsm_transition_log import FsmTransitionLog
 
-        try:
-            raw_positions = await broker.list_underlying_positions(real_account_id)
-        except Exception:
-            raw_positions = []
-        live_position_symbols = _extract_live_position_symbols(list(raw_positions or []))
+    try:
+        raw_positions = await broker.list_underlying_positions(real_account_id)
+    except Exception:
+        raw_positions = []
+    live_position_symbols = _extract_live_position_symbols(list(raw_positions or []))
 
-        # 只处理仍在下单/执行链路中的计划；S12+ 由 post-trade pipeline 负责推进。
-        plans_res = await session.execute(
-            select(TradingPlan).where(TradingPlan.account_id == real_account_id)
+    plan_reconciled = 0
+
+    # 只处理仍在下单/执行链路中的计划；S12+ 由 post-trade pipeline 负责推进。
+    plans_res = await session.execute(
+        select(TradingPlan).where(TradingPlan.account_id == real_account_id)
+    )
+    for plan in plans_res.scalars().all():
+        if not _is_plan_reconcile_candidate(plan.pipeline_stage, plan.plan_status):
+            continue
+
+        new_stage, new_status, new_position_fsm_state, resolution_reason = await _derive_plan_resolution(
+            session,
+            real_account_id,
+            plan,
+            live_position_symbols,
         )
-        for plan in plans_res.scalars().all():
-            if not _is_plan_reconcile_candidate(plan.pipeline_stage, plan.plan_status):
-                continue
 
-            # 查找该计划发出的最新信号
-            sig_res = await session.execute(
-                select(TradingSignal)
-                .where(TradingSignal.account_id == real_account_id)
-                .where(TradingSignal.symbol == plan.symbol)
-                .where(TradingSignal.order_id.is_not(None))
-                .order_by(desc(TradingSignal.created_at))
-                .limit(1)
-            )
-            sig = sig_res.scalar_one_or_none()
-            if not sig: continue
+        should_update_stage = _should_apply_stage_update(plan.pipeline_stage, new_stage)
+        should_update_status = new_status is not None and new_status != plan.plan_status
+        should_update_position_fsm = (
+            new_position_fsm_state is not None and new_position_fsm_state != plan.position_fsm_state
+        )
 
-            new_stage, new_status, new_position_fsm_state = _derive_reconciled_stage(
-                sig,
-                live_position_symbols,
-            )
+        if should_update_stage or should_update_status or should_update_position_fsm:
+            old_stage = plan.pipeline_stage
+            applied_stage: Optional[int] = None
+            if should_update_stage and new_stage is not None:
+                applied_stage = new_stage
+                plan.pipeline_stage = applied_stage
+                plan.stage_entered_at = datetime.now(timezone.utc)
+            if new_position_fsm_state is not None:
+                plan.position_fsm_state = new_position_fsm_state
+            if new_status:
+                plan.plan_status = new_status
+            plan_reconciled += 1
 
-            should_update_stage = _should_apply_stage_update(plan.pipeline_stage, new_stage)
-            should_update_status = new_status is not None and new_status != plan.plan_status
-            should_update_position_fsm = (
-                new_position_fsm_state is not None and new_position_fsm_state != plan.position_fsm_state
-            )
-
-            if should_update_stage or should_update_status or should_update_position_fsm:
-                old_stage = plan.pipeline_stage
-                applied_stage: Optional[int] = None
-                if should_update_stage and new_stage is not None:
-                    applied_stage = new_stage
-                    plan.pipeline_stage = applied_stage
-                    plan.stage_entered_at = datetime.now(timezone.utc)
-                if new_position_fsm_state is not None:
-                    plan.position_fsm_state = new_position_fsm_state
-                if new_status:
-                    plan.plan_status = new_status
-                
-                # 记录 FSM 日志
-                if applied_stage is not None:
-                    session.add(FsmTransitionLog(
-                        plan_id=plan.id,
-                        fsm_type="PLAN",
-                        from_state=f"STAGE_{old_stage}" if old_stage is not None else "UNKNOWN",
-                        to_state=f"STAGE_{applied_stage}",
-                        trigger_reason="Broker status sync (Manual Cancel/Fill Sync)",
-                    ))
+            if applied_stage is not None:
+                session.add(FsmTransitionLog(
+                    plan_id=plan.id,
+                    fsm_type="PLAN",
+                    from_state=f"STAGE_{old_stage}" if old_stage is not None else "UNKNOWN",
+                    to_state=f"STAGE_{applied_stage}",
+                    trigger_reason=(
+                        f"Broker status sync (Manual Cancel/Fill Sync): {resolution_reason}"
+                        if resolution_reason
+                        else "Broker status sync (Manual Cancel/Fill Sync)"
+                    ),
+                ))
 
     await session.commit()
 
@@ -355,6 +508,7 @@ async def reconcile_broker_order_status(
         },
         "cancelled_synced": cancelled_synced,
         "filled_synced": filled_synced,
+        "plans_reconciled": plan_reconciled,
         "orphan_signals_fixed": orphan_fixed,
         "journal_entries_created": journal_created,
         "remaining_EXECUTING": int(remaining_exec),
