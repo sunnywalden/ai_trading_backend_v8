@@ -100,6 +100,22 @@ def _derive_position_fsm_state(plan_status: Optional[str], pipeline_stage: Optio
     return "HELD"  # 兜底
 
 
+def _make_position_snapshot_event(plan: TradingPlan, occurred_at: datetime, event_id: int) -> FsmTransitionEvent:
+    current_state = plan.position_fsm_state or _derive_position_fsm_state(plan.plan_status, plan.pipeline_stage)
+    return FsmTransitionEvent(
+        id=event_id,
+        plan_id=plan.id,
+        symbol=plan.symbol,
+        fsm_type="POSITION",
+        from_state=None,
+        to_state=current_state,
+        engine="snapshot",
+        qty_delta=None,
+        trigger_reason="Current position FSM snapshot (historical POSITION logs unavailable)",
+        occurred_at=occurred_at,
+    )
+
+
 class LifecycleService:
 
     def _clean_float(self, val: Any, default: float = 0.0) -> float:
@@ -292,6 +308,27 @@ class LifecycleService:
             logger.info("[LifecycleService] sync_position_fsm_states: updated %d plans", updated)
         return updated
 
+    async def append_position_fsm_log(
+        self,
+        db: AsyncSession,
+        *,
+        plan_id: int,
+        from_state: Optional[str],
+        to_state: Optional[str],
+        engine: Optional[str] = None,
+        trigger_reason: Optional[str] = None,
+    ) -> None:
+        if not to_state or from_state == to_state:
+            return
+        db.add(FsmTransitionLog(
+            plan_id=plan_id,
+            fsm_type="POSITION",
+            from_state=from_state,
+            to_state=to_state,
+            engine=engine,
+            trigger_reason=trigger_reason,
+        ))
+
     # ─────────────────────────────────────────────────────────────────────────
     # FSM Events
     # ─────────────────────────────────────────────────────────────────────────
@@ -302,15 +339,46 @@ class LifecycleService:
         size: int = 20,
         fsm_type: Optional[str] = None,
     ) -> FsmEventPage:
+        normalized_fsm_type = fsm_type.upper() if fsm_type else None
         conditions = []
-        if fsm_type:
-            conditions.append(FsmTransitionLog.fsm_type == fsm_type.upper())
+        if normalized_fsm_type:
+            conditions.append(FsmTransitionLog.fsm_type == normalized_fsm_type)
 
         # Total count
         count_stmt = select(func.count()).select_from(FsmTransitionLog)
         if conditions:
             count_stmt = count_stmt.where(and_(*conditions))
         total = (await db.execute(count_stmt)).scalar() or 0
+
+        # POSITION 事件历史尚未完整沉淀时，提供当前持仓 FSM 快照兜底，避免前端空白。
+        if normalized_fsm_type == "POSITION" and total == 0:
+            plans = list((
+                await db.execute(
+                    select(TradingPlan)
+                    .where(TradingPlan.position_fsm_state.is_not(None))
+                    .order_by(desc(TradingPlan.updated_at), desc(TradingPlan.id))
+                    .limit(size)
+                    .offset((page - 1) * size)
+                )
+            ).scalars().all())
+
+            snapshot_items: list[FsmTransitionEvent] = []
+            for idx, plan in enumerate(plans, start=1):
+                occurred_at = plan.updated_at or plan.created_at or datetime.now(timezone.utc)
+                if occurred_at.tzinfo is None:
+                    occurred_at = occurred_at.replace(tzinfo=timezone.utc)
+                snapshot_items.append(
+                    _make_position_snapshot_event(plan, occurred_at, event_id=-(page * 100000 + idx))
+                )
+
+            snapshot_total = int((
+                await db.execute(
+                    select(func.count())
+                    .select_from(TradingPlan)
+                    .where(TradingPlan.position_fsm_state.is_not(None))
+                )
+            ).scalar() or 0)
+            return FsmEventPage(items=snapshot_items, total=snapshot_total, page=page, size=size)
 
         # Fetch items with symbol join
         stmt = (

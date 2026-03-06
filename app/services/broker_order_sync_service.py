@@ -13,6 +13,7 @@ from app.engine.order_executor import OrderExecutor
 from app.models.autonomy_audit_log import AutonomyAuditLog
 from app.models.execution_intent import AutonomousExecutionIntent
 from app.models.trading_signal import SignalStatus, TradingSignal
+from app.services.lifecycle_service import lifecycle_service
 
 
 _BROKER_RECONCILE_ACTIVE_STAGES = frozenset({7, 8})
@@ -355,6 +356,7 @@ async def reconcile_broker_order_status(
 
         if should_update_stage or should_update_status or should_update_position_fsm:
             old_stage = plan.pipeline_stage
+            old_position_fsm = plan.position_fsm_state
             applied_stage: Optional[int] = None
             if should_update_stage and new_stage is not None:
                 applied_stage = new_stage
@@ -378,6 +380,19 @@ async def reconcile_broker_order_status(
                         else "Broker status sync (Manual Cancel/Fill Sync)"
                     ),
                 ))
+            if should_update_position_fsm and new_position_fsm_state is not None:
+                await lifecycle_service.append_position_fsm_log(
+                    session,
+                    plan_id=plan.id,
+                    from_state=old_position_fsm,
+                    to_state=new_position_fsm_state,
+                    engine="broker_sync",
+                    trigger_reason=(
+                        f"Broker status sync (Manual Cancel/Fill Sync): {resolution_reason}"
+                        if resolution_reason
+                        else "Broker status sync (Manual Cancel/Fill Sync)"
+                    ),
+                )
 
     await session.commit()
 
