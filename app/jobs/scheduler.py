@@ -77,6 +77,18 @@ def start_scheduler():
         logger.warning("Scheduler already running")
 
 
+def pause_scheduler():
+    """暂停调度器，阻止新的任务继续被触发。"""
+    scheduler = get_scheduler()
+    if not scheduler.running:
+        return
+    try:
+        scheduler.pause()
+        logger.info("Scheduler paused")
+    except Exception as e:
+        logger.warning(f"Failed to pause scheduler: {e}")
+
+
 def shutdown_scheduler(wait: bool = True):
     """关闭调度器
     

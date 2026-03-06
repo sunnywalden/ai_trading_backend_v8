@@ -2,12 +2,13 @@ from fastapi import FastAPI, Depends, Body, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
-from typing import Optional, AsyncGenerator, Callable
+from typing import Optional, AsyncGenerator, Callable, Any
 from app.i18n import get_translator
 from sqlalchemy.ext.asyncio import AsyncSession
 from contextlib import asynccontextmanager
 import asyncio
 import os
+import signal
 
 from app.core.config import settings
 from app.core.logging_config import setup_logging
@@ -80,7 +81,7 @@ from app.routers import journal as v9_journal
 from app.routers import alerts as v9_alerts
 from app.routers import orders as v9_orders
 from app.routers import websocket as v9_websocket
-from app.jobs.scheduler import init_scheduler, start_scheduler, shutdown_scheduler, add_job
+from app.jobs.scheduler import init_scheduler, start_scheduler, shutdown_scheduler, pause_scheduler, add_job
 from app.jobs.data_refresh_jobs import register_all_jobs
 from app.jobs.quant_loop_jobs import register_quant_loop_jobs  # NEW: 闭环定时任务
 from app.jobs.task_config_jobs import register_task_config_jobs  # V10: 动态配置同步任务
@@ -95,6 +96,87 @@ import logging
 from app.core.cache import cache
 
 logger = logging.getLogger(__name__)
+
+_tracked_startup_tasks: set[asyncio.Task] = set()
+_original_signal_handlers: dict[int, Any] = {}
+_shutdown_in_progress = False
+
+
+def _track_startup_task(task: asyncio.Task) -> None:
+    _tracked_startup_tasks.add(task)
+
+    def _cleanup(done_task: asyncio.Task) -> None:
+        _tracked_startup_tasks.discard(done_task)
+        try:
+            done_task.result()
+        except asyncio.CancelledError:
+            logger.info("[StartupTask] %s cancelled", done_task.get_name())
+        except Exception as exc:
+            logger.warning("[StartupTask] %s failed: %s", done_task.get_name(), exc)
+
+    task.add_done_callback(_cleanup)
+
+
+def _spawn_startup_task(coro, *, name: str) -> asyncio.Task:
+    task = asyncio.create_task(coro, name=name)
+    _track_startup_task(task)
+    return task
+
+
+async def _cancel_tracked_startup_tasks() -> None:
+    tasks = list(_tracked_startup_tasks)
+    if not tasks:
+        return
+
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _begin_fast_shutdown(source: str) -> None:
+    global _shutdown_in_progress
+    if _shutdown_in_progress:
+        return
+    _shutdown_in_progress = True
+
+    logger.info("[Shutdown] Fast shutdown triggered by %s", source)
+    if not settings.ENABLE_SCHEDULER:
+        return
+
+    try:
+        pause_scheduler()
+    except Exception as exc:
+        logger.warning("[Shutdown] Failed to pause scheduler: %s", exc)
+
+    try:
+        shutdown_scheduler(wait=False)
+    except Exception as exc:
+        logger.warning("[Shutdown] Failed to shut down scheduler quickly: %s", exc)
+
+
+def _install_signal_handlers() -> None:
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        previous = signal.getsignal(sig)
+        _original_signal_handlers[sig] = previous
+
+        def _handler(signum, frame, *, _previous=previous):
+            _begin_fast_shutdown(signal.Signals(signum).name)
+            if callable(_previous):
+                return _previous(signum, frame)
+            return None
+
+        signal.signal(sig, _handler)
+
+
+def _restore_signal_handlers() -> None:
+    for sig, handler in list(_original_signal_handlers.items()):
+        try:
+            signal.signal(sig, handler)
+        except Exception:
+            pass
+    _original_signal_handlers.clear()
 
 
 async def _warm_up_caches() -> None:
@@ -190,6 +272,10 @@ async def _bootstrap_market_universe() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理：启动时初始化调度器，关闭时清理"""
+    global _shutdown_in_progress
+    _shutdown_in_progress = False
+    _install_signal_handlers()
+
     # 启动时执行
     apply_proxy_env(
         ProxyConfig(
@@ -313,17 +399,17 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Failed to restore AutonomousEngine state: {_e}")
 
     # 异步预热关键缓存（非阻塞 fire-and-forget）
-    asyncio.create_task(_warm_up_caches())
+    _spawn_startup_task(_warm_up_caches(), name="startup-cache-warmup")
 
     # 启动即异步全量同步市场标的（DB + 缓存）
-    asyncio.create_task(_bootstrap_market_universe())
+    _spawn_startup_task(_bootstrap_market_universe(), name="startup-market-universe-bootstrap")
 
     yield
     
     # 关闭时执行
-    if settings.ENABLE_SCHEDULER:
-        shutdown_scheduler(wait=True)
-        logger.info("Scheduler shut down")
+    _begin_fast_shutdown("lifespan")
+    await _cancel_tracked_startup_tasks()
+    _restore_signal_handlers()
     
     if redis_client:
         await redis_client.close()
