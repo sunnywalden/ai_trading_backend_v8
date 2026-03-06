@@ -27,6 +27,58 @@ GROUP_MONITORING_STATUSES = {"PENDING_CONFIRM", "EXECUTED"}
 GROUP_COMPLETED_STATUSES = {"REVOKED", "FAILED", "CANCELLED", "EXPIRED"}
 
 
+def _is_closed_executed_plan(plan: TradingPlan) -> bool:
+    """EXECUTED 但已完成 post-trade 收敛的计划，应该视为 completed。"""
+    if plan.plan_status != "EXECUTED":
+        return False
+    if (plan.position_fsm_state or "").upper() == "CLOSED":
+        return True
+    return plan.pipeline_stage is not None and plan.pipeline_stage >= 16
+
+
+def _plan_group(plan: TradingPlan) -> str:
+    if plan.plan_status in GROUP_ACTIVE_STATUSES:
+        return "active"
+    if plan.plan_status == "EXECUTED" and (plan.position_fsm_state or "").upper() == "HELD":
+        return "active"
+    if plan.plan_status == "PENDING_CONFIRM":
+        return "monitoring"
+    if plan.plan_status == "EXECUTED" and not _is_closed_executed_plan(plan):
+        return "monitoring"
+    return "completed"
+
+
+def _active_plan_condition():
+    return or_(
+        TradingPlan.plan_status.in_(list(GROUP_ACTIVE_STATUSES)),
+        and_(
+            TradingPlan.plan_status == "EXECUTED",
+            TradingPlan.position_fsm_state == "HELD",
+        ),
+    )
+
+
+def _monitoring_plan_condition():
+    return or_(
+        TradingPlan.plan_status == "PENDING_CONFIRM",
+        and_(
+            TradingPlan.plan_status == "EXECUTED",
+            or_(TradingPlan.position_fsm_state.is_(None), TradingPlan.position_fsm_state.notin_(["HELD", "CLOSED"])),
+            or_(TradingPlan.pipeline_stage.is_(None), TradingPlan.pipeline_stage < 16),
+        ),
+    )
+
+
+def _completed_plan_condition():
+    return or_(
+        TradingPlan.plan_status.in_(list(GROUP_COMPLETED_STATUSES)),
+        and_(
+            TradingPlan.plan_status == "EXECUTED",
+            or_(TradingPlan.position_fsm_state == "CLOSED", TradingPlan.pipeline_stage >= 16),
+        ),
+    )
+
+
 def _build_risk_badges(plan: TradingPlan, tags: dict) -> list[RiskBadgeInfo]:
     """根据 plan 和 tags 构建风险标志列表。"""
     badges: list[RiskBadgeInfo] = []
@@ -95,12 +147,7 @@ def _plan_to_row(plan: TradingPlan) -> OrderBookRow:
     badges = _build_risk_badges(plan, tags)
 
     # 分组
-    if plan.plan_status in GROUP_ACTIVE_STATUSES:
-        group = "active"
-    elif plan.plan_status in GROUP_MONITORING_STATUSES:
-        group = "monitoring"
-    else:
-        group = "completed"
+    group = _plan_group(plan)
 
     # AI 摘要截断（80字）
     summary = plan.reasoning or ""
@@ -160,8 +207,12 @@ class OrderBookService:
         # 只查当日之后创建 + 当日已完成的（避免历史数据过大）
         conditions.append(
             or_(
-                TradingPlan.plan_status.notin_(list(GROUP_COMPLETED_STATUSES)),
-                TradingPlan.updated_at >= today_start,
+                _active_plan_condition(),
+                _monitoring_plan_condition(),
+                and_(
+                    _completed_plan_condition(),
+                    TradingPlan.updated_at >= today_start,
+                ),
             )
         )
 
@@ -216,17 +267,17 @@ class OrderBookService:
         today_start = datetime.combine(date.today(), datetime.min.time()).replace(tzinfo=timezone.utc)
 
         # 活跃数
-        active_stmt = select(func.count()).where(TradingPlan.plan_status.in_(list(GROUP_ACTIVE_STATUSES)))
+        active_stmt = select(func.count()).where(_active_plan_condition())
         active_count = (await db.execute(active_stmt)).scalar() or 0
 
         # 监控数
-        monitoring_stmt = select(func.count()).where(TradingPlan.plan_status.in_(list(GROUP_MONITORING_STATUSES)))
+        monitoring_stmt = select(func.count()).where(_monitoring_plan_condition())
         monitoring_count = (await db.execute(monitoring_stmt)).scalar() or 0
 
         # 今日完成数
         completed_stmt = select(func.count()).where(
             and_(
-                TradingPlan.plan_status.in_(list(GROUP_COMPLETED_STATUSES)),
+                _completed_plan_condition(),
                 TradingPlan.updated_at >= today_start,
             )
         )
@@ -234,13 +285,13 @@ class OrderBookService:
 
         # 平均置信度
         conf_stmt = select(func.avg(TradingPlan.confidence)).where(
-            TradingPlan.plan_status.in_(list(GROUP_ACTIVE_STATUSES))
+            _active_plan_condition()
         )
         avg_conf = (await db.execute(conf_stmt)).scalar()
 
         # 总浮盈：unrealized_pnl 存储在 plan_tags JSON，从 Python 层累加
         pnl_stmt = select(TradingPlan.plan_tags).where(
-            TradingPlan.plan_status.in_(list(GROUP_ACTIVE_STATUSES))
+            _active_plan_condition()
         )
         pnl_rows = (await db.execute(pnl_stmt)).scalars().all()
         total_pnl = sum(

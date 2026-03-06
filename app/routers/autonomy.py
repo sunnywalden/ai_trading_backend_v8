@@ -595,6 +595,37 @@ async def get_signal_pipeline(
             if sid and reason:
                 intent_map[sid] = reason
 
+    # 获取每个信号最新的漏斗审计结果（用于在流水线中显示漏斗拒绝原因，消除歧义）
+    from app.models.signal_quality_audit_log import SignalQualityAuditLog
+    funnel_map: dict = {}
+    if signals:
+        signal_ids_int = [s.signal_id for s in signals if s.signal_id is not None]
+        if signal_ids_int:
+            latest_subq = (
+                select(
+                    SignalQualityAuditLog.signal_id,
+                    func.max(SignalQualityAuditLog.id).label("max_id"),
+                )
+                .where(SignalQualityAuditLog.signal_id.in_(signal_ids_int))
+                .group_by(SignalQualityAuditLog.signal_id)
+                .subquery()
+            )
+            funnel_rows = await session.execute(
+                select(
+                    SignalQualityAuditLog.signal_id,
+                    SignalQualityAuditLog.funnel_result,
+                    SignalQualityAuditLog.rejected_at_layer,
+                    SignalQualityAuditLog.rejection_reason,
+                ).join(latest_subq, SignalQualityAuditLog.id == latest_subq.c.max_id)
+            )
+            for sid, fresult, layer, reason in funnel_rows:
+                if sid is not None:
+                    funnel_map[sid] = {
+                        "funnel_result": fresult,
+                        "funnel_rejected_at_layer": layer,
+                        "funnel_rejection_reason": reason,
+                    }
+
     return {
         "signals": [
             {
@@ -704,6 +735,9 @@ async def get_signal_pipeline(
                 ),
                 "executed_at": s.executed_at.isoformat() if s.executed_at else None,
                 "created_at": s.created_at.isoformat() if s.created_at else None,
+                "funnel_result": funnel_map.get(s.signal_id, {}).get("funnel_result"),
+                "funnel_rejected_at_layer": funnel_map.get(s.signal_id, {}).get("funnel_rejected_at_layer"),
+                "funnel_rejection_reason": funnel_map.get(s.signal_id, {}).get("funnel_rejection_reason"),
                 **_build_signal_quality_snapshot(s),
             }
             for s in signals

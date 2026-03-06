@@ -13,10 +13,12 @@ from __future__ import annotations
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
 from app.models.db import get_session
+from app.models.trading_plan import TradingPlan
 from app.services.signal_quality_config import (
     apply_runtime_override,
     get_signal_quality_config,
@@ -170,8 +172,25 @@ async def get_funnel_stats(
     - layer_stats: 每层被拒数量
     - rejection_breakdown: 按拒绝原因统计
     - daily_trend: 近 N 天每日精英率趋势
+    - current_positions_count: 当前 HELD 持仓数量
+    - max_concurrent_positions_cfg: 当前配置的最大并发仓位
     """
-    return await signal_audit_log_service.get_funnel_stats(db, since_days=since_days)
+    stats = await signal_audit_log_service.get_funnel_stats(db, since_days=since_days)
+
+    # 实时注入当前持仓数与配置上限，帮助解释 L2 (MAX_POSITIONS_REACHED) 拦截原因
+    held_count_stmt = select(func.count()).select_from(TradingPlan).where(
+        and_(
+            TradingPlan.plan_status == "EXECUTED",
+            TradingPlan.position_fsm_state == "HELD",
+        )
+    )
+    current_positions_count = (await db.execute(held_count_stmt)).scalar_one_or_none() or 0
+
+    cfg = get_signal_quality_config()
+    stats["current_positions_count"] = current_positions_count
+    stats["max_concurrent_positions_cfg"] = cfg.MAX_CONCURRENT_POSITIONS
+
+    return stats
 
 
 # ─────────────────────────────────────────────────────────────────────────────
