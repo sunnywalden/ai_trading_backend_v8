@@ -39,6 +39,11 @@ async def get_quality_config(
     """返回当前信号品质漏斗的所有可配置参数（含运行时覆盖值）。"""
     cfg = get_signal_quality_config()
     return {
+        "elite_signal_score":           cfg.ELITE_SIGNAL_SCORE,
+        "elite_signal_floor":           cfg.ELITE_SIGNAL_FLOOR,
+        "elite_min_aligned_dims":       cfg.ELITE_MIN_ALIGNED_DIMS,
+        "high_quality_signal_score":    cfg.HIGH_QUALITY_SIGNAL_SCORE,
+        "medium_quality_signal_score":  cfg.MEDIUM_QUALITY_SIGNAL_SCORE,
         "signal_confidence_threshold": cfg.SIGNAL_CONFIDENCE_THRESHOLD,
         "signal_resonance_min_dims":   cfg.SIGNAL_RESONANCE_MIN_DIMS,
         "max_concurrent_positions":    cfg.MAX_CONCURRENT_POSITIONS,
@@ -69,6 +74,11 @@ async def patch_quality_config(
     """
     # key 映射：前端小写下划线 → 内部大写常量
     _KEY_MAP = {
+        "elite_signal_score":           "ELITE_SIGNAL_SCORE",
+        "elite_signal_floor":           "ELITE_SIGNAL_FLOOR",
+        "elite_min_aligned_dims":       "ELITE_MIN_ALIGNED_DIMS",
+        "high_quality_signal_score":    "HIGH_QUALITY_SIGNAL_SCORE",
+        "medium_quality_signal_score":  "MEDIUM_QUALITY_SIGNAL_SCORE",
         "signal_confidence_threshold": "SIGNAL_CONFIDENCE_THRESHOLD",
         "signal_resonance_min_dims":   "SIGNAL_RESONANCE_MIN_DIMS",
         "max_concurrent_positions":    "MAX_CONCURRENT_POSITIONS",
@@ -90,6 +100,11 @@ async def patch_quality_config(
         "updated": True,
         "applied": overrides,
         "current": {
+            "elite_signal_score":           cfg.ELITE_SIGNAL_SCORE,
+            "elite_signal_floor":           cfg.ELITE_SIGNAL_FLOOR,
+            "elite_min_aligned_dims":       cfg.ELITE_MIN_ALIGNED_DIMS,
+            "high_quality_signal_score":    cfg.HIGH_QUALITY_SIGNAL_SCORE,
+            "medium_quality_signal_score":  cfg.MEDIUM_QUALITY_SIGNAL_SCORE,
             "signal_confidence_threshold": cfg.SIGNAL_CONFIDENCE_THRESHOLD,
             "signal_resonance_min_dims":   cfg.SIGNAL_RESONANCE_MIN_DIMS,
             "max_concurrent_positions":    cfg.MAX_CONCURRENT_POSITIONS,

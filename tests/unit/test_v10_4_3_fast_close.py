@@ -5,8 +5,14 @@ from typing import Any, cast
 from app.engine.order_executor import OrderExecutor
 from app.engine.signal_position_filter import Position, SignalPositionFilter
 from app.models.trading_signal import SignalType
+from app.services.autonomous_engine import AutonomousEngine
 from app.services.risk_gate_service import RiskGateService
-from app.services.signal_quality_funnel import SignalFunnelInput, SignalQualityFunnel
+from app.services.signal_quality_funnel import (
+    SignalFunnelInput,
+    SignalQualityFunnel,
+    SignalQualityProfile,
+    SignalQualityTier,
+)
 
 
 @pytest.mark.asyncio
@@ -105,6 +111,100 @@ def test_signal_quality_funnel_skips_layer2_for_closing_signals():
     )
 
     assert reject is None
+
+
+def test_signal_quality_funnel_allows_elite_signal_to_bypass_daily_quota():
+    funnel = SignalQualityFunnel()
+    signal = SignalFunnelInput(
+        signal_id=2,
+        symbol="MSFT",
+        signal_type="ENTRY",
+        direction="LONG",
+        regime="BULL_TREND",
+        composite_score=1.0,
+        aligned_count=6,
+        aligned_dims=["technical", "fundamental", "macro", "options", "flow", "sentiment"],
+        historical_ic=1.0,
+        timing_quality=1.0,
+        macro_score=1.0,
+        options_score=1.0,
+        tech_direction=1,
+        fundamental_direction=1,
+    )
+
+    quality_profile = funnel.preview_quality(signal)
+    reject = funnel._layer2_portfolio(
+        signal=signal,
+        regime_cfg={
+            "MAX_CONCURRENT_POSITIONS": 6,
+            "MAX_DAILY_SIGNALS": 0,
+            "MAX_POSITION_CORRELATION": 0.9,
+        },
+        current_positions=1,
+        daily_executed=1,
+        quality_profile=quality_profile,
+    )
+
+    assert quality_profile.tier == SignalQualityTier.ELITE
+    assert quality_profile.quota_exempt is True
+    assert reject is None
+
+
+def test_autonomous_engine_ranks_by_execution_path_then_quality():
+    engine = AutonomousEngine()
+    signals = [
+        {
+            "id": 1,
+            "symbol": "LOW",
+            "signal_type": "ENTRY",
+            "direction": "LONG",
+            "confidence": 0.75,
+            "priority": 1,
+            "aligned_count": 3,
+            "aligned_dims": ["technical", "macro", "flow"],
+            "historical_ic": 0.4,
+            "timing_quality": 0.5,
+            "macro_score": 0.6,
+            "options_score": 0.6,
+        },
+        {
+            "id": 2,
+            "symbol": "ELITE",
+            "signal_type": "ENTRY",
+            "direction": "LONG",
+            "confidence": 1.0,
+            "priority": 5,
+            "aligned_count": 6,
+            "aligned_dims": ["technical", "fundamental", "macro", "options", "flow", "sentiment"],
+            "historical_ic": 1.0,
+            "timing_quality": 1.0,
+            "macro_score": 1.0,
+            "options_score": 1.0,
+            "dimensions": [
+                {"name": "technical", "direction": 1, "score": 100},
+                {"name": "fundamental", "direction": 1, "score": 100},
+                {"name": "macro", "direction": 1, "score": 100},
+                {"name": "options", "direction": 1, "score": 100},
+            ],
+        },
+        {
+            "id": 3,
+            "symbol": "EXIT_NOW",
+            "signal_type": "EXIT",
+            "direction": "LONG",
+            "confidence": 0.2,
+            "priority": 0,
+        },
+    ]
+
+    ranked = engine._rank_signals_for_processing(signals, "BULL_TREND")
+
+    assert [item["symbol"] for item in ranked] == ["EXIT_NOW", "ELITE", "LOW"]
+    assert ranked[0]["execution_path"] == "FAST_CLOSE"
+    assert ranked[1]["signal_quality_tier"] == SignalQualityTier.ELITE
+    assert ranked[1]["signal_quality_quota_exempt"] is True
+    assert ranked[1]["signal_queue_rank"] == 2
+    assert ranked[2]["signal_quality_tier"] in {SignalQualityTier.LOW, SignalQualityTier.MEDIUM}
 
 
 @pytest.mark.asyncio

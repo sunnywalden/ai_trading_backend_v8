@@ -59,6 +59,28 @@ _REGIME_OVERRIDES: dict[str, dict[str, Any]] = {
 class SignalQualityConfig(BaseSettings):
     """信号质量门控参数（Pydantic BaseSettings 支持环境变量读取）"""
 
+    # ── 信号质量分级 ──────────────────────────────────────────────────────────────
+    ELITE_SIGNAL_SCORE: int = Field(
+        default=98,
+        description="ELITE（精英级）信号最低质量分",
+    )
+    ELITE_SIGNAL_FLOOR: int = Field(
+        default=90,
+        description="ELITE 信号最低校准下界",
+    )
+    ELITE_MIN_ALIGNED_DIMS: int = Field(
+        default=5,
+        description="ELITE 信号最低同向维度数",
+    )
+    HIGH_QUALITY_SIGNAL_SCORE: int = Field(
+        default=95,
+        description="HIGH（高质量）信号最低质量分",
+    )
+    MEDIUM_QUALITY_SIGNAL_SCORE: int = Field(
+        default=90,
+        description="MEDIUM（中质量）信号最低质量分",
+    )
+
     # ── 置信度门控 ──────────────────────────────────────────────────────────────
     SIGNAL_CONFIDENCE_THRESHOLD: int = Field(
         default=95,
