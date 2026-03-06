@@ -16,6 +16,7 @@ from app.engine.quant_trading_loop import QuantTradingLoop
 from app.core.config import settings
 from app.core.market_hours import is_any_market_active
 from app.broker.factory import make_option_broker_client
+from app.services.signal_quality_config import get_signal_quality_config
 
 logger = logging.getLogger(__name__)
 
@@ -256,6 +257,51 @@ async def run_position_rebalance_scan():
             logger.error(f"[quant_jobs] Position rebalance scan FAILED: {e}", exc_info=True)
 
 
+async def run_position_capacity_guard():
+    """
+    超并发持仓主动降载任务：
+    - 仅在交易时段执行
+    - 当当前持仓标的数 > SQ_MAX_CONCURRENT_POSITIONS 时
+    - 基于持仓评估/优化建议，优先对最弱持仓生成 EXIT 信号，
+      直到标的数回落至上限范围内
+    """
+    if not is_any_market_active():
+        logger.debug("[quant_jobs] run_position_capacity_guard: market inactive, skip")
+        return
+
+    async with SessionLocal() as session:
+        try:
+            from app.engine.position_rebalance_monitor import PositionRebalanceMonitor
+
+            account_id = await _resolve_runtime_account_id()
+            sq_cfg = get_signal_quality_config()
+            max_positions = int(sq_cfg.MAX_CONCURRENT_POSITIONS)
+
+            monitor = PositionRebalanceMonitor(session)
+            result = await monitor.enforce_position_capacity(
+                account_id=account_id,
+                max_positions=max_positions,
+                force_refresh_scores=True,
+            )
+
+            if result["status"] not in ("within-limit", "pending-exits-sufficient"):
+                logger.info(
+                    "[quant_jobs] Position capacity guard OK — "
+                    f"current={result['current_positions']} "
+                    f"max={result['max_positions']} "
+                    f"overflow={result['overflow']} "
+                    f"created_exit_signals={result['created_exit_signals']}"
+                )
+                for d in result.get("details", []):
+                    logger.info(
+                        f"  ↳ {d['symbol']} score={d.get('score')} "
+                        f"rec={d.get('recommendation')} risk={d.get('risk_level')} "
+                        f"signal={d.get('signal_created')}"
+                    )
+        except Exception as e:
+            logger.error(f"[quant_jobs] Position capacity guard FAILED: {e}", exc_info=True)
+
+
 async def run_broker_order_reconcile():
     """
     券商订单状态对账任务：定期回写本地订单状态。
@@ -329,8 +375,9 @@ def register_quant_loop_jobs(scheduler: AsyncIOScheduler):
       ④ 22:00 cron  — 自适应优化   （不受时段限制）
       ⑤ interval/15m— 持仓监控扫描（止损/止盈/超龄，市场时段守卫）
       ⑥ interval/60m— 持仓再平衡扫描（REDUCE/SELL建议转信号，市场时段守卫）
-      ⑦ interval/Nm — 券商订单对账（手动撤单/成交补偿同步，不受时段限制）
-      ⑧ interval/5m — 交易后流水线推进（S12→S16，不受时段限制）
+    ⑦ interval/15m— 超并发持仓主动降载（交易时段守卫）
+    ⑧ interval/Nm — 券商订单对账（手动撤单/成交补偿同步，不受时段限制）
+    ⑨ interval/5m — 交易后流水线推进（S12→S16，不受时段限制）
     """
 
     # ① 每日交易周期 — 早上 8:00
@@ -407,7 +454,17 @@ def register_quant_loop_jobs(scheduler: AsyncIOScheduler):
         replace_existing=True,
     )
 
-    # ⑦ 券商订单状态对账 — 每 N 分钟（默认 10 分钟，不受时段限制）
+    # ⑦ 超并发持仓主动降载 — 每 N 分钟（默认 15 分钟，交易时段守卫）
+    scheduler.add_job(
+        run_position_capacity_guard,
+        trigger="interval",
+        minutes=settings.POSITION_CAPACITY_GUARD_INTERVAL_MINUTES,
+        id="position_capacity_guard",
+        name=f"Position Capacity Guard (every {settings.POSITION_CAPACITY_GUARD_INTERVAL_MINUTES}m, market guard)",
+        replace_existing=True,
+    )
+
+    # ⑧ 券商订单状态对账 — 每 N 分钟（默认 10 分钟，不受时段限制）
     scheduler.add_job(
         run_broker_order_reconcile,
         trigger="interval",
@@ -417,7 +474,7 @@ def register_quant_loop_jobs(scheduler: AsyncIOScheduler):
         replace_existing=True,
     )
 
-    # ⑧ 交易后 Pipeline 推进 — 每 5 分钟（S12→S13→S14→S15→S16，不受时段限制）
+    # ⑨ 交易后 Pipeline 推进 — 每 5 分钟（S12→S13→S14→S15→S16，不受时段限制）
     scheduler.add_job(
         run_post_trade_pipeline_job,
         trigger="interval",
@@ -435,5 +492,6 @@ def register_quant_loop_jobs(scheduler: AsyncIOScheduler):
     logger.info("  ④ Adaptive Optimization:     22:00  (Daily)")
     logger.info(f" ⑤ Position Exit Scan:        every {settings.POSITION_MONITOR_INTERVAL_MINUTES}m  (market guard)")
     logger.info("  ⑥ Position Rebalance Scan:   every 60m  (REDUCE/SELL → Signal, market guard)")
-    logger.info(f"  ⑦ Broker Order Reconcile:    every {settings.BROKER_ORDER_SYNC_INTERVAL_MINUTES}m  (manual-cancel sync)")
-    logger.info("  ⑧ Post-Trade Pipeline:       every 5m   (S12→S13→S14→S15→S16 auto-advance)")
+    logger.info(f"  ⑦ Position Capacity Guard:   every {settings.POSITION_CAPACITY_GUARD_INTERVAL_MINUTES}m  (enforce SQ_MAX_CONCURRENT_POSITIONS)")
+    logger.info(f"  ⑧ Broker Order Reconcile:    every {settings.BROKER_ORDER_SYNC_INTERVAL_MINUTES}m  (manual-cancel sync)")
+    logger.info("  ⑨ Post-Trade Pipeline:       every 5m   (S12→S13→S14→S15→S16 auto-advance)")

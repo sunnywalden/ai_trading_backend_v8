@@ -43,6 +43,21 @@ _DEFAULT_REDUCE_RATIO   = 0.30
 # 评分有效期（超过此时间的评分不参考）
 _SCORE_VALID_HOURS = 24
 
+_RECOMMENDATION_RANK = {
+    "SELL": 0,
+    "REDUCE": 1,
+    "HOLD": 2,
+    "BUY": 3,
+    "STRONG_BUY": 4,
+}
+
+_RISK_LEVEL_RANK = {
+    "EXTREME": 0,
+    "HIGH": 1,
+    "MEDIUM": 2,
+    "LOW": 3,
+}
+
 
 class PositionRebalanceMonitor:
     """
@@ -177,6 +192,122 @@ class PositionRebalanceMonitor:
             "details": details,
         }
 
+    async def enforce_position_capacity(
+        self,
+        account_id: str,
+        *,
+        max_positions: int,
+        force_refresh_scores: bool = True,
+    ) -> Dict[str, Any]:
+        """当持仓标的数超过上限时，按最弱持仓优先生成 EXIT 信号，主动降载。"""
+        positions = await self._fetch_positions(account_id)
+        current_positions = len(positions)
+
+        if max_positions <= 0:
+            logger.warning("[CapacityGuard] invalid max_positions=%s, skip", max_positions)
+            return {
+                "current_positions": current_positions,
+                "max_positions": max_positions,
+                "overflow": 0,
+                "pending_exit_symbols": [],
+                "created_exit_signals": 0,
+                "details": [],
+                "status": "invalid-config",
+            }
+
+        if current_positions <= max_positions:
+            return {
+                "current_positions": current_positions,
+                "max_positions": max_positions,
+                "overflow": 0,
+                "pending_exit_symbols": [],
+                "created_exit_signals": 0,
+                "details": [],
+                "status": "within-limit",
+            }
+
+        pending_exit_symbols = await self._get_pending_exit_symbols(account_id)
+        symbols_in_position = {str(p["symbol"]).upper() for p in positions}
+        pending_exit_symbols = {s for s in pending_exit_symbols if s in symbols_in_position}
+        effective_overflow = max(0, current_positions - max_positions - len(pending_exit_symbols))
+
+        if effective_overflow <= 0:
+            return {
+                "current_positions": current_positions,
+                "max_positions": max_positions,
+                "overflow": current_positions - max_positions,
+                "pending_exit_symbols": sorted(pending_exit_symbols),
+                "created_exit_signals": 0,
+                "details": [],
+                "status": "pending-exits-sufficient",
+            }
+
+        candidates = await self._build_capacity_candidates(
+            account_id,
+            positions,
+            force_refresh_scores=force_refresh_scores,
+        )
+        candidates = [c for c in candidates if c["symbol"] not in pending_exit_symbols]
+        candidates.sort(key=self._capacity_candidate_sort_key)
+
+        created = 0
+        details: List[Dict[str, Any]] = []
+
+        for candidate in candidates[:effective_overflow]:
+            symbol = candidate["symbol"]
+            qty = float(candidate["qty"])
+            quantity = abs(qty)
+            note_reason = (
+                f"超出最大并发持仓上限：当前 {current_positions} 个 > 上限 {max_positions} 个；"
+                f"基于持仓评估自动腾挪仓位（score={candidate['overall_score']}, rec={candidate['recommendation']}）"
+            )
+            await self._create_signal(
+                account_id=account_id,
+                symbol=symbol,
+                qty=qty,
+                quantity=quantity,
+                signal_type=SignalType.EXIT,
+                score=int(candidate["overall_score"]),
+                recommendation=str(candidate["recommendation"]),
+                priority=92,
+                note_reason=note_reason,
+                metadata_extra={
+                    "capacity_guard": True,
+                    "capacity_guard_overflow": current_positions - max_positions,
+                    "capacity_guard_target_max": max_positions,
+                    "capacity_guard_rank": created + 1,
+                    "risk_level": candidate.get("risk_level"),
+                    "target_position": candidate.get("target_position"),
+                    "last_price": candidate.get("last_price"),
+                },
+            )
+            created += 1
+            details.append({
+                "symbol": symbol,
+                "score": candidate["overall_score"],
+                "recommendation": candidate["recommendation"],
+                "risk_level": candidate.get("risk_level"),
+                "target_position": candidate.get("target_position"),
+                "signal_created": SignalType.EXIT.value,
+            })
+
+        try:
+            await self.session.commit()
+        except Exception as e:
+            logger.error(f"[CapacityGuard] DB commit failed: {e}")
+            await self.session.rollback()
+            raise
+
+        return {
+            "current_positions": current_positions,
+            "max_positions": max_positions,
+            "overflow": current_positions - max_positions,
+            "pending_exit_symbols": sorted(pending_exit_symbols),
+            "created_exit_signals": created,
+            "details": details,
+            "status": "capacity-reduced",
+        }
+
     # ─────────────────────────────────────────────────────────
     # 内部方法
     # ─────────────────────────────────────────────────────────
@@ -197,8 +328,15 @@ class PositionRebalanceMonitor:
             for p in raw:
                 symbol = getattr(p, "symbol", None) or (p.get("symbol") if isinstance(p, dict) else None)
                 qty    = getattr(p, "quantity", None) or (p.get("quantity") or p.get("qty") if isinstance(p, dict) else None)
+                last_price = getattr(p, "last_price", None) or (p.get("last_price") if isinstance(p, dict) else None)
+                avg_price = getattr(p, "avg_price", None) or (p.get("avg_price") if isinstance(p, dict) else None)
                 if symbol and qty:
-                    result.append({"symbol": str(symbol).strip().upper(), "qty": float(qty)})
+                    result.append({
+                        "symbol": str(symbol).strip().upper(),
+                        "qty": float(qty),
+                        "last_price": float(last_price) if last_price not in (None, "") else None,
+                        "avg_price": float(avg_price) if avg_price not in (None, "") else None,
+                    })
             return result
         except Exception as e:
             logger.error(f"[RebalanceMonitor] 持仓拉取失败: {e}")
@@ -243,6 +381,79 @@ class PositionRebalanceMonitor:
         result = await self.session.execute(stmt)
         return result.scalars().first() is not None
 
+    async def _get_pending_exit_symbols(self, account_id: str) -> set[str]:
+        """获取已有待执行 EXIT 信号的标的集合。"""
+        stmt = select(TradingSignal.symbol).where(
+            and_(
+                TradingSignal.account_id == account_id,
+                TradingSignal.signal_type == SignalType.EXIT,
+                TradingSignal.status.in_([
+                    SignalStatus.GENERATED,
+                    SignalStatus.VALIDATED,
+                    SignalStatus.QUEUED,
+                    SignalStatus.EXECUTING,
+                ]),
+            )
+        )
+        result = await self.session.execute(stmt)
+        return {str(row[0]).upper() for row in result.all() if row and row[0]}
+
+    async def _build_capacity_candidates(
+        self,
+        account_id: str,
+        positions: List[Dict[str, Any]],
+        *,
+        force_refresh_scores: bool,
+    ) -> List[Dict[str, Any]]:
+        """构建超并发持仓降载候选：优先使用最新持仓评分与建议。"""
+        from app.services.position_scoring_service import PositionScoringService
+
+        scorer = PositionScoringService()
+        candidates: List[Dict[str, Any]] = []
+
+        for pos in positions:
+            symbol = str(pos["symbol"]).upper()
+            last_price = pos.get("last_price")
+            score_obj = await scorer.calculate_position_score(
+                symbol=symbol,
+                current_price=last_price,
+                force_refresh=force_refresh_scores,
+            )
+            if score_obj is None:
+                score_obj = await self._get_latest_score(account_id, symbol)
+
+            recommendation = str(getattr(score_obj, "recommendation", "HOLD") or "HOLD").upper()
+            overall_score_val = getattr(score_obj, "overall_score", 50) if score_obj is not None else 50
+            overall_score = int(overall_score_val) if overall_score_val is not None else 50
+
+            candidates.append({
+                "symbol": symbol,
+                "qty": float(pos["qty"]),
+                "last_price": last_price,
+                "recommendation": recommendation,
+                "overall_score": overall_score,
+                "risk_level": getattr(score_obj, "risk_level", None),
+                "target_position": getattr(score_obj, "target_position", None),
+            })
+
+        return candidates
+
+    @staticmethod
+    def _capacity_candidate_sort_key(candidate: Dict[str, Any]) -> tuple:
+        recommendation = str(candidate.get("recommendation") or "HOLD").upper()
+        risk_level = str(candidate.get("risk_level") or "MEDIUM").upper()
+        target_position = candidate.get("target_position")
+        if target_position is None:
+            target_position = 0.5
+
+        return (
+            _RECOMMENDATION_RANK.get(recommendation, 99),
+            int(candidate.get("overall_score") or 50),
+            _RISK_LEVEL_RANK.get(risk_level, 99),
+            float(target_position),
+            str(candidate.get("symbol") or ""),
+        )
+
     async def _create_signal(
         self,
         account_id: str,
@@ -253,10 +464,30 @@ class PositionRebalanceMonitor:
         score: int,
         recommendation: str,
         priority: int,
+        note_reason: Optional[str] = None,
+        metadata_extra: Optional[Dict[str, Any]] = None,
     ) -> TradingSignal:
         """创建 REDUCE / EXIT TradingSignal"""
         # 确定方向（多头减仓=SELL方向）
         direction = "LONG" if qty > 0 else "SHORT"
+
+        notes = note_reason or (
+            f"AI 评分 {score}/100 (建议: {recommendation}) — "
+            f"由 PositionRebalanceMonitor 自动生成"
+        )
+
+        metadata = {
+            "closing_intent": signal_type.value,
+            "execution_path": "FAST_CLOSE",
+            "generated_by": "PositionRebalanceMonitor",
+            "recommendation": recommendation,
+            "current_position": {
+                "qty": abs(qty),
+                "price": None,
+            },
+        }
+        if metadata_extra:
+            metadata.update(metadata_extra)
 
         signal = TradingSignal(
             signal_id         = str(uuid4()),
@@ -274,22 +505,10 @@ class PositionRebalanceMonitor:
             confidence        = max(0.1, (100 - score) / 100),
             risk_score        = (100 - score) / 100,
             priority          = priority,
-            notes             = (
-                f"AI 评分 {score}/100 (建议: {recommendation}) — "
-                f"由 PositionRebalanceMonitor 自动生成"
-            ),
+            notes             = notes,
             max_holding_days  = None,
             created_at        = datetime.utcnow(),
-            extra_metadata    = {
-                "closing_intent": signal_type.value,
-                "execution_path": "FAST_CLOSE",
-                "generated_by": "PositionRebalanceMonitor",
-                "recommendation": recommendation,
-                "current_position": {
-                    "qty": abs(qty),
-                    "price": None,
-                },
-            },
+            extra_metadata    = metadata,
         )
         self.session.add(signal)
         return signal
