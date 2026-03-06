@@ -2,6 +2,13 @@
 V9 演示数据初始化脚本
 生成模拟的交易日志、资金曲线、价格告警等数据，用于功能演示
 """
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import asyncio
 import random
 from datetime import date, datetime, timedelta

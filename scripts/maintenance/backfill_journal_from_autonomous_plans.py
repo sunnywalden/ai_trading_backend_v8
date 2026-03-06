@@ -6,6 +6,13 @@
 2) 若同 account_id+symbol 今日无对应 Journal，则补建一条 FAILED/COMPLETED 日志
 """
 
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import asyncio
 import os
 import sys

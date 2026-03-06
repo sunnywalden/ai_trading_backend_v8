@@ -1,4 +1,11 @@
 """检查交易可观测模块数据状态"""
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import asyncio
 import sys
 sys.path.insert(0, '/Users/admin/IdeaProjects/ai_trading_backend_v8')

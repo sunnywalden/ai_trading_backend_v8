@@ -1,6 +1,13 @@
 """
 初始化策略库 - 创建12个内置策略
 """
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from datetime import datetime
 from uuid import uuid4
 from sqlalchemy.ext.asyncio import AsyncSession

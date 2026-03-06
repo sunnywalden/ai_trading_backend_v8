@@ -4,6 +4,13 @@ traded_at = 交易实际平仓日期（来自 trade_journal.exit_date）
 这样归因记录的时间过滤按「交易发生时间」而非「入库时间」计算，
 修复按 7天/30天 筛选时看不到数据的问题。
 """
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import asyncio
 import re
 import sys

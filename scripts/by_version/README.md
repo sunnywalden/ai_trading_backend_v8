@@ -4,9 +4,9 @@
 
 > 说明：
 >
-> - **不改变原脚本路径**，这里只做版本归纳。
+> - 当前索引已与新的脚本子目录结构同步。
 > - **正式数据库升级** 优先看 `scripts/migrations/`。
-> - **根目录脚本** 多数是运维、验证、回填、排障工具；这里只标出与版本关系最强的部分。
+> - 非迁移脚本已按用途迁入 `bootstrap/`、`checks/`、`diagnostics/`、`maintenance/`、`performance/`、`sql/`。
 
 ## 目录导航
 
@@ -33,7 +33,7 @@
 
 | 版本 | 脚本 | 说明 |
 | --- | --- | --- |
-| v9 | `init_v9_demo_data.py` | v9 演示数据初始化 |
+| v9 | `bootstrap/init_v9_demo_data.py` | v9 演示数据初始化 |
 
 ## v10.2
 
@@ -41,96 +41,96 @@
 | --- | --- | --- |
 | v10.2 M1 | `migrations/upgrade_to_v10_2_m1.py` | V10.2 M1 升级 |
 | v10.2 M2 / M8 | `migrations/upgrade_to_v10_2_m2_m8.py` | V10.2 M2/M8 升级 |
-| v10.2 通用 | `verify_m2_calendar.py` | M2 日历验证 |
-| v10.2 通用 | `verify_m2_fence.py` | M2 围栏验证 |
+| v10.2 通用 | `checks/verify_m2_calendar.py` | M2 日历验证 |
+| v10.2 通用 | `checks/verify_m2_fence.py` | M2 围栏验证 |
 
 ## v10.3.x
 
 | 版本 | 脚本 | 说明 |
 | --- | --- | --- |
 | v10.3 | `migrations/upgrade_to_v10_3.py` | V10.3 升级 |
-| v10.3.2 | `check_v10_3_2_data.py` | V10.3.2 数据验收（只读） |
+| v10.3.2 | `checks/check_v10_3_2_data.py` | V10.3.2 数据验收（只读） |
 | v10.3.3 | `migrations/upgrade_to_v10_3_3.py` | V10.3.3 升级 |
-| v10.3.3+ | `fix_account_id_data.py` | user_id → account_id 历史数据修复 |
+| v10.3.3+ | `maintenance/fix_account_id_data.py` | user_id → account_id 历史数据修复 |
 | v10.3.4 | `migrations/upgrade_to_v10_3_4.py` | V10.3.4 升级 |
 
 ### v10.3.x 辅助脚本
 
 这些脚本未必只服务于单一补丁版本，但主要活跃于 V10.3 交易链路与归因/日志治理阶段：
 
-- `migrate_attribution_traded_at.py`
-- `check_attribution_data.py`
-- `verify_attribution_fix.py`
-- `verify_price_fix.py`
-- `verify_trigger_decision_cycle.py`
-- `check_signal_state.py`
-- `check_signals.py`
+- `maintenance/migrate_attribution_traded_at.py`
+- `checks/check_attribution_data.py`
+- `checks/verify_attribution_fix.py`
+- `checks/verify_price_fix.py`
+- `checks/verify_trigger_decision_cycle.py`
+- `checks/check_signal_state.py`
+- `checks/check_signals.py`
 
 ## v10.4.x
 
 | 版本 | 脚本 | 说明 |
 | --- | --- | --- |
 | v10.4.1 | `migrations/upgrade_to_v10_4_1.py` | V10.4.1 升级 |
-| v10.4.1 | `_acceptance_v10_4_1.py` | V10.4.1 验收测试 |
+| v10.4.1 | `checks/_acceptance_v10_4_1.py` | V10.4.1 验收测试 |
 | v10.4.2 | `migrations/upgrade_to_v10_4_2.py` | V10.4.2 升级 |
 
 ### V10.4.3 生命周期 / 系统监控上线波次
 
 以下脚本与最近的生命周期、系统监控、对账、日志回填治理强相关，可归入 **V10.4.3 上线辅助脚本集合**：
 
-- `reconcile_lifecycle_rollout.py`：生产上线辅助，归正交易生命周期终态语义
-- `sync_broker_manual_cancels.py`：同步券商手动撤单
-- `check_manual_cancel_sync_result.py`：校验手动撤单同步结果
-- `backfill_autonomous_plan_fsm_logs.py`：回填自主计划 FSM 日志
-- `backfill_journal_from_autonomous_plans.py`：从自主计划回填日志
-- `backfill_journal_prices.py`：回填日志价格
-- `check_plan_journal_alignment.py`：校验计划与日志对齐
-- `verify_lifecycle_and_journal_visibility.py`：验证生命周期与日志页面可见性
-- `diag_lifecycle.py`：生命周期诊断
-- `diag_post_trade_loop.py`：post-trade 诊断
-- `diag_signal_journal_link.py`：信号到日志链路诊断
-- `diag_stage7_stuck_orders.py`：Stage7 卡单诊断
-- `cleanup_stuck_plans.py`：清理卡住计划
-- `advance_stuck_plans.py`：推进卡住计划
-- `rescue_queued_signals.py`：抢救排队信号
-- `fix_draft_journals.py`：修复草稿日志
+- `maintenance/reconcile_lifecycle_rollout.py`：生产上线辅助，归正交易生命周期终态语义
+- `maintenance/sync_broker_manual_cancels.py`：同步券商手动撤单
+- `checks/check_manual_cancel_sync_result.py`：校验手动撤单同步结果
+- `maintenance/backfill_autonomous_plan_fsm_logs.py`：回填自主计划 FSM 日志
+- `maintenance/backfill_journal_from_autonomous_plans.py`：从自主计划回填日志
+- `maintenance/backfill_journal_prices.py`：回填日志价格
+- `checks/check_plan_journal_alignment.py`：校验计划与日志对齐
+- `checks/verify_lifecycle_and_journal_visibility.py`：验证生命周期与日志页面可见性
+- `diagnostics/diag_lifecycle.py`：生命周期诊断
+- `diagnostics/diag_post_trade_loop.py`：post-trade 诊断
+- `diagnostics/diag_signal_journal_link.py`：信号到日志链路诊断
+- `diagnostics/diag_stage7_stuck_orders.py`：Stage7 卡单诊断
+- `maintenance/cleanup_stuck_plans.py`：清理卡住计划
+- `maintenance/advance_stuck_plans.py`：推进卡住计划
+- `maintenance/rescue_queued_signals.py`：抢救排队信号
+- `maintenance/fix_draft_journals.py`：修复草稿日志
 
 ### V10.4.3 现场临时排障脚本
 
-以下 `_tmp_*` 脚本主要服务于最近一轮 V10.4.3 生命周期 / 系统监控现场排障，现已归档到 `archived/v10_4_3/`，根目录保留兼容入口：
+以下 `_tmp_*` 脚本主要服务于最近一轮 V10.4.3 生命周期 / 系统监控现场排障，现已归档到 `archived/v10_4_3/`：
 
-- `_tmp_system_monitor_inspect.py`
-- `_tmp_run_broker_sync.py`
-- `_tmp_stage7_diagnose.py`
-- `_tmp_stage7_evidence.py`
-- `_tmp_failed_three_detail.py`
-- `_tmp_check_three_status.py`
-- `_tmp_check_and_fix_three_failed.py`
-- `_tmp_check_s12.py`
-- `_tmp_check_fsm_type_counts.py`
+- `archived/v10_4_3/_tmp_system_monitor_inspect.py`
+- `archived/v10_4_3/_tmp_run_broker_sync.py`
+- `archived/v10_4_3/_tmp_stage7_diagnose.py`
+- `archived/v10_4_3/_tmp_stage7_evidence.py`
+- `archived/v10_4_3/_tmp_failed_three_detail.py`
+- `archived/v10_4_3/_tmp_check_three_status.py`
+- `archived/v10_4_3/_tmp_check_and_fix_three_failed.py`
+- `archived/v10_4_3/_tmp_check_s12.py`
+- `archived/v10_4_3/_tmp_check_fsm_type_counts.py`
 
 ## 通用脚本（不强绑定单一版本）
 
 这些脚本更适合作为长期通用工具使用，不建议强行塞进某个补丁版本：
 
-- `init_db.py`
-- `init_strategies.py`
-- `init_v10_equity.py`
-- `check_db_data.py`
-- `check_filter_logic.py`
-- `check_obs_data.py`
-- `check_schema.py`
-- `check_scores.py`
-- `verify_dashboard_data.py`
-- `benchmark_p95.py`
-- `clean_duplicate_signals.py`
-- `clear_hk_name_cache.py`
-- `fix_copilot_schema.py`
-- `fix_order_book_stuck.py`
-- `force_daily_cycle.py`
-- `debug_plans.py`
-- `diag_data_flow.py`
-- `test_yf.py`
+- `bootstrap/init_db.py`
+- `bootstrap/init_strategies.py`
+- `bootstrap/init_v10_equity.py`
+- `checks/check_db_data.py`
+- `checks/check_filter_logic.py`
+- `checks/check_obs_data.py`
+- `checks/check_schema.py`
+- `checks/check_scores.py`
+- `checks/verify_dashboard_data.py`
+- `performance/benchmark_p95.py`
+- `maintenance/clean_duplicate_signals.py`
+- `maintenance/clear_hk_name_cache.py`
+- `maintenance/fix_copilot_schema.py`
+- `maintenance/fix_order_book_stuck.py`
+- `maintenance/force_daily_cycle.py`
+- `diagnostics/debug_plans.py`
+- `diagnostics/diag_data_flow.py`
+- `performance/test_yf.py`
 
 详见：**[general.md](general.md)**
 
@@ -160,4 +160,4 @@
 1. **版本升级**：先查 `migrations/`，再查本索引里的对应版本辅助脚本。
 2. **线上修复**：优先找带 `reconcile` / `sync` / `backfill` / `verify` 名称的脚本。
 3. **现场排障**：`diag_*` 和 `_tmp_*` 仅建议用于问题定位，不建议长期纳入 SOP。
-4. **版本发布完成后**：优先将对应波次的 `_tmp_*` 脚本迁入 `archived/<version>/`，根目录仅保留兼容入口或直接删除。
+4. **版本发布完成后**：优先将对应波次的 `_tmp_*` 脚本迁入 `archived/<version>/`，避免根目录重新堆积一次性脚本。

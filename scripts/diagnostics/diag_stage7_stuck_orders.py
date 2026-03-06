@@ -1,9 +1,9 @@
 """diag_stage7_stuck_orders.py — 排查卡在 S7 下单执行的计划
 
 用法：
-  python scripts/diag_stage7_stuck_orders.py
-  python scripts/diag_stage7_stuck_orders.py --account-id 21272246230273657
-  python scripts/diag_stage7_stuck_orders.py --limit 30 --log-limit 8
+    python scripts/diagnostics/diag_stage7_stuck_orders.py
+    python scripts/diagnostics/diag_stage7_stuck_orders.py --account-id 21272246230273657
+    python scripts/diagnostics/diag_stage7_stuck_orders.py --limit 30 --log-limit 8
 
 输出重点：
   - 当前 S7 计划
@@ -14,15 +14,18 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import argparse
 import asyncio
-import os
-import sys
 from collections import Counter
 from datetime import datetime
 from typing import Any, Optional
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import app.models.strategy  # noqa: F401
 from sqlalchemy import desc, select

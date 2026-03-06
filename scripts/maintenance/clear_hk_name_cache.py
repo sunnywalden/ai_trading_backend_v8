@@ -4,6 +4,13 @@
 由于港股名称从英文改为优先显示中文，需要清除旧的缓存数据。
 运行此脚本将清除所有 hk_stock_name:* 缓存。
 """
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import asyncio
 from app.core.cache import cache
 

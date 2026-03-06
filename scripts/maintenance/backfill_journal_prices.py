@@ -2,6 +2,13 @@
 一次性回填脚本: 修复 TradeJournal 中 entry_price=0.0 / quantity=0.0 的历史记录
 从同 account_id+symbol 的最近一条 AI_AUTONOMOUS TradingPlan 中取真实价格。
 """
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import asyncio
 import os
 import sys

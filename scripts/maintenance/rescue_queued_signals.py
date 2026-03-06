@@ -2,6 +2,13 @@
 修复脚本：重置因进程重启卡在 QUEUED 状态超过 2h 的 TradingSignal → VALIDATED
 （下次 autonomous_engine 运行时会重新处理这些信号）
 """
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import asyncio
 import sys
 sys.path.insert(0, '/Users/admin/IdeaProjects/ai_trading_backend_v8')

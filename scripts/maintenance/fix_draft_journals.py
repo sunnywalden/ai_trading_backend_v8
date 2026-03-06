@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scripts/fix_draft_journals.py — 一次性修复存量 DRAFT 日志
+scripts/maintenance/fix_draft_journals.py — 一次性修复存量 DRAFT 日志
 
 问题背景：
   历史上 autonomous_engine 在 SELL/EXIT 信号执行时，
@@ -16,9 +16,15 @@ scripts/fix_draft_journals.py — 一次性修复存量 DRAFT 日志
   步骤5: 触发归因回填 → TradeAttributionEntry 写入
 
 用法：
-  export PYTHONPATH=/Users/admin/IdeaProjects/ai_trading_backend_v8
-  /Users/admin/IdeaProjects/ai_trading_backend_v8/.venv/bin/python scripts/fix_draft_journals.py [--dry-run]
+    python scripts/maintenance/fix_draft_journals.py [--dry-run]
 """
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import asyncio
 import sys
 import logging

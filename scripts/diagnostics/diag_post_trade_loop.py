@@ -2,29 +2,32 @@
 
 用法：
   # 查看所有账户最近 25 条处于 S12-S15 的计划
-  python scripts/diag_post_trade_loop.py
+    python scripts/diagnostics/diag_post_trade_loop.py
 
   # 指定账户
-  python scripts/diag_post_trade_loop.py --account-id 21272246230273657
+    python scripts/diagnostics/diag_post_trade_loop.py --account-id 21272246230273657
 
   # 查看最近 50 条，并打印每条最近 8 条 FSM 日志
-  python scripts/diag_post_trade_loop.py --limit 50 --log-limit 8
+    python scripts/diagnostics/diag_post_trade_loop.py --limit 50 --log-limit 8
 
   # 仅看疑似 S12/S13 循环的计划
-  python scripts/diag_post_trade_loop.py --only-loop
+    python scripts/diagnostics/diag_post_trade_loop.py --only-loop
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 import argparse
 import asyncio
-import os
-import sys
 from collections import Counter
 from datetime import datetime
 from typing import Iterable
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import app.models.strategy  # noqa: F401  # 预加载关系，避免 mapper 初始化问题
 from sqlalchemy import desc, select
