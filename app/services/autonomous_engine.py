@@ -1506,6 +1506,7 @@ class AutonomousEngine:
             from decimal import Decimal
             from app.models.trading_plan import TradingPlan
             from app.models.fsm_transition_log import FsmTransitionLog
+            from app.services.lifecycle_service import lifecycle_service
 
             direction = (decision.get("action") or "BUY").upper()
             # 优先级: signal.price > signal.suggested_price > decision.ref_price > 占位值 1.0
@@ -1581,6 +1582,14 @@ class AutonomousEngine:
                 engine="autonomous",
                 trigger_reason=f"Autonomous order submitted: {signal.get('symbol')} order_id={order_id}",
             ))
+            await lifecycle_service.append_position_fsm_log(
+                db,
+                plan_id=plan.id,
+                from_state=None,
+                to_state="ENTERING",
+                engine="autonomous",
+                trigger_reason=f"Autonomous order submitted: {signal.get('symbol')} order_id={order_id}",
+            )
             logger.info(
                 f"[AutonomousEngine] TradingPlan created for {signal.get('symbol')} "
                 f"order_id={order_id}"
