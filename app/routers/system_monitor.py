@@ -20,30 +20,29 @@ from app.models.fsm_transition_log import FsmTransitionLog
 from app.models.trading_plan import TradingPlan
 from app.routers.api_monitoring import monitoring_health_check
 from app.schemas.lifecycle import PIPELINE_P50_BENCHMARKS, PIPELINE_STAGE_NAMES
-from app.schemas.system_monitor import (
-    DataFlowDetailResponse,
-    DataFlowFailureSample,
-    DataFlowNodeStatus,
-    DataFlowOverviewResponse,
-    DataFlowSummary,
-    LifecycleExceptionItem,
-    LifecycleFsmStateMetric,
-    LifecycleHeadlineMetrics,
-    LifecycleIntentDetailResponse,
-    LifecycleOverviewResponse,
-    LifecycleStageMetric,
-    LifecycleTimelineEvent,
-    MonitorResponseMeta,
-    ServiceDetailResponse,
-    ServiceHealthItem,
-    ServiceHealthTimelineEvent,
-    ServiceModuleSummary,
-    ServiceOverviewResponse,
-)
+from app.schemas.system_monitor import (DataFlowDetailResponse,
+                                        DataFlowFailureSample,
+                                        DataFlowNodeStatus,
+                                        DataFlowOverviewResponse,
+                                        DataFlowSummary,
+                                        LifecycleExceptionItem,
+                                        LifecycleFsmStateMetric,
+                                        LifecycleHeadlineMetrics,
+                                        LifecycleIntentDetailResponse,
+                                        LifecycleOverviewResponse,
+                                        LifecycleStageMetric,
+                                        LifecycleTimelineEvent,
+                                        MonitorResponseMeta,
+                                        ServiceDetailResponse,
+                                        ServiceHealthItem,
+                                        ServiceHealthTimelineEvent,
+                                        ServiceModuleSummary,
+                                        ServiceOverviewResponse)
 from app.services.api_monitoring_service import api_monitor
 from app.services.autonomy_health_monitor import autonomy_health_monitor
 from app.services.lifecycle_service import lifecycle_service
-from app.services.situational_awareness_service import situational_awareness_service
+from app.services.situational_awareness_service import \
+    situational_awareness_service
 
 router = APIRouter(prefix="/api/v1/system-monitor", tags=["V10.4.3 System Monitor"])
 
@@ -130,6 +129,8 @@ def _status_from_counts(
 
 
 def _stage_thresholds(stage_id: int) -> tuple[float | None, float | None]:
+    if stage_id in PIPELINE_P50_BENCHMARKS and PIPELINE_P50_BENCHMARKS[stage_id] is None:
+        return None, None
     p50 = PIPELINE_P50_BENCHMARKS.get(stage_id)
     if p50 is not None:
         return float(p50) * 1.5, float(p50) * 3
@@ -140,6 +141,8 @@ def _classify_stage_seconds(stage_id: int, seconds: float | None) -> str:
     if seconds is None:
         return "HEALTHY"
     warn_after, critical_after = _stage_thresholds(stage_id)
+    if warn_after is None and critical_after is None:
+        return "HEALTHY"
     if critical_after is not None and seconds >= critical_after:
         return "CRITICAL"
     if warn_after is not None and seconds >= warn_after:
@@ -322,9 +325,12 @@ async def _build_lifecycle_overview(
         last_event_at: datetime | None = None
         for task in column.tasks:
             seconds = _safe_float(task.seconds_in_stage)
+            warn_after, critical_after = _stage_thresholds(column.stage)
+            is_continuous_stage = warn_after is None and critical_after is None
             if seconds is not None:
                 stage_seconds.append(seconds)
-                all_stage_seconds.append(seconds)
+                if not is_continuous_stage:
+                    all_stage_seconds.append(seconds)
             entered_at = _to_utc(task.stage_entered_at)
             if entered_at and (
                 oldest_entered_at is None or entered_at < oldest_entered_at
@@ -1030,7 +1036,9 @@ async def _build_service_payload(db: AsyncSession, window_minutes: int) -> tuple
             status=status,
             degraded=status != "HEALTHY",
             latency_ms=None,
-            p95_latency_ms=overview.headline.p95_stage_seconds or None,
+            p95_latency_ms=(overview.headline.p95_stage_seconds * 1000)
+            if overview.headline.p95_stage_seconds is not None
+            else None,
             error_count_1h=overview.headline.exception_count,
             error_count_24h=overview.headline.exception_count,
             last_heartbeat_at=overview.meta.generated_at,
