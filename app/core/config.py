@@ -37,9 +37,7 @@ class Settings(BaseSettings):
         if self.DB_TYPE == "mysql":
             # 去掉可能的包裹引号（single/double quote）并对用户名/密码进行 URL 编码
             user = (
-                quote_plus(str(self.MYSQL_USER).strip("'\""))
-                if self.MYSQL_USER
-                else ""
+                quote_plus(str(self.MYSQL_USER).strip("'\"")) if self.MYSQL_USER else ""
             )
             pwd = (
                 quote_plus(str(self.MYSQL_PASSWORD).strip("'\""))
@@ -69,9 +67,7 @@ class Settings(BaseSettings):
 
     @property
     def REDIS_URL(self) -> str:
-        password_str = (
-            f":{self.REDIS_PASSWORD}@" if self.REDIS_PASSWORD else ""
-        )
+        password_str = f":{self.REDIS_PASSWORD}@" if self.REDIS_PASSWORD else ""
         return (
             f"redis://{password_str}{self.REDIS_HOST}:{self.REDIS_PORT}/"
             f"{self.REDIS_DB}"
