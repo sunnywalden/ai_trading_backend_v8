@@ -19,17 +19,21 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi import (APIRouter, BackgroundTasks, Body, Depends, HTTPException,
+                     Query)
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.broker.factory import make_option_broker_client
 from app.core.auth import get_current_user
 from app.models.db import get_session
-from app.broker.factory import make_option_broker_client
+from app.services.adaptive_factor_weighting_service import \
+    adaptive_factor_weighting_service
+from app.services.confidence_calibration_service import \
+    confidence_calibration_service
+from app.services.decision_post_mortem_service import \
+    decision_post_mortem_service
 from app.services.multi_agent_orchestrator import multi_agent_orchestrator
-from app.services.confidence_calibration_service import confidence_calibration_service
-from app.services.adaptive_factor_weighting_service import adaptive_factor_weighting_service
-from app.services.decision_post_mortem_service import decision_post_mortem_service
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +156,7 @@ async def get_agent_run(
     if not messages:
         raise HTTPException(status_code=404, detail="Agent run not found")
     from sqlalchemy import select
+
     from app.models.agent_communication_log import AgentCommunicationLog
     stmt = select(AgentCommunicationLog.user_id).where(
         AgentCommunicationLog.run_id == run_id
@@ -170,6 +175,7 @@ async def get_agent_challenge(
 ):
     """返回指定 run 中 RiskChallengerAgent 的反驳要点。"""
     from sqlalchemy import select
+
     from app.models.agent_communication_log import AgentCommunicationLog
     stmt = (
         select(AgentCommunicationLog)
@@ -355,6 +361,7 @@ async def get_post_mortem_by_trade(
 
 @router.post("/post-mortems")
 async def create_post_mortem(
+    background_tasks: BackgroundTasks,
     body: PostMortemCreateRequest = Body(...),
     db: AsyncSession = Depends(get_session),
     user_id: str = Depends(get_current_user),
@@ -371,7 +378,7 @@ async def create_post_mortem(
 
     context_payload = {"user_context": body.trade_context} if body.trade_context else {}
     account_id = await _resolve_broker_account_id(user_id)
-    pm = await decision_post_mortem_service.generate_post_mortem(
+    pm, should_queue = await decision_post_mortem_service.request_post_mortem(
         db=db,
         account_id=account_id,
         trade_id=body.trade_id,
@@ -381,7 +388,21 @@ async def create_post_mortem(
         exit_price=body.exit_price,
         realized_pnl=body.realized_pnl,
         hold_days=max(int(body.hold_days or 1), 1),
-        trade_context=context_payload,
     )
     await db.commit()
+
+    if should_queue:
+        background_tasks.add_task(
+            decision_post_mortem_service.enqueue_post_mortem_generation,
+            pm.id,
+            account_id,
+            body.symbol,
+            direction,
+            body.entry_price,
+            body.exit_price,
+            body.realized_pnl,
+            max(int(body.hold_days or 1), 1),
+            context_payload,
+        )
+
     return await decision_post_mortem_service.get_by_trade_id(db, account_id, pm.trade_id)

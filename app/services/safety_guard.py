@@ -1,13 +1,20 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import List
 
 from app.services.option_exposure_service import AccountOptionExposure
-from app.services.risk_config_service import EffectiveRiskLimits, EffectiveRiskState
+from app.services.risk_config_service import (EffectiveRiskLimits,
+                                              EffectiveRiskState)
 
 
 @dataclass
 class SafetyCheckResult:
     allowed: bool
     reason: str | None = None
+    triggers: List[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.reason and not self.triggers:
+            self.triggers = [self.reason]
 
 
 class SafetyGuard:

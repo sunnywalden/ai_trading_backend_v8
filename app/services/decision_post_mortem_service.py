@@ -8,25 +8,114 @@ AI 模型：deepseek-reasoner（深层推理）
 
 from __future__ import annotations
 
+import ast
+import json
 import logging
-from datetime import datetime, timedelta
+import re
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import and_, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.db import get_session_ctx
 from app.models.decision_post_mortem import DecisionPostMortem
 from app.models.trade_journal import TradeJournal
 
 logger = logging.getLogger(__name__)
 
 PM_MODEL = "deepseek-reasoner"
+_FAILED_SUMMARY_PREFIX = "Auto-analysis failed:"
+_FAILED_LESSONS_TEXT = "Analysis generation failed. Review manually."
 
 
 class DecisionPostMortemService:
     """平仓后 AI 反事实剖析。"""
 
-    async def generate_post_mortem(
+    @staticmethod
+    def _should_regenerate(pm: DecisionPostMortem | None) -> bool:
+        if pm is None:
+            return False
+        if (pm.status or "").lower() == "failed":
+            return True
+        factual_summary = (pm.factual_summary or "").strip().lower()
+        key_lessons = (pm.key_lessons or "").strip().lower()
+        return factual_summary.startswith(_FAILED_SUMMARY_PREFIX.lower()) or key_lessons == _FAILED_LESSONS_TEXT.lower()
+
+    @staticmethod
+    def _normalize_text(value: Any) -> str:
+        return str(value or "").strip()
+
+    @staticmethod
+    def _truncate(value: Any, limit: int, default: str = "") -> str:
+        text = str(value or default).strip()
+        return text[:limit] if text else default
+
+    @staticmethod
+    def _normalize_label(value: Any, limit: int, default: str = "unknown") -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return default
+        lowered = raw.lower()
+        if lowered.startswith("primary error category") or lowered.startswith("primary cognitive bias"):
+            return default
+        normalized = re.sub(r"[^a-z0-9]+", "_", lowered).strip("_")
+        if not normalized:
+            normalized = default
+        return normalized[:limit]
+
+    @classmethod
+    def _normalize_tags(cls, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        out: list[str] = []
+        for item in value[:12]:
+            label = cls._normalize_label(item, 32, default="")
+            if label and label not in out:
+                out.append(label)
+        return out
+
+    @classmethod
+    def _apply_result(cls, pm: DecisionPostMortem, result: dict[str, Any]) -> None:
+        pm.factual_summary = cls._normalize_text(result.get("factual_summary"))
+        pm.counterfactual_buy = cls._normalize_text(result.get("counterfactual_buy"))
+        pm.counterfactual_hold = cls._normalize_text(result.get("counterfactual_hold"))
+        pm.counterfactual_sell = cls._normalize_text(result.get("counterfactual_sell"))
+        pm.key_lessons = cls._normalize_text(result.get("key_lessons"))
+        pm.improvement_suggestions = cls._normalize_text(result.get("improvement_suggestions"))
+        pm.pattern_tags = cls._normalize_tags(result.get("pattern_tags"))
+        pm.error_category = cls._normalize_label(result.get("error_category"), 64)
+        pm.cognitive_bias = cls._normalize_label(result.get("cognitive_bias"), 64)
+        pm.reasoning_tokens = int(result.get("reasoning_tokens") or 0)
+        pm.generation_latency_ms = int(result.get("latency_ms") or 0)
+
+    @classmethod
+    def _apply_failure(cls, pm: DecisionPostMortem, error: Any, latency_ms: int = 0) -> None:
+        summary = cls._truncate(f"{_FAILED_SUMMARY_PREFIX} {error}", 4000, default=_FAILED_SUMMARY_PREFIX)
+        pm.factual_summary = summary
+        pm.counterfactual_buy = ""
+        pm.counterfactual_hold = ""
+        pm.counterfactual_sell = ""
+        pm.key_lessons = _FAILED_LESSONS_TEXT
+        pm.improvement_suggestions = ""
+        pm.pattern_tags = []
+        pm.error_category = "unknown"
+        pm.cognitive_bias = "unknown"
+        pm.reasoning_tokens = 0
+        pm.generation_latency_ms = latency_ms
+        pm.insight_id = None
+        pm.status = "failed"
+
+    @staticmethod
+    async def _mark_background_failure(pm_id: int, error: Any) -> None:
+        async with get_session_ctx() as db:
+            pm = await db.get(DecisionPostMortem, pm_id)
+            if not pm:
+                return
+            DecisionPostMortemService._apply_failure(pm, error)
+            await db.commit()
+
+    async def request_post_mortem(
         self,
         db: AsyncSession,
         account_id: str,
@@ -37,17 +126,41 @@ class DecisionPostMortemService:
         exit_price: float,
         realized_pnl: float,
         hold_days: int,
-        trade_context: dict | None = None,
-    ) -> DecisionPostMortem:
-        """主入口：由仓位关闭事件触发。"""
-
-        # 幂等检查
+    ) -> tuple[DecisionPostMortem, bool]:
         existing = await self._get_by_trade_id(db, trade_id)
         if existing:
+            if (existing.status or "").lower() in {"pending", "running"}:
+                logger.info("PostMortem: request already running for trade_id=%s", trade_id)
+                return existing, False
+            if self._should_regenerate(existing):
+                logger.info("PostMortem: regenerating stale/failed record for trade_id=%s", trade_id)
+                pm = existing
+                pm.status = "running"
+                pm.model_used = PM_MODEL
+                pm.account_id = account_id
+                pm.symbol = symbol
+                pm.direction = direction
+                pm.entry_price = entry_price
+                pm.exit_price = exit_price
+                pm.realized_pnl = realized_pnl
+                pm.hold_days = hold_days
+                pm.factual_summary = None
+                pm.counterfactual_buy = None
+                pm.counterfactual_hold = None
+                pm.counterfactual_sell = None
+                pm.key_lessons = None
+                pm.improvement_suggestions = None
+                pm.pattern_tags = None
+                pm.error_category = None
+                pm.cognitive_bias = None
+                pm.reasoning_tokens = None
+                pm.generation_latency_ms = None
+                pm.insight_id = None
+                await db.flush()
+                return pm, True
             logger.info("PostMortem: already exists for trade_id=%s", trade_id)
-            return existing
+            return existing, False
 
-        # 创建 pending 记录
         pm = DecisionPostMortem(
             account_id=account_id,
             trade_id=trade_id,
@@ -62,6 +175,67 @@ class DecisionPostMortemService:
         )
         db.add(pm)
         await db.flush()
+        return pm, True
+
+    async def generate_post_mortem(
+        self,
+        db: AsyncSession,
+        account_id: str,
+        trade_id: str,
+        symbol: str,
+        direction: str,
+        entry_price: float,
+        exit_price: float,
+        realized_pnl: float,
+        hold_days: int,
+        trade_context: dict | None = None,
+    ) -> DecisionPostMortem:
+        """同步主入口：兼容旧调用，但内部仍复用新的申请+执行逻辑。"""
+        pm, should_queue = await self.request_post_mortem(
+            db=db,
+            account_id=account_id,
+            trade_id=trade_id,
+            symbol=symbol,
+            direction=direction,
+            entry_price=entry_price,
+            exit_price=exit_price,
+            realized_pnl=realized_pnl,
+            hold_days=hold_days,
+        )
+        if not should_queue:
+            return pm
+
+        await self.process_post_mortem(
+            db=db,
+            pm_id=pm.id,
+            account_id=account_id,
+            symbol=symbol,
+            direction=direction,
+            entry_price=entry_price,
+            exit_price=exit_price,
+            realized_pnl=realized_pnl,
+            hold_days=hold_days,
+            trade_context=trade_context or {},
+        )
+        await db.refresh(pm)
+        return pm
+
+    async def process_post_mortem(
+        self,
+        db: AsyncSession,
+        pm_id: int,
+        account_id: str,
+        symbol: str,
+        direction: str,
+        entry_price: float,
+        exit_price: float,
+        realized_pnl: float,
+        hold_days: int,
+        trade_context: dict | None = None,
+    ) -> DecisionPostMortem | None:
+        pm = await db.get(DecisionPostMortem, pm_id)
+        if not pm:
+            return None
 
         try:
             result = await self._call_deepseek_reasoner(
@@ -73,17 +247,7 @@ class DecisionPostMortemService:
                 hold_days=hold_days,
                 context=trade_context or {},
             )
-            pm.factual_summary = result.get("factual_summary", "")
-            pm.counterfactual_buy = result.get("counterfactual_buy", "")
-            pm.counterfactual_hold = result.get("counterfactual_hold", "")
-            pm.counterfactual_sell = result.get("counterfactual_sell", "")
-            pm.key_lessons = result.get("key_lessons", "")
-            pm.improvement_suggestions = result.get("improvement_suggestions", "")
-            pm.pattern_tags = result.get("pattern_tags", [])
-            pm.error_category = result.get("error_category", "")
-            pm.cognitive_bias = result.get("cognitive_bias", "")
-            pm.reasoning_tokens = result.get("reasoning_tokens", 0)
-            pm.generation_latency_ms = result.get("latency_ms", 0)
+            self._apply_result(pm, result)
             pm.status = "completed"
 
             # 自动生成 LESSON Insight
@@ -91,13 +255,47 @@ class DecisionPostMortemService:
                 db, account_id, symbol, pm.key_lessons or "", pm.improvement_suggestions or ""
             )
             pm.insight_id = insight_id
-
         except Exception as e:
-            logger.error("PostMortem: generation failed for trade=%s: %s", trade_id, e)
-            pm.status = "failed"
+            logger.error(
+                "PostMortem: generation failed for trade=%s: %s",
+                pm.trade_id,
+                e,
+            )
+            self._apply_failure(pm, e)
 
         await db.flush()
         return pm
+
+    async def enqueue_post_mortem_generation(
+        self,
+        pm_id: int,
+        account_id: str,
+        symbol: str,
+        direction: str,
+        entry_price: float,
+        exit_price: float,
+        realized_pnl: float,
+        hold_days: int,
+        trade_context: dict | None = None,
+    ) -> None:
+        try:
+            async with get_session_ctx() as db:
+                await self.process_post_mortem(
+                    db=db,
+                    pm_id=pm_id,
+                    account_id=account_id,
+                    symbol=symbol,
+                    direction=direction,
+                    entry_price=entry_price,
+                    exit_price=exit_price,
+                    realized_pnl=realized_pnl,
+                    hold_days=hold_days,
+                    trade_context=trade_context or {},
+                )
+                await db.commit()
+        except Exception as exc:
+            logger.exception("PostMortem background generation failed for pm_id=%s: %s", pm_id, exc)
+            await self._mark_background_failure(pm_id, exc)
 
     async def get_post_mortems(
         self, db: AsyncSession, account_id: str, limit: int = 20
@@ -115,7 +313,7 @@ class DecisionPostMortemService:
         self, db: AsyncSession, account_id: str, trade_id: str
     ) -> dict[str, Any] | None:
         pm = await self._get_by_trade_id(db, trade_id)
-        if pm and pm.user_id == account_id:
+        if pm and pm.account_id == account_id:
             return _pm_to_dict(pm)
         return None
 
@@ -123,7 +321,7 @@ class DecisionPostMortemService:
         self, db: AsyncSession, account_id: str, days: int = 90
     ) -> dict[str, Any]:
         """汇总常见错误模式和认知偏见。"""
-        cutoff = datetime.utcnow() - timedelta(days=days)
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
         stmt = (
             select(
                 DecisionPostMortem.error_category,
@@ -350,6 +548,7 @@ class DecisionPostMortemService:
     ) -> dict[str, Any]:
         """调用 DeepSeek Reasoner 生成反事实分析。"""
         import time
+
         from app.services.ai_client import call_ai
 
         pnl_pct = ((exit_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
@@ -387,16 +586,13 @@ Provide your analysis in the following EXACT JSON format:
                     {"role": "user", "content": prompt},
                 ],
                 max_tokens=2048,
+                response_format={"type": "json_object"},
             )
             content = resp.get("content", "{}")
             latency_ms = int((time.time() - t_start) * 1000)
             reasoning_tokens = resp.get("usage", {}).get("completion_tokens", 0)
 
-            # 解析 JSON
-            import json
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            parsed = json.loads(content[start:end]) if start >= 0 else {}
+            parsed = self._parse_reasoner_payload(content)
             parsed["latency_ms"] = latency_ms
             parsed["reasoning_tokens"] = reasoning_tokens
             return parsed
@@ -415,6 +611,38 @@ Provide your analysis in the following EXACT JSON format:
                 "latency_ms": int((time.time() - t_start) * 1000),
                 "reasoning_tokens": 0,
             }
+
+    def _parse_reasoner_payload(self, content: Any) -> dict[str, Any]:
+        text = str(content or "").strip()
+        if not text:
+            raise ValueError("empty AI response")
+
+        candidates: list[str] = []
+
+        fenced_blocks = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL | re.IGNORECASE)
+        candidates.extend(block for block in fenced_blocks if block)
+
+        brace_match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        if brace_match:
+            candidates.append(brace_match.group(0))
+
+        candidates.append(text)
+
+        last_error: Exception | None = None
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+            except Exception as exc:
+                last_error = exc
+                try:
+                    parsed = ast.literal_eval(candidate)
+                except Exception as literal_exc:
+                    last_error = literal_exc
+                    continue
+            if isinstance(parsed, dict):
+                return parsed
+
+        raise ValueError(f"unable to parse AI JSON payload: {last_error}")
 
     async def _create_lesson_insight(
         self,
