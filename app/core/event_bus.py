@@ -5,6 +5,7 @@
 - 同一 Topic 可注册多个订阅者，广播顺序不保证。
 - 模块启动后在 lifespan 中调用各 XXX_allocator.register_handlers() 注册订阅者。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -18,25 +19,44 @@ logger = logging.getLogger(__name__)
 
 class Topics(str, Enum):
     """V10.2 事件主题枚举，与订阅者解耦"""
+
     # ── M1: 市场状态 ──────────────────────────────────────────────────────────
-    REGIME_CHANGED   = "regime.changed"       # 市场体制切换   payload: {"prev": str, "curr": str, "confidence": float}
+    REGIME_CHANGED = "regime.changed"  # 市场体制切换   payload: {"prev": str, "curr": str, "confidence": float}
     # ── 基础信号 / 风险 ───────────────────────────────────────────────────────
-    SIGNAL_GENERATED = "signal.generated"     # 新信号产出     payload: TradingSignal dict
-    RISK_BREACH      = "risk.breach"          # 风险门禁触发   payload: {"reason": str, "symbol": str}
-    ORDER_FILLED     = "order.filled"         # 订单成交       payload: OrderFilled dict
-    CIRCUIT_BREAKER  = "circuit.breaker"      # 熔断触发       payload: {"account_id": str, "daily_loss": float}
+    SIGNAL_GENERATED = "signal.generated"  # 新信号产出     payload: TradingSignal dict
+    RISK_BREACH = (
+        "risk.breach"  # 风险门禁触发   payload: {"reason": str, "symbol": str}
+    )
+    ORDER_FILLED = "order.filled"  # 订单成交       payload: OrderFilled dict
+    CIRCUIT_BREAKER = "circuit.breaker"  # 熔断触发       payload: {"account_id": str, "daily_loss": float}
     # ── M2: 事件驱动围栏 ──────────────────────────────────────────────────────
     EVENT_CALENDAR_ALERT = "event.calendar.alert"  # 事件提醒           payload: EventCalendarEntry.to_dict()
-    EARNINGS_RESULT      = "event.earnings.result" # 财报结果录入        payload: {"symbol": str, "eps_actual": float, ...}
+    EARNINGS_RESULT = "event.earnings.result"  # 财报结果录入        payload: {"symbol": str, "eps_actual": float, ...}
     # ── M3: 动态仓位生命周期 ──────────────────────────────────────────────────
-    SIGNAL_CONFIDENCE_UPDATED = "signal.confidence.updated" # 信号置信度变化  payload: {"symbol": str, "old": float, "new": float}
-    POSITION_PNL_UPDATED      = "position.pnl.updated"      # 仓位盈亏更新    payload: {"position_id": int, "pnl_pct": float}
-    CLOSE_SIGNAL_TRIGGERED    = "position.close.triggered"  # 平仓信号        payload: {"position_id": int, "reason": str, "pct": float}
+    SIGNAL_CONFIDENCE_UPDATED = "signal.confidence.updated"  # 信号置信度变化  payload: {"symbol": str, "old": float, "new": float}
+    POSITION_PNL_UPDATED = "position.pnl.updated"  # 仓位盈亏更新    payload: {"position_id": int, "pnl_pct": float}
+    CLOSE_SIGNAL_TRIGGERED = "position.close.triggered"  # 平仓信号        payload: {"position_id": int, "reason": str, "pct": float}
     # ── M4: 六维信号融合 ──────────────────────────────────────────────────────
-    FUSED_SIGNAL_READY = "signal.fused.ready"   # 融合信号就绪    payload: {"symbol": str, "fused_confidence": float}
+    FUSED_SIGNAL_READY = "signal.fused.ready"  # 融合信号就绪    payload: {"symbol": str, "fused_confidence": float}
     # ── M6: AI 洞察 ──────────────────────────────────────────────────────────
-    INSIGHT_GENERATED  = "insight.generated"    # 新洞察生成     payload: AIInsight.to_dict()
-    AB_EXPERIMENT_DONE = "ab.experiment.done"   # A/B 实验完成   payload: ABExperiment.to_dict()
+    INSIGHT_GENERATED = (
+        "insight.generated"  # 新洞察生成     payload: AIInsight.to_dict()
+    )
+    AB_EXPERIMENT_DONE = (
+        "ab.experiment.done"  # A/B 实验完成   payload: ABExperiment.to_dict()
+    )
+    # ── V10.4.4: Position-centric 生命周期事件 ───────────────────────────────
+    POSITION_OPENED = "position.opened"  # 仓位首次成交确认  payload: {"position_id": int, "symbol": str, "account_id": str, "qty": float, "avg_price": float}
+    POSITION_ADDED = "position.added"  # 加仓成交完成      payload: {"position_id": int, "symbol": str, "added_qty": float, "new_total_qty": float}
+    POSITION_REDUCED = "position.reduced"  # 减仓成交完成      payload: {"position_id": int, "symbol": str, "reduced_qty": float, "remaining_qty": float, "closing_reason": str}
+    POSITION_CLOSED = "position.closed"  # 仓位全部平仓      payload: {"position_id": int, "symbol": str, "closing_reason": str, "realized_pnl": float}
+    POSITION_LIQUIDATED = "position.liquidated"  # 强制清算          payload: {"position_id": int, "symbol": str, "reason": str}
+    POSITION_EXCEPTION = "position.exception"  # 仓位进入异常态    payload: {"position_id": int, "symbol": str, "exception_detail": str}
+    # ── V10.4.4: ExecutionSlice 事件 ─────────────────────────────────────────
+    SLICE_CREATED = "slice.created"  # 切片已创建        payload: {"slice_id": int, "position_id": int, "action": str, "qty": float}
+    SLICE_FILLED = "slice.filled"  # 切片全部成交      payload: {"slice_id": int, "position_id": int, "filled_qty": float, "avg_price": float}
+    SLICE_STUCK = "slice.stuck"  # 切片超时卡住      payload: {"slice_id": int, "position_id": int, "symbol": str, "elapsed_seconds": float}
+    SLICE_FAILED = "slice.failed"  # 切片执行失败      payload: {"slice_id": int, "position_id": int, "error": str}
 
 
 # Handler type alias
@@ -105,7 +125,11 @@ class EventBus:
             logger.debug(f"[EventBus] No subscribers for '{key}', skipping publish")
             return 0
 
-        logger.info(f"[EventBus] Publishing '{key}' to {len(handlers)} subscriber(s). payload={payload!r}"[:200])
+        logger.info(
+            f"[EventBus] Publishing '{key}' to {len(handlers)} subscriber(s). payload={payload!r}"[
+                :200
+            ]
+        )
 
         success = 0
         for handler in handlers:
