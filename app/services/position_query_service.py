@@ -51,7 +51,7 @@ class PositionQueryService:
                 Position.account_id == account_id,
                 Position.status.in_(list(_ACTIVE_STATUSES)),
             )
-            .order_by(Position.opened_at.desc().nullslast())
+            .order_by(Position.opened_at.desc())
         )
         result = await self._db.execute(stmt)
         rows = result.scalars().all()
@@ -65,7 +65,7 @@ class PositionQueryService:
                 Position.account_id == account_id,
                 Position.status == PositionStatus.EXCEPTION.value,
             )
-            .order_by(Position.last_action_at.desc().nullslast())
+            .order_by(Position.last_action_at.desc())
         )
         result = await self._db.execute(stmt)
         rows = result.scalars().all()
@@ -131,7 +131,7 @@ class PositionQueryService:
                 ExecutionSlice.account_id == account_id,
                 ExecutionSlice.status == SliceStatus.STUCK.value,
             )
-            .order_by(ExecutionSlice.stuck_at.desc().nullslast())
+            .order_by(ExecutionSlice.stuck_at.desc())
         )
         result = await self._db.execute(stmt)
         rows = result.scalars().all()

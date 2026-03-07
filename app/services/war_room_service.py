@@ -13,7 +13,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select, desc, func
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -237,8 +237,10 @@ class WarRoomService:
 
         # 2. 相关性骤升告警
         try:
-            from app.services.risk_observability_service import risk_observability_service
-            from app.models.portfolio_factor_exposure import PortfolioFactorExposure
+            from app.models.portfolio_factor_exposure import \
+                PortfolioFactorExposure
+            from app.services.risk_observability_service import \
+                risk_observability_service
 
             # 冷启动：没有快照时先自动生成一条
             await risk_observability_service.ensure_recent_snapshot(db, account_id)
@@ -293,22 +295,56 @@ class WarRoomService:
         feed_items.sort(key=lambda x: x["urgency_score"], reverse=True)
         return feed_items[:limit]
 
+    async def _load_broker_positions(
+        self, account_id: str
+    ) -> list[dict[str, Any]]:
+        """从经纪商 API 实时拉取持仓（V10.4.4 回退路径）。"""
+        try:
+            from app.broker.factory import make_option_broker_client
+            client = make_option_broker_client()
+            raw = await client.list_underlying_positions(account_id)
+            positions: list[dict[str, Any]] = []
+            for p in raw:
+                qty = float(p.quantity)
+                if qty == 0:
+                    continue
+                side = "long" if qty > 0 else "short"
+                positions.append(
+                    {
+                        "symbol": p.symbol,
+                        "direction": side,
+                        "quantity": round(abs(qty), 4),
+                        "market_value": round(p.market_value, 2),
+                        "unrealized_pnl": round(p.unrealized_pnl, 2),
+                        "unrealized_pnl_pct": round(p.unrealized_pnl_pct, 4),
+                    }
+                )
+            return positions
+        except Exception as exc:
+            logger.warning("Broker position fallback failed: %s", exc)
+            return []
+
     async def get_portfolio_exposure(
         self, db: AsyncSession, account_id: str
     ) -> dict[str, Any]:
         """返回持仓热力图 + 因子敞口数据。"""
         try:
-            from app.services.risk_observability_service import risk_observability_service
+            from app.services.risk_observability_service import \
+                risk_observability_service
             await risk_observability_service.ensure_recent_snapshot(db, account_id)
             latest_snap = await risk_observability_service.get_latest_snapshot(db, account_id)
         except Exception:
             latest_snap = None
 
-        # 持仓列表（优先计划持仓，不足则回退信号观察仓）
+        # 持仓列表：经纪商实时持仓 → 计划持仓 → 信号观察仓
         try:
-            positions = await self._load_plan_positions(db, account_id)
+            positions = await self._load_broker_positions(account_id)
             if not positions:
-                positions = await self._load_signal_positions_fallback(db, account_id)
+                positions = await self._load_plan_positions(db, account_id)
+            if not positions:
+                positions = await self._load_signal_positions_fallback(
+                    db, account_id
+                )
         except Exception:
             positions = []
 

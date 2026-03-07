@@ -10,7 +10,7 @@ import math
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import and_, desc, func, or_, select, true, update
+from sqlalchemy import and_, desc, func, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.fsm_transition_log import FsmTransitionLog
