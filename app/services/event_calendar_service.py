@@ -11,15 +11,16 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import func, text
-from sqlalchemy import select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.event_bus import event_bus, Topics
-from app.models.event_calendar import EventCalendarEntry, EventRiskLevel, EventType
+from app.core.event_bus import Topics, event_bus
+from app.models.event_calendar import (EventCalendarEntry, EventRiskLevel,
+                                       EventType)
 from app.models.trading_signal import TradingSignal
 
 logger = logging.getLogger(__name__)
@@ -130,13 +131,13 @@ class EventCalendarService:
         seen: set[str] = set()
 
         def _push(sym: Optional[str]) -> None:
-            if not sym:
+            normalized = self._normalize_scan_symbol(sym)
+            if not normalized:
                 return
-            s = str(sym).strip().upper()
-            if not s or s in seen:
+            if normalized in seen:
                 return
-            seen.add(s)
-            symbols.append(s)
+            seen.add(normalized)
+            symbols.append(normalized)
 
         # 1) 持仓口径（兼容不同状态命名）
         try:
@@ -147,14 +148,17 @@ class EventCalendarService:
                     FROM positions
                     WHERE symbol IS NOT NULL
                       AND (
-                        status IN ('open', 'OPEN', 'active', 'ACTIVE', 'held', 'HELD')
-                        OR COALESCE(quantity, 0) > 0
+                                                UPPER(status) IN (
+                                                    'PENDING', 'OPENING', 'ACTIVE', 'SCALING_IN',
+                                                    'SCALING_OUT', 'CLOSING', 'PARTIALLY_CLOSED', 'EXCEPTION'
+                                                )
+                                                OR COALESCE(open_qty, total_qty, 0) > 0
                       )
                     ORDER BY symbol
                     LIMIT :limit
                     """
                 ),
-                {"limit": limit},
+                                {"limit": limit},
             )
             for row in held.fetchall():
                 _push(row[0])
@@ -181,33 +185,39 @@ class EventCalendarService:
             except Exception as e:
                 logger.warning(f"[EventCalendar] resolve symbols from signals failed: {e}")
 
-        # 3) 本地全量池兜底（优先 US，再 HK）
-        if len(symbols) < limit:
-            try:
-                rem = max(1, limit - len(symbols))
-                uni_rows = await db.execute(
-                    text(
-                        """
-                        SELECT symbol
-                        FROM market_universe_symbols
-                        WHERE is_active = 1
-                        ORDER BY CASE WHEN market = 'US' THEN 0 ELSE 1 END, symbol
-                        LIMIT :limit
-                        """
-                    ),
-                    {"limit": rem},
-                )
-                for row in uni_rows.fetchall():
-                    _push(row[0])
-            except Exception as e:
-                logger.warning(f"[EventCalendar] resolve symbols from market universe failed: {e}")
-
-        # 4) 最终兜底样本，保证链路始终可产出数据
+        # 3) 最终兜底样本，保证链路始终可产出数据，但避免打大量无效 ticker
         if not symbols:
-            for s in ("AAPL", "MSFT", "NVDA", "TSLA", "00700", "9988"):
+            for s in ("AAPL", "MSFT", "NVDA", "TSLA", "QCOM", "ORCL"):
                 _push(s)
 
         return symbols[:limit]
+
+    @staticmethod
+    def _normalize_scan_symbol(sym: Optional[str]) -> Optional[str]:
+        if not sym:
+            return None
+
+        raw = str(sym).strip().upper()
+        if not raw:
+            return None
+
+        # 指数 / 宏观符号不做财报扫描
+        if raw.startswith(".") or raw == "MARKET":
+            return None
+
+        # 美股 warrant / rights / unit 等高噪声标的不做财报扫描
+        if raw.endswith((".WS", ".W", ".U", ".R", "W")) and len(raw) >= 5:
+            return None
+
+        # 纯数字港股代码统一映射为 Yahoo Finance 可识别格式
+        if re.fullmatch(r"\d{4,5}", raw):
+            return f"{int(raw)}.HK"
+
+        # 过滤明显异常 token
+        if not re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,9}", raw):
+            return None
+
+        return raw
 
     async def ensure_calendar_seeded(self, db: AsyncSession, days: int = 7) -> None:
         """确保窗口内至少有宏观事件；若数据库空白则触发轻量补扫描。"""
@@ -226,6 +236,18 @@ class EventCalendarService:
         if has_any:
             return
 
+        # 近窗口为空时加冷却阀，避免页面反复请求导致重复扫外部源
+        seed_cooldown_key = f"event_calendar:seed_cooldown:{days}"
+        try:
+            from app.models.db import redis_client
+
+            if redis_client and await redis_client.get(seed_cooldown_key):
+                return
+            if redis_client:
+                await redis_client.setex(seed_cooldown_key, 600, "1")
+        except Exception:
+            pass
+
         symbols = await self.resolve_scan_symbols(db, limit=30)
         if symbols:
             await self.scan_and_upsert(db, symbols=symbols, lookahead_days=min(max(days, 3), 14))
@@ -240,10 +262,14 @@ class EventCalendarService:
         to_dt: datetime,
     ) -> list[EventCalendarEntry]:
         """通过 yfinance 获取财报日期，upsert 进库。"""
+        fetch_symbol = self._normalize_scan_symbol(symbol)
+        if not fetch_symbol:
+            return []
+
         try:
             import yfinance as yf  # 懒导入，避免无 yf 环境报错
 
-            ticker = yf.Ticker(symbol)
+            ticker = yf.Ticker(fetch_symbol)
             cal = ticker.calendar  # DataFrame or dict
             if cal is None:
                 return []
@@ -289,7 +315,7 @@ class EventCalendarService:
             await db.commit()
             return new_entries
         except Exception as e:
-            logger.error(f"[EventCalendar] yfinance fetch failed {symbol}: {e}")
+            logger.debug(f"[EventCalendar] yfinance fetch skipped/failed {symbol}: {e}")
             return []
 
     # ── 内部：宏观硬编码事件 upsert ──────────────────────────────────────────
