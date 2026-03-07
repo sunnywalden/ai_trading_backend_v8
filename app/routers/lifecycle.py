@@ -4,9 +4,11 @@
   GET /api/v1/lifecycle/pipeline            — 17 阶段 Pipeline 任务分布
   GET /api/v1/lifecycle/plan-fsm            — Plan FSM 状态计数
   GET /api/v1/lifecycle/position-fsm        — Position FSM 状态计数 + 引擎统计
+  GET /api/v1/lifecycle/position-board      — 持仓看板（按 Position FSM 分组）
   GET /api/v1/lifecycle/fsm-events          — FSM 转换事件流（分页）
   GET /api/v1/lifecycle/provenance/{id}     — 单笔决策溯源链
 """
+
 from __future__ import annotations
 
 from typing import Optional
@@ -15,19 +17,22 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.db import get_session
-from app.services.lifecycle_service import lifecycle_service
 from app.schemas.lifecycle import (
+    DecisionProvenance,
+    FsmEventPage,
     PipelineDistribution,
     PlanFsmSummary,
+    PositionBoard,
     PositionFsmSummary,
-    FsmEventPage,
-    DecisionProvenance,
 )
+from app.services.lifecycle_service import lifecycle_service
 
 router = APIRouter(prefix="/api/v1/lifecycle", tags=["V10.3 交易生命周期"])
 
 
-@router.get("/pipeline", response_model=PipelineDistribution, summary="17阶段Pipeline分布")
+@router.get(
+    "/pipeline", response_model=PipelineDistribution, summary="17阶段Pipeline分布"
+)
 async def get_pipeline_distribution(
     db: AsyncSession = Depends(get_session),
 ):
@@ -43,12 +48,22 @@ async def get_plan_fsm(
     return await lifecycle_service.get_plan_fsm_counts(db)
 
 
-@router.get("/position-fsm", response_model=PositionFsmSummary, summary="Position FSM状态统计")
+@router.get(
+    "/position-fsm", response_model=PositionFsmSummary, summary="Position FSM状态统计"
+)
 async def get_position_fsm(
     db: AsyncSession = Depends(get_session),
 ):
     """返回 Position FSM 各状态数量及 ScaleIn/Out/Trailing 引擎触发统计。"""
     return await lifecycle_service.get_position_fsm_counts(db)
+
+
+@router.get("/position-board", response_model=PositionBoard, summary="持仓看板")
+async def get_position_board(
+    db: AsyncSession = Depends(get_session),
+):
+    """返回按 Position FSM 状态分组的持仓看板，用于持仓生命周期页面。"""
+    return await lifecycle_service.get_position_board(db)
 
 
 @router.get("/fsm-events", response_model=FsmEventPage, summary="FSM转换事件流")
@@ -59,10 +74,14 @@ async def get_fsm_events(
     db: AsyncSession = Depends(get_session),
 ):
     """返回 FSM 状态转换事件流，支持按 PLAN / POSITION 过滤，降序排列。"""
-    return await lifecycle_service.get_fsm_events(db, page=page, size=size, fsm_type=fsm_type)
+    return await lifecycle_service.get_fsm_events(
+        db, page=page, size=size, fsm_type=fsm_type
+    )
 
 
-@router.get("/provenance/{plan_id}", response_model=DecisionProvenance, summary="单笔决策溯源链")
+@router.get(
+    "/provenance/{plan_id}", response_model=DecisionProvenance, summary="单笔决策溯源链"
+)
 async def get_provenance(
     plan_id: int,
     db: AsyncSession = Depends(get_session),

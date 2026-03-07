@@ -1,24 +1,25 @@
 """V10.3: 交易生命周期中心 Pydantic Schemas"""
+
 from __future__ import annotations
+
 from datetime import datetime
 from decimal import Decimal
-from typing import Optional, Any
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
-
 # ── Pipeline 阶段定义 ─────────────────────────────────────────────────────────
 PIPELINE_STAGE_NAMES: dict[int, str] = {
-    0:  "体制分类",
-    1:  "信号融合",
-    2:  "策略匹配",
-    3:  "计划生成",
-    4:  "风险门控",
-    5:  "自主决策",
-    6:  "人工审核",
-    7:  "下单执行",
-    8:  "算法执行",
-    9:  "持仓监控",
+    0: "体制分类",
+    1: "信号融合",
+    2: "策略匹配",
+    3: "计划生成",
+    4: "风险门控",
+    5: "自主决策",
+    6: "人工审核",
+    7: "下单执行",
+    8: "算法执行",
+    9: "持仓监控",
     10: "仓位调整",
     11: "离场触发",
     12: "订单结算",
@@ -30,9 +31,23 @@ PIPELINE_STAGE_NAMES: dict[int, str] = {
 
 # P50 基准（秒）；None 表示持续性阶段
 PIPELINE_P50_BENCHMARKS: dict[int, Optional[int]] = {
-    0: 60, 1: 30, 2: 10, 3: 120, 4: 5, 5: 5,
-    6: 300, 7: 10, 8: 3600, 9: None, 10: 60,
-    11: 30, 12: 60, 13: 120, 14: 300, 15: 60, 16: None,
+    0: 60,
+    1: 30,
+    2: 10,
+    3: 120,
+    4: 5,
+    5: 5,
+    6: 300,
+    7: 10,
+    8: 3600,
+    9: None,
+    10: 60,
+    11: 30,
+    12: 60,
+    13: 120,
+    14: 300,
+    15: 60,
+    16: None,
 }
 
 
@@ -40,12 +55,12 @@ PIPELINE_P50_BENCHMARKS: dict[int, Optional[int]] = {
 class PipelineTaskCard(BaseModel):
     plan_id: int
     symbol: str
-    direction: Optional[str] = None      # BUY / SELL
+    direction: Optional[str] = None  # BUY / SELL
     confidence: Optional[float] = None
     source: Optional[str] = None
     stage_entered_at: Optional[datetime] = None
     seconds_in_stage: Optional[int] = None  # 已在当前阶段停留秒数
-    delay_level: str = "green"              # green / yellow / red / stopped
+    delay_level: str = "green"  # green / yellow / red / stopped
 
 
 class PipelineStageColumn(BaseModel):
@@ -65,8 +80,15 @@ class PipelineDistribution(BaseModel):
 
 # ── Plan FSM ──────────────────────────────────────────────────────────────────
 PLAN_FSM_STATES = [
-    "AI_GENERATED", "AUTO_EXECUTING", "PENDING_CONFIRM",
-    "EXECUTED", "REVOKED", "FAILED", "CANCELLED", "EXPIRED", "ACTIVE",
+    "AI_GENERATED",
+    "AUTO_EXECUTING",
+    "PENDING_CONFIRM",
+    "EXECUTED",
+    "REVOKED",
+    "FAILED",
+    "CANCELLED",
+    "EXPIRED",
+    "ACTIVE",
 ]
 
 
@@ -85,8 +107,16 @@ class PlanFsmSummary(BaseModel):
 
 # ── Position FSM ──────────────────────────────────────────────────────────────
 POSITION_FSM_STATES = [
-    "ENTERING", "HELD", "SCALING_IN", "SCALING_OUT",
-    "EXITING_FULL", "STOP_LOSS_EXIT", "CLOSED",
+    "PENDING",
+    "OPENING",
+    "ACTIVE",
+    "SCALING_IN",
+    "SCALING_OUT",
+    "PARTIALLY_CLOSED",
+    "CLOSING",
+    "EXCEPTION",
+    "LIQUIDATED",
+    "CLOSED",
 ]
 
 
@@ -116,7 +146,7 @@ class FsmTransitionEvent(BaseModel):
     id: int
     plan_id: int
     symbol: Optional[str] = None
-    fsm_type: str                   # PLAN / POSITION
+    fsm_type: str  # PLAN / POSITION
     from_state: Optional[str] = None
     to_state: str
     engine: Optional[str] = None
@@ -134,7 +164,7 @@ class FsmEventPage(BaseModel):
 
 # ── Decision Provenance ───────────────────────────────────────────────────────
 class SixDimScore(BaseModel):
-    dimension: str                  # technical / fundamental / macro / volatility / options / sentiment
+    dimension: str  # technical / fundamental / macro / volatility / options / sentiment
     label: str
     raw_score: float
     regime_multiplier: float
@@ -150,13 +180,40 @@ class RiskGateCheck(BaseModel):
 
 
 class ExecProgress(BaseModel):
-    algo_type: Optional[str] = None     # TWAP / VWAP
+    algo_type: Optional[str] = None  # TWAP / VWAP
     total_slices: int = 0
     filled_slices: int = 0
     fill_pct: float = 0.0
     avg_fill_price: Optional[float] = None
 
 
+# ── Position Board (持仓看板 – groups Position by status) ───────
+class PositionBoardCard(BaseModel):
+    id: int
+    symbol: str
+    direction: Optional[str] = None
+    total_qty: float = 0.0
+    avg_entry_price: Optional[float] = None
+    unrealized_pnl_pct: Optional[float] = None
+    hold_seconds: Optional[int] = None  # seconds in current state
+    latest_plan_id: Optional[int] = None
+
+
+class PositionBoardColumn(BaseModel):
+    state: str
+    label: str
+    color: str
+    count: int = 0
+    cards: list[PositionBoardCard] = Field(default_factory=list)
+
+
+class PositionBoard(BaseModel):
+    columns: list[PositionBoardColumn]
+    total_active: int
+    as_of: datetime
+
+
+# ── Decision Provenance ───────────────────────────────────────────────────────
 class DecisionProvenance(BaseModel):
     plan_id: int
     symbol: str
