@@ -1,7 +1,8 @@
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit, quote_plus
-from pydantic import field_validator
+from urllib.parse import quote_plus
+
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,9 +36,20 @@ class Settings(BaseSettings):
     def DATABASE_URL(self) -> str:
         if self.DB_TYPE == "mysql":
             # 去掉可能的包裹引号（single/double quote）并对用户名/密码进行 URL 编码
-            user = quote_plus(str(self.MYSQL_USER).strip("'\"")) if self.MYSQL_USER else ""
-            pwd = quote_plus(str(self.MYSQL_PASSWORD).strip("'\"")) if self.MYSQL_PASSWORD else ""
-            return f"mysql+aiomysql://{user}:{pwd}@{self.MYSQL_HOST}:{self.MYSQL_PORT}/{self.MYSQL_DB}"
+            user = (
+                quote_plus(str(self.MYSQL_USER).strip("'\""))
+                if self.MYSQL_USER
+                else ""
+            )
+            pwd = (
+                quote_plus(str(self.MYSQL_PASSWORD).strip("'\""))
+                if self.MYSQL_PASSWORD
+                else ""
+            )
+            return (
+                f"mysql+aiomysql://{user}:{pwd}@{self.MYSQL_HOST}:"
+                f"{self.MYSQL_PORT}/{self.MYSQL_DB}"
+            )
 
         # 处理 SQLite 路径解析逻辑
         path = self.SQLITE_DB_PATH
@@ -57,8 +69,13 @@ class Settings(BaseSettings):
 
     @property
     def REDIS_URL(self) -> str:
-        password_str = f":{self.REDIS_PASSWORD}@" if self.REDIS_PASSWORD else ""
-        return f"redis://{password_str}{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
+        password_str = (
+            f":{self.REDIS_PASSWORD}@" if self.REDIS_PASSWORD else ""
+        )
+        return (
+            f"redis://{password_str}{self.REDIS_HOST}:{self.REDIS_PORT}/"
+            f"{self.REDIS_DB}"
+        )
 
     # 交易模式：OFF / DRY_RUN / REAL
     TRADE_MODE: str = "DRY_RUN"
@@ -77,7 +94,7 @@ class Settings(BaseSettings):
     # DELAYED: 免费延迟行情（约15-20分钟延迟，适合开发测试）
     # REALTIME: 实时行情（需付费订阅，生产环境必须）
     TIGER_QUOTE_MODE: str = "DELAYED"
-    
+
     # 是否在 API 响应中显示数据延迟警告
     QUOTE_DATA_WARNING: bool = True
 
@@ -116,8 +133,8 @@ class Settings(BaseSettings):
     # 是否开启认证（默认 True）。在生产环境请通过环境变量覆盖默认用户名/密码。
     AUTH_ENABLED: bool = True
     ADMIN_USERNAME: str = "admin"
-    # 在 .env 中设置 ADMIN_PASSWORD，避免将明文密码提交到代码仓库
-    ADMIN_PASSWORD: str = "admin"
+    # 必须通过环境变量或 .env 显式设置，避免回退到弱口令默认值
+    ADMIN_PASSWORD: str | None = None
     # 用于签发 JWT token 的密钥，请在部署时设置为强随机值
     JWT_SECRET_KEY: str = "change-me-please"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
@@ -142,7 +159,7 @@ class Settings(BaseSettings):
 
     # 并发控制配置（中期优化）
     EXTERNAL_API_CONCURRENCY: int = 5  # 外部API并发上限
-    REFRESH_CONCURRENCY: int = 5       # 刷新任务并发上限
+    REFRESH_CONCURRENCY: int = 5  # 刷新任务并发上限
 
     # 外部 API 限流规避配置
     API_RATE_LIMIT_COOLDOWN_SECONDS: int = 900  # 触发限流后冷却时间（秒）
@@ -178,42 +195,44 @@ class Settings(BaseSettings):
     ALLOWED_ASSET_TYPES: str = "STOCK"
 
     # 风险门边界（不可绕过）
-    MAX_SINGLE_POSITION_PCT: float = 0.25   # 单标的最大仓位占比
-    MAX_VAR_PCT: float = 0.03               # 投资组合 VaR@95% 上限
-    MAX_STRESS_LOSS_PCT: float = 0.15       # 压力测试最大损失占比
-    MAX_DAILY_TRADES: int = 10              # 单日最大自主交易笔数
+    MAX_SINGLE_POSITION_PCT: float = 0.25  # 单标的最大仓位占比
+    MAX_VAR_PCT: float = 0.03  # 投资组合 VaR@95% 上限
+    MAX_STRESS_LOSS_PCT: float = 0.15  # 压力测试最大损失占比
+    MAX_DAILY_TRADES: int = 10  # 单日最大自主交易笔数
     ALLOW_CLOSING_DURING_CIRCUIT_BREAKER: bool = True  # 熔断期间允许减仓/平仓
-    EXIT_ORDER_COOLDOWN_MINUTES: int = 5    # 减仓/平仓方向最短冷却（分钟）
-    EXIT_ORDER_LOCK_SECONDS: int = 30       # 减仓/平仓 Redis 并发锁（秒）
+    EXIT_ORDER_COOLDOWN_MINUTES: int = 5  # 减仓/平仓方向最短冷却（分钟）
+    EXIT_ORDER_LOCK_SECONDS: int = 30  # 减仓/平仓 Redis 并发锁（秒）
 
     # 半自主模式：撤单窗口（分钟）
     REVOKE_WINDOW_MINUTES: int = 30
 
     # Paper Trading 配置
     PAPER_INITIAL_CAPITAL: float = 100000.0
-    PAPER_AUTO_GRADUATE: bool = True        # 达标后是否自动建议升级 Live
+    PAPER_AUTO_GRADUATE: bool = True  # 达标后是否自动建议升级 Live
 
     # DataHub 数据源优先级
-    DATA_HUB_PRIMARY: str = "yfinance"      # yfinance / tiger
-    DATA_HUB_FALLBACK: str = "tiger"        # 主源失败时使用
+    DATA_HUB_PRIMARY: str = "yfinance"  # yfinance / tiger
+    DATA_HUB_FALLBACK: str = "tiger"  # 主源失败时使用
 
     # 期权分析缓存时间（小时）
     OPTIONS_ANALYSIS_CACHE_EXPIRE_HOURS: int = 24
 
     # AI 模型路由（轻量 vs 复杂推理）
-    AI_LIGHTWEIGHT_MODEL: str = "deepseek-chat"     # 轻量查询/摘要
-    AI_COMPLEX_MODEL: str = "deepseek-reasoner"     # 深度推理/自主决策
+    AI_LIGHTWEIGHT_MODEL: str = "deepseek-chat"  # 轻量查询/摘要
+    AI_COMPLEX_MODEL: str = "deepseek-reasoner"  # 深度推理/自主决策
 
     # 回测配置
-    BACKTEST_MAX_CONCURRENT: int = 3        # 最大并发回测任务数
+    BACKTEST_MAX_CONCURRENT: int = 3  # 最大并发回测任务数
     BACKTEST_COMMISSION_PCT: float = 0.001  # 模拟佣金 0.1%
-    BACKTEST_SLIPPAGE_PCT: float = 0.0005   # 模拟滑点 0.05%
+    BACKTEST_SLIPPAGE_PCT: float = 0.0005  # 模拟滑点 0.05%
 
     # 持仓监控 & 自动止损/止盈
-    POSITION_STOP_LOSS_PCT: float = 0.05    # 止损阈值：浮亏 >= 5% 触发 EXIT 信号
+    POSITION_STOP_LOSS_PCT: float = 0.05  # 止损阈值：浮亏 >= 5% 触发 EXIT 信号
     POSITION_TAKE_PROFIT_PCT: float = 0.15  # 止盈阈值：浮盈 >= 15% 触发 EXIT 信号
     POSITION_MONITOR_INTERVAL_MINUTES: int = 15  # 持仓扫描间隔（分钟）
-    POSITION_CAPACITY_GUARD_INTERVAL_MINUTES: int = 15  # 超并发持仓主动降载扫描间隔（分钟）
+    POSITION_CAPACITY_GUARD_INTERVAL_MINUTES: int = (
+        15  # 超并发持仓主动降载扫描间隔（分钟）
+    )
 
     # 券商订单状态自动对账（用于回写手动撤单/成交结果）
     BROKER_ORDER_SYNC_INTERVAL_MINUTES: int = 10
@@ -221,9 +240,6 @@ class Settings(BaseSettings):
 
     # 态势感知栏：围栏统计向前展望天数（默认 30 天）
     SA_FENCE_LOOKAHEAD_DAYS: int = 30
-
-    # 环境变量示例
-    # SA_FENCE_LOOKAHEAD_DAYS=30
 
     # AI 周报定时（每周一 08:00 生成上周复盘）
     SCHEDULER_WEEKLY_REPORT_DAY: str = "mon"
@@ -280,6 +296,12 @@ class Settings(BaseSettings):
         if not resolved_path.is_absolute():
             resolved_path = BASE_DIR / resolved_path
         return str(resolved_path)
+
+    @model_validator(mode="after")
+    def _validate_auth_settings(self) -> "Settings":
+        if self.AUTH_ENABLED and not (self.ADMIN_PASSWORD or "").strip():
+            raise ValueError("ADMIN_PASSWORD must be set when AUTH_ENABLED=true")
+        return self
 
 
 settings = Settings()

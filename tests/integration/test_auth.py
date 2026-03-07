@@ -1,12 +1,20 @@
 from fastapi.testclient import TestClient
+
+from app.core.config import settings
 from app.main import app
 
 client = TestClient(app)
 
 
-def test_login_success_and_protected_endpoint():
-    # login with default credentials
-    resp = client.post("/api/v1/login", data={"username": "admin", "password": "admin"})
+def test_login_success_and_protected_endpoint(monkeypatch):
+    monkeypatch.setattr(settings, "ADMIN_USERNAME", "admin")
+    monkeypatch.setattr(settings, "ADMIN_PASSWORD", "test-admin-password")
+    monkeypatch.setattr(settings, "JWT_SECRET_KEY", "test-jwt-secret")
+
+    resp = client.post(
+        "/api/v1/login",
+        data={"username": "admin", "password": "test-admin-password"},
+    )
     assert resp.status_code == 200
     data = resp.json()
     assert "access_token" in data
@@ -23,6 +31,23 @@ def test_login_success_and_protected_endpoint():
     assert r2.status_code != 401
 
 
-def test_login_fail():
-    resp = client.post("/api/v1/login", data={"username": "admin", "password": "wrong"})
+def test_login_fail(monkeypatch):
+    monkeypatch.setattr(settings, "ADMIN_USERNAME", "admin")
+    monkeypatch.setattr(settings, "ADMIN_PASSWORD", "test-admin-password")
+
+    resp = client.post(
+        "/api/v1/login",
+        data={"username": "admin", "password": "wrong"},
+    )
+    assert resp.status_code == 401
+
+
+def test_login_fail_when_admin_password_missing(monkeypatch):
+    monkeypatch.setattr(settings, "ADMIN_USERNAME", "admin")
+    monkeypatch.setattr(settings, "ADMIN_PASSWORD", None)
+
+    resp = client.post(
+        "/api/v1/login",
+        data={"username": "admin", "password": "anything"},
+    )
     assert resp.status_code == 401

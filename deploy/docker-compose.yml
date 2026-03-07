@@ -80,7 +80,7 @@ services:
     # 线上环境建议通过 Traefik 访问，不再直接暴露 8088 端口
     # ports:
     #   - "8088:8088"
-    # 推荐在仓库根目录创建 .env（cp .env.example .env），然后从 deploy/ 引用：
+    # 推荐将 .env 放在当前 docker-compose.yml 同目录（deploy/.env）：
     #   docker compose -f deploy/docker-compose.yml up -d
     env_file:
       - ./.env
@@ -130,6 +130,7 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+    # 前端运行时变量文件也按当前 compose 文件目录解析
     env_file:
       - ./.frontend_env
     environment:
