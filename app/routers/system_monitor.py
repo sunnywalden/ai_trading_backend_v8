@@ -2,6 +2,7 @@
 
 聚合真实数据库与现有监控服务，避免系统监控再凭空“脑补” WARN / CRITICAL。
 """
+
 from __future__ import annotations
 
 import math
@@ -13,11 +14,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import desc, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.market_hours import is_symbol_market_active
 from app.models.db import get_session, redis_client
 from app.models.fsm_transition_log import FsmTransitionLog
 from app.models.trading_plan import TradingPlan
 from app.routers.api_monitoring import monitoring_health_check
-from app.core.market_hours import is_symbol_market_active
 from app.schemas.lifecycle import PIPELINE_P50_BENCHMARKS, PIPELINE_STAGE_NAMES
 from app.schemas.system_monitor import (
     DataFlowDetailResponse,
@@ -116,7 +117,9 @@ def _quantile(values: Sequence[float], q: float) -> float | None:
     return cleaned[low] * (1 - weight) + cleaned[high] * weight
 
 
-def _status_from_counts(warn_count: int = 0, critical_count: int = 0, unknown: bool = False) -> str:
+def _status_from_counts(
+    warn_count: int = 0, critical_count: int = 0, unknown: bool = False
+) -> str:
     if critical_count > 0:
         return "CRITICAL"
     if warn_count > 0:
@@ -144,7 +147,9 @@ def _classify_stage_seconds(stage_id: int, seconds: float | None) -> str:
     return "HEALTHY"
 
 
-def _build_exception_from_plan(plan: TradingPlan, severity: str, last_error_message: str | None = None) -> LifecycleExceptionItem:
+def _build_exception_from_plan(
+    plan: TradingPlan, severity: str, last_error_message: str | None = None
+) -> LifecycleExceptionItem:
     stage_id = int(plan.pipeline_stage or 0)
     stage_label = PIPELINE_STAGE_NAMES.get(stage_id, f"阶段 {stage_id}")
     entered_at = _to_utc(plan.stage_entered_at)
@@ -161,13 +166,21 @@ def _build_exception_from_plan(plan: TradingPlan, severity: str, last_error_mess
         plan_id=plan.id,
         symbol=plan.symbol,
         action=plan.direction,
-        signal_type=(plan.plan_tags or {}).get("signal_type") if isinstance(plan.plan_tags, dict) else None,
+        signal_type=(
+            (plan.plan_tags or {}).get("signal_type")
+            if isinstance(plan.plan_tags, dict)
+            else None
+        ),
         current_stage_id=stage_id,
         current_stage_key=_stage_key(stage_id, stage_label),
         current_stage_label=stage_label,
         stayed_seconds=stayed_seconds,
         severity="critical" if severity == "CRITICAL" else "warning",
-        execution_path=(plan.plan_tags or {}).get("algo_type") if isinstance(plan.plan_tags, dict) else exec_progress.get("algo_type"),
+        execution_path=(
+            (plan.plan_tags or {}).get("algo_type")
+            if isinstance(plan.plan_tags, dict)
+            else exec_progress.get("algo_type")
+        ),
         last_error_code=last_error_code,
         last_error_message=last_error_message,
         last_event_at=_to_utc(plan.updated_at),
@@ -179,10 +192,101 @@ def _is_terminal_resolved_plan(plan: TradingPlan) -> bool:
     stage_id = int(plan.pipeline_stage or 0)
     status = str(plan.plan_status or "").upper()
     position_state = str(plan.position_fsm_state or "").upper()
-    return stage_id >= 16 and status in {"FAILED", "REVOKED", "EXPIRED", "CANCELLED"} and position_state in {"CLOSED", ""}
+    return (
+        stage_id >= 16
+        and status in {"FAILED", "REVOKED", "EXPIRED", "CANCELLED"}
+        and position_state in {"CLOSED", ""}
+    )
 
 
-async def _load_recent_plans(db: AsyncSession, window_minutes: int) -> list[TradingPlan]:
+# ---------------------------------------------------------------------------
+# V10.4.4 Position-centric helper queries (safe: return 0 if tables missing)
+# ---------------------------------------------------------------------------
+
+
+async def _count_positions(db: AsyncSession, mode: str) -> int:
+    """Count positions by mode: 'active' or 'exception'."""
+    try:
+        from sqlalchemy import func as sa_func
+
+        from app.models.position import Position, PositionStatus
+
+        _ACTIVE = {
+            PositionStatus.PENDING.value,
+            PositionStatus.OPENING.value,
+            PositionStatus.ACTIVE.value,
+            PositionStatus.SCALING_IN.value,
+            PositionStatus.SCALING_OUT.value,
+            PositionStatus.CLOSING.value,
+            PositionStatus.PARTIALLY_CLOSED.value,
+            PositionStatus.EXCEPTION.value,
+        }
+        if mode == "exception":
+            stmt = select(sa_func.count(Position.id)).where(
+                Position.status == PositionStatus.EXCEPTION.value
+            )
+        else:
+            stmt = select(sa_func.count(Position.id)).where(
+                Position.status.in_(list(_ACTIVE))
+            )
+        result = await db.execute(stmt)
+        return result.scalar_one() or 0
+    except Exception:
+        return 0
+
+
+async def _count_stuck_slices(db: AsyncSession) -> int:
+    """Count execution slices in STUCK status."""
+    try:
+        from sqlalchemy import func as sa_func
+
+        from app.models.execution_slice import ExecutionSlice, SliceStatus
+
+        stmt = select(sa_func.count(ExecutionSlice.id)).where(
+            ExecutionSlice.status == SliceStatus.STUCK.value
+        )
+        result = await db.execute(stmt)
+        return result.scalar_one() or 0
+    except Exception:
+        return 0
+
+
+async def _get_closing_reason_dist(db: AsyncSession, days: int) -> dict:
+    """Return closing-reason distribution from Position table."""
+    from datetime import timedelta
+
+    try:
+        from sqlalchemy import func as sa_func
+
+        from app.models.position import Position, PositionStatus
+
+        since = _now().replace(tzinfo=None) - timedelta(days=days)
+        stmt = (
+            select(
+                Position.closing_reason,
+                sa_func.count(Position.id).label("cnt"),
+            )
+            .where(
+                Position.status.in_(
+                    [
+                        PositionStatus.CLOSED.value,
+                        PositionStatus.LIQUIDATED.value,
+                    ]
+                ),
+                Position.closed_at >= since,
+                Position.closing_reason.isnot(None),
+            )
+            .group_by(Position.closing_reason)
+        )
+        result = await db.execute(stmt)
+        return {row.closing_reason: row.cnt for row in result}
+    except Exception:
+        return {}
+
+
+async def _load_recent_plans(
+    db: AsyncSession, window_minutes: int
+) -> list[TradingPlan]:
     cutoff = _now() - timedelta(minutes=window_minutes)
     stmt = (
         select(TradingPlan)
@@ -197,7 +301,9 @@ async def _load_recent_plans(db: AsyncSession, window_minutes: int) -> list[Trad
     return list((await db.execute(stmt)).scalars().all())
 
 
-async def _build_lifecycle_overview(db: AsyncSession, window_minutes: int, only_exceptions: bool) -> LifecycleOverviewResponse:
+async def _build_lifecycle_overview(
+    db: AsyncSession, window_minutes: int, only_exceptions: bool
+) -> LifecycleOverviewResponse:
     distribution = await lifecycle_service.get_pipeline_distribution(db)
     plan_fsm_summary = await lifecycle_service.get_plan_fsm_counts(db)
     position_fsm_summary = await lifecycle_service.get_position_fsm_counts(db)
@@ -220,7 +326,9 @@ async def _build_lifecycle_overview(db: AsyncSession, window_minutes: int, only_
                 stage_seconds.append(seconds)
                 all_stage_seconds.append(seconds)
             entered_at = _to_utc(task.stage_entered_at)
-            if entered_at and (oldest_entered_at is None or entered_at < oldest_entered_at):
+            if entered_at and (
+                oldest_entered_at is None or entered_at < oldest_entered_at
+            ):
                 oldest_entered_at = entered_at
 
             plan = plan_by_id.get(task.plan_id)
@@ -236,7 +344,9 @@ async def _build_lifecycle_overview(db: AsyncSession, window_minutes: int, only_
                 if plan is not None:
                     exceptions_by_id.setdefault(
                         plan.id,
-                        _build_exception_from_plan(plan, severity, "阶段停留时间超过阈值"),
+                        _build_exception_from_plan(
+                            plan, severity, "阶段停留时间超过阈值"
+                        ),
                     )
 
         pipeline.append(
@@ -281,7 +391,9 @@ async def _build_lifecycle_overview(db: AsyncSession, window_minutes: int, only_
 
     if only_exceptions:
         pipeline = [
-            stage for stage in pipeline if stage.warn_count > 0 or stage.critical_count > 0 or stage.stuck_count > 0
+            stage
+            for stage in pipeline
+            if stage.warn_count > 0 or stage.critical_count > 0 or stage.stuck_count > 0
         ]
 
     def _fsm_status(state_key: str, count: int) -> str:
@@ -316,16 +428,24 @@ async def _build_lifecycle_overview(db: AsyncSession, window_minutes: int, only_
             exception_count=len(exceptions),
             p95_stage_seconds=_quantile(all_stage_seconds, 0.95) or 0.0,
             warn_stage_count=sum(1 for stage in pipeline if stage.warn_count > 0),
-            critical_stage_count=sum(1 for stage in pipeline if stage.critical_count > 0),
+            critical_stage_count=sum(
+                1 for stage in pipeline if stage.critical_count > 0
+            ),
+            active_positions=await _count_positions(db, "active"),
+            exception_positions=await _count_positions(db, "exception"),
+            stuck_slices=await _count_stuck_slices(db),
         ),
         pipeline=pipeline,
         plan_fsm=plan_fsm,
         position_fsm=position_fsm,
         exceptions=exceptions[:50],
+        closing_reason_distribution=await _get_closing_reason_dist(db, 30),
     )
 
 
-async def _build_lifecycle_detail(db: AsyncSession, intent_id: int, window_minutes: int) -> LifecycleIntentDetailResponse:
+async def _build_lifecycle_detail(
+    db: AsyncSession, intent_id: int, window_minutes: int
+) -> LifecycleIntentDetailResponse:
     result = await db.execute(select(TradingPlan).where(TradingPlan.id == intent_id))
     plan = result.scalar_one_or_none()
     if plan is None:
@@ -353,7 +473,11 @@ async def _build_lifecycle_detail(db: AsyncSession, intent_id: int, window_minut
                 duration_seconds=duration_seconds,
                 source_service="pipeline",
                 message="阶段流转记录",
-                metadata={k: v for k, v in item.items() if k not in {"stage", "entered_at", "exited_at"}},
+                metadata={
+                    k: v
+                    for k, v in item.items()
+                    if k not in {"stage", "entered_at", "exited_at"}
+                },
             )
         )
 
@@ -365,7 +489,9 @@ async def _build_lifecycle_detail(db: AsyncSession, intent_id: int, window_minut
                 .order_by(FsmTransitionLog.occurred_at.asc(), FsmTransitionLog.id.asc())
                 .limit(100)
             )
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
     for log in fsm_logs:
         timeline.append(
@@ -373,17 +499,24 @@ async def _build_lifecycle_detail(db: AsyncSession, intent_id: int, window_minut
                 seq=len(timeline) + 1,
                 stage_id=int(plan.pipeline_stage or 0),
                 stage_key=_stage_key(int(plan.pipeline_stage or 0)),
-                stage_label=PIPELINE_STAGE_NAMES.get(int(plan.pipeline_stage or 0), "当前阶段"),
+                stage_label=PIPELINE_STAGE_NAMES.get(
+                    int(plan.pipeline_stage or 0), "当前阶段"
+                ),
                 fsm_type=log.fsm_type if log.fsm_type in {"PLAN", "POSITION"} else None,
                 fsm_from=log.from_state,
                 fsm_to=log.to_state,
-                status="CRITICAL" if str(log.to_state).upper() == "FAILED" else "HEALTHY",
+                status=(
+                    "CRITICAL" if str(log.to_state).upper() == "FAILED" else "HEALTHY"
+                ),
                 entered_at=_to_utc(log.occurred_at),
                 exited_at=None,
                 duration_seconds=None,
                 source_service="fsm_transition_log",
                 message=log.trigger_reason or f"{log.fsm_type} 状态变更",
-                metadata={"engine": log.engine, "qty_delta": _safe_float(log.qty_delta)},
+                metadata={
+                    "engine": log.engine,
+                    "qty_delta": _safe_float(log.qty_delta),
+                },
             )
         )
 
@@ -396,11 +529,17 @@ async def _build_lifecycle_detail(db: AsyncSession, intent_id: int, window_minut
     entered_at = _to_utc(plan.stage_entered_at)
     if entered_at:
         stage_seconds = (_now() - entered_at).total_seconds()
-    stage_severity = _classify_stage_seconds(int(plan.pipeline_stage or 0), stage_seconds)
+    stage_severity = _classify_stage_seconds(
+        int(plan.pipeline_stage or 0), stage_seconds
+    )
     if stage_severity in {"WARN", "CRITICAL"}:
-        latest_errors.append(_build_exception_from_plan(plan, stage_severity, "当前阶段停留时间超过阈值"))
+        latest_errors.append(
+            _build_exception_from_plan(plan, stage_severity, "当前阶段停留时间超过阈值")
+        )
     if str(plan.plan_status or "").upper() == "FAILED":
-        latest_errors.append(_build_exception_from_plan(plan, "CRITICAL", "计划进入 FAILED 状态"))
+        latest_errors.append(
+            _build_exception_from_plan(plan, "CRITICAL", "计划进入 FAILED 状态")
+        )
 
     try:
         intent_row = (
@@ -422,12 +561,22 @@ async def _build_lifecycle_detail(db: AsyncSession, intent_id: int, window_minut
         plan_id=plan.id,
         symbol=plan.symbol,
         action=plan.direction,
-        signal_type=(plan.plan_tags or {}).get("signal_type") if isinstance(plan.plan_tags, dict) else None,
-        execution_path=((plan.plan_tags or {}).get("algo_type") if isinstance(plan.plan_tags, dict) else None),
+        signal_type=(
+            (plan.plan_tags or {}).get("signal_type")
+            if isinstance(plan.plan_tags, dict)
+            else None
+        ),
+        execution_path=(
+            (plan.plan_tags or {}).get("algo_type")
+            if isinstance(plan.plan_tags, dict)
+            else None
+        ),
         autonomy_level=plan.autonomy_action,
         current_stage_id=int(plan.pipeline_stage or 0),
         current_stage_key=_stage_key(int(plan.pipeline_stage or 0)),
-        current_stage_label=PIPELINE_STAGE_NAMES.get(int(plan.pipeline_stage or 0), "未知阶段"),
+        current_stage_label=PIPELINE_STAGE_NAMES.get(
+            int(plan.pipeline_stage or 0), "未知阶段"
+        ),
         plan_fsm_state=plan.plan_status,
         position_fsm_state=plan.position_fsm_state,
         started_at=_to_utc(plan.created_at),
@@ -437,7 +586,9 @@ async def _build_lifecycle_detail(db: AsyncSession, intent_id: int, window_minut
     )
 
 
-def _flow_summary_from_nodes(flow_name: str, flow_label: str, nodes: list[DataFlowNodeStatus]) -> DataFlowSummary:
+def _flow_summary_from_nodes(
+    flow_name: str, flow_label: str, nodes: list[DataFlowNodeStatus]
+) -> DataFlowSummary:
     lags = [node.lag_seconds for node in nodes if node.lag_seconds is not None]
     critical_nodes = sum(1 for node in nodes if node.status == "CRITICAL")
     warn_nodes = sum(1 for node in nodes if node.status == "WARN")
@@ -497,7 +648,9 @@ def _make_node(
     )
 
 
-async def _load_latest_timestamp(db: AsyncSession, sqls: Sequence[str]) -> datetime | None:
+async def _load_latest_timestamp(
+    db: AsyncSession, sqls: Sequence[str]
+) -> datetime | None:
     for sql in sqls:
         try:
             row = (await db.execute(text(sql))).fetchone()
@@ -510,7 +663,9 @@ async def _load_latest_timestamp(db: AsyncSession, sqls: Sequence[str]) -> datet
     return None
 
 
-async def _build_data_flow_payload(db: AsyncSession, window_minutes: int) -> tuple[list[DataFlowSummary], dict[str, list[DataFlowFailureSample]]]:
+async def _build_data_flow_payload(
+    db: AsyncSession, window_minutes: int
+) -> tuple[list[DataFlowSummary], dict[str, list[DataFlowFailureSample]]]:
     lifecycle = await _build_lifecycle_overview(db, window_minutes, False)
     lifecycle_stage_map = {stage.stage_id: stage for stage in lifecycle.pipeline}
     exceptions = lifecycle.exceptions
@@ -528,11 +683,16 @@ async def _build_data_flow_payload(db: AsyncSession, window_minutes: int) -> tup
     }
     requires_live_market_data = has_active_pipeline and bool(active_market_symbols)
 
-    signal_ts = await _load_latest_timestamp(db, ["SELECT MAX(created_at) FROM trading_signals"])
-    market_ts = await _load_latest_timestamp(db, [
-        "SELECT MAX(timestamp) FROM technical_indicators",
-        "SELECT MAX(timestamp) FROM technical_indicator",
-    ])
+    signal_ts = await _load_latest_timestamp(
+        db, ["SELECT MAX(created_at) FROM trading_signals"]
+    )
+    market_ts = await _load_latest_timestamp(
+        db,
+        [
+            "SELECT MAX(timestamp) FROM technical_indicators",
+            "SELECT MAX(timestamp) FROM technical_indicator",
+        ],
+    )
 
     signal_lag = (now - signal_ts).total_seconds() if signal_ts else None
     market_lag = (now - market_ts).total_seconds() if market_ts else None
@@ -548,11 +708,20 @@ async def _build_data_flow_payload(db: AsyncSession, window_minutes: int) -> tup
         else ("WARN" if market_lag <= 3600 else "CRITICAL")
     )
 
-    def _stage_node(stage_id: int, key: str, label: str, upstream: Iterable[str], downstream: Iterable[str]) -> DataFlowNodeStatus:
+    def _stage_node(
+        stage_id: int,
+        key: str,
+        label: str,
+        upstream: Iterable[str],
+        downstream: Iterable[str],
+    ) -> DataFlowNodeStatus:
         metric = lifecycle_stage_map.get(stage_id)
         status = _status_from_counts(
             warn_count=(metric.warn_count if metric else 0),
-            critical_count=((metric.critical_count if metric else 0) + (metric.stuck_count if metric else 0)),
+            critical_count=(
+                (metric.critical_count if metric else 0)
+                + (metric.stuck_count if metric else 0)
+            ),
             unknown=metric is None,
         )
         return _make_node(
@@ -566,10 +735,18 @@ async def _build_data_flow_payload(db: AsyncSession, window_minutes: int) -> tup
             throughput_1m=float(metric.active_count or 0) if metric else None,
             throughput_5m=float(metric.active_count or 0) if metric else None,
             error_count_1h=(metric.critical_count if metric else 0),
-            error_count_24h=((metric.warn_count if metric else 0) + (metric.critical_count if metric else 0)),
+            error_count_24h=(
+                (metric.warn_count if metric else 0)
+                + (metric.critical_count if metric else 0)
+            ),
             degraded=status != "HEALTHY",
             last_error_code="PIPELINE_STUCK" if metric and metric.stuck_count else None,
-            last_error_message="阶段存在积压/卡顿" if metric and (metric.warn_count or metric.critical_count or metric.stuck_count) else None,
+            last_error_message=(
+                "阶段存在积压/卡顿"
+                if metric
+                and (metric.warn_count or metric.critical_count or metric.stuck_count)
+                else None
+            ),
             upstream_nodes=upstream,
             downstream_nodes=downstream,
         )
@@ -582,14 +759,40 @@ async def _build_data_flow_payload(db: AsyncSession, window_minutes: int) -> tup
             heartbeat_at=signal_ts,
             last_success_at=signal_ts,
             lag_seconds=signal_lag if requires_live_market_data else 0.0,
-            queue_depth=lifecycle_stage_map.get(1).active_count if lifecycle_stage_map.get(1) else 0,
-            throughput_1m=float(lifecycle_stage_map.get(1).active_count or 0) if lifecycle_stage_map.get(1) else None,
-            throughput_5m=float(lifecycle_stage_map.get(3).active_count or 0) if lifecycle_stage_map.get(3) else None,
-            last_error_code="SIGNAL_STALE" if requires_live_market_data and signal_lag and signal_lag > 1800 else None,
-            last_error_message="信号生成长时间无更新" if requires_live_market_data and signal_lag and signal_lag > 1800 else None,
+            queue_depth=(
+                lifecycle_stage_map.get(1).active_count
+                if lifecycle_stage_map.get(1)
+                else 0
+            ),
+            throughput_1m=(
+                float(lifecycle_stage_map.get(1).active_count or 0)
+                if lifecycle_stage_map.get(1)
+                else None
+            ),
+            throughput_5m=(
+                float(lifecycle_stage_map.get(3).active_count or 0)
+                if lifecycle_stage_map.get(3)
+                else None
+            ),
+            last_error_code=(
+                "SIGNAL_STALE"
+                if requires_live_market_data and signal_lag and signal_lag > 1800
+                else None
+            ),
+            last_error_message=(
+                "信号生成长时间无更新"
+                if requires_live_market_data and signal_lag and signal_lag > 1800
+                else None
+            ),
             downstream_nodes=["portfolio_decision"],
         ),
-        _stage_node(5, "portfolio_decision", "Portfolio Decision", ["signal_generation"], ["risk_gate"]),
+        _stage_node(
+            5,
+            "portfolio_decision",
+            "Portfolio Decision",
+            ["signal_generation"],
+            ["risk_gate"],
+        ),
         _stage_node(4, "risk_gate", "Risk Gate", ["portfolio_decision"], ["execution"]),
         _stage_node(8, "execution", "Execution", ["risk_gate"], ["monitoring"]),
         _stage_node(9, "monitoring", "Monitoring", ["execution"], []),
@@ -606,8 +809,16 @@ async def _build_data_flow_payload(db: AsyncSession, window_minutes: int) -> tup
             queue_depth=None,
             throughput_1m=None,
             throughput_5m=None,
-            last_error_code="MARKET_DATA_STALE" if requires_live_market_data and market_lag and market_lag > 1800 else None,
-            last_error_message="市场数据长时间无更新" if requires_live_market_data and market_lag and market_lag > 1800 else None,
+            last_error_code=(
+                "MARKET_DATA_STALE"
+                if requires_live_market_data and market_lag and market_lag > 1800
+                else None
+            ),
+            last_error_message=(
+                "市场数据长时间无更新"
+                if requires_live_market_data and market_lag and market_lag > 1800
+                else None
+            ),
             downstream_nodes=["regime_classification"],
         ),
         _make_node(
@@ -641,15 +852,23 @@ async def _build_data_flow_payload(db: AsyncSession, window_minutes: int) -> tup
 
     post_trade_nodes = [
         _stage_node(12, "settlement", "Settlement", [], ["attribution"]),
-        _stage_node(13, "attribution", "Attribution", ["settlement"], ["insight_update"]),
-        _stage_node(14, "insight_update", "Insight Update", ["attribution"], ["loop_completed"]),
+        _stage_node(
+            13, "attribution", "Attribution", ["settlement"], ["insight_update"]
+        ),
+        _stage_node(
+            14, "insight_update", "Insight Update", ["attribution"], ["loop_completed"]
+        ),
         _stage_node(16, "loop_completed", "Loop Completed", ["insight_update"], []),
     ]
 
     flows = [
         _flow_summary_from_nodes("core_trade_pipeline", "主交易流水线", core_nodes),
-        _flow_summary_from_nodes("market_data_pipeline", "市场数据更新链路", market_nodes),
-        _flow_summary_from_nodes("post_trade_pipeline", "归因与复盘链路", post_trade_nodes),
+        _flow_summary_from_nodes(
+            "market_data_pipeline", "市场数据更新链路", market_nodes
+        ),
+        _flow_summary_from_nodes(
+            "post_trade_pipeline", "归因与复盘链路", post_trade_nodes
+        ),
     ]
 
     failures: dict[str, list[DataFlowFailureSample]] = {
@@ -658,7 +877,11 @@ async def _build_data_flow_payload(db: AsyncSession, window_minutes: int) -> tup
                 sample_id=f"core-{item.intent_id}",
                 payload_id=str(item.plan_id or item.intent_id),
                 stage_key=item.current_stage_key,
-                node_key="execution" if (item.current_stage_id or 0) >= 8 else "signal_generation",
+                node_key=(
+                    "execution"
+                    if (item.current_stage_id or 0) >= 8
+                    else "signal_generation"
+                ),
                 error_code=item.last_error_code,
                 error_message=item.last_error_message,
                 occurred_at=item.last_event_at or now,
@@ -674,7 +897,12 @@ async def _build_data_flow_payload(db: AsyncSession, window_minutes: int) -> tup
     return flows, failures
 
 
-async def _build_service_payload(db: AsyncSession, window_minutes: int) -> tuple[list[ServiceModuleSummary], list[ServiceHealthItem], dict[str, list[ServiceHealthTimelineEvent]], dict[str, list[DataFlowFailureSample]]]:
+async def _build_service_payload(db: AsyncSession, window_minutes: int) -> tuple[
+    list[ServiceModuleSummary],
+    list[ServiceHealthItem],
+    dict[str, list[ServiceHealthTimelineEvent]],
+    dict[str, list[DataFlowFailureSample]],
+]:
     now = _now()
     service_timeline: dict[str, list[ServiceHealthTimelineEvent]] = {}
     service_failures: dict[str, list[DataFlowFailureSample]] = {}
@@ -807,9 +1035,13 @@ async def _build_service_payload(db: AsyncSession, window_minutes: int) -> tuple
             error_count_24h=overview.headline.exception_count,
             last_heartbeat_at=overview.meta.generated_at,
             last_success_at=overview.meta.generated_at,
-            last_error_code="PIPELINE_EXCEPTIONS" if overview.headline.exception_count else None,
+            last_error_code=(
+                "PIPELINE_EXCEPTIONS" if overview.headline.exception_count else None
+            ),
             last_error_message=(
-                f"存在 {overview.headline.exception_count} 条生命周期异常" if overview.headline.exception_count else None
+                f"存在 {overview.headline.exception_count} 条生命周期异常"
+                if overview.headline.exception_count
+                else None
             ),
             dependencies=["mysql_primary"],
             owners=["quant-loop"],
@@ -820,9 +1052,18 @@ async def _build_service_payload(db: AsyncSession, window_minutes: int) -> tuple
         report = await autonomy_health_monitor.run_all_checks(db)
         status_map = {"OK": "HEALTHY", "WARN": "WARN", "CRITICAL": "CRITICAL"}
         status = status_map.get(report.overall_status, "WARN")
-        warn_count = sum(1 for item in report.checks if item.status in {"WARN", "ERROR"})
+        warn_count = sum(
+            1 for item in report.checks if item.status in {"WARN", "ERROR"}
+        )
         critical_count = sum(1 for item in report.checks if item.status == "CRITICAL")
-        last_error = next((item for item in report.checks if item.status in {"CRITICAL", "WARN", "ERROR"}), None)
+        last_error = next(
+            (
+                item
+                for item in report.checks
+                if item.status in {"CRITICAL", "WARN", "ERROR"}
+            ),
+            None,
+        )
         return ServiceHealthItem(
             service_key="autonomy_health_monitor",
             service_label="Autonomy Health Monitor",
@@ -876,11 +1117,15 @@ async def _build_service_payload(db: AsyncSession, window_minutes: int) -> tuple
             degraded=status != "HEALTHY",
             latency_ms=None,
             p95_latency_ms=None,
-            error_count_1h=int(health.get("warning", 0)) + int(health.get("critical", 0)),
-            error_count_24h=int(health.get("warning", 0)) + int(health.get("critical", 0)),
+            error_count_1h=int(health.get("warning", 0))
+            + int(health.get("critical", 0)),
+            error_count_24h=int(health.get("warning", 0))
+            + int(health.get("critical", 0)),
             last_heartbeat_at=now,
             last_success_at=now,
-            last_error_code="API_RATE_LIMIT" if status in {"WARN", "CRITICAL"} else None,
+            last_error_code=(
+                "API_RATE_LIMIT" if status in {"WARN", "CRITICAL"} else None
+            ),
             last_error_message=(
                 f"存在 {health.get('warning', 0)} 个 warning / {health.get('critical', 0)} 个 critical API"
                 if status in {"WARN", "CRITICAL"}
@@ -983,11 +1228,11 @@ async def _build_service_payload(db: AsyncSession, window_minutes: int) -> tuple
             status=(
                 "CRITICAL"
                 if stats["critical"]
-                else "WARN"
-                if stats["warn"] or stats["degraded"]
-                else "UNKNOWN"
-                if stats["unknown"] == stats["total"]
-                else "HEALTHY"
+                else (
+                    "WARN"
+                    if stats["warn"] or stats["degraded"]
+                    else "UNKNOWN" if stats["unknown"] == stats["total"] else "HEALTHY"
+                )
             ),
             total_services=stats["total"],
             healthy_count=stats["healthy"],
@@ -1003,7 +1248,9 @@ async def _build_service_payload(db: AsyncSession, window_minutes: int) -> tuple
     return modules, services, service_timeline, service_failures
 
 
-@router.get("/lifecycle", response_model=LifecycleOverviewResponse, summary="交易生命周期总览")
+@router.get(
+    "/lifecycle", response_model=LifecycleOverviewResponse, summary="交易生命周期总览"
+)
 async def get_lifecycle_overview(
     window_minutes: int = Query(default=60, ge=1, le=1440),
     only_exceptions: bool = Query(default=False),
@@ -1012,7 +1259,11 @@ async def get_lifecycle_overview(
     return await _build_lifecycle_overview(db, window_minutes, only_exceptions)
 
 
-@router.get("/lifecycle/{intent_id}", response_model=LifecycleIntentDetailResponse, summary="单笔 intent 生命周期详情")
+@router.get(
+    "/lifecycle/{intent_id}",
+    response_model=LifecycleIntentDetailResponse,
+    summary="单笔 intent 生命周期详情",
+)
 async def get_lifecycle_detail(
     intent_id: int,
     window_minutes: int = Query(default=60, ge=1, le=1440),
@@ -1021,7 +1272,9 @@ async def get_lifecycle_detail(
     return await _build_lifecycle_detail(db, intent_id, window_minutes)
 
 
-@router.get("/data-flows", response_model=DataFlowOverviewResponse, summary="关键数据流总览")
+@router.get(
+    "/data-flows", response_model=DataFlowOverviewResponse, summary="关键数据流总览"
+)
 async def get_data_flows(
     window_minutes: int = Query(default=60, ge=1, le=1440),
     only_degraded: bool = Query(default=False),
@@ -1033,7 +1286,11 @@ async def get_data_flows(
     return DataFlowOverviewResponse(meta=_meta(window_minutes), flows=flows)
 
 
-@router.get("/data-flows/{flow_name}", response_model=DataFlowDetailResponse, summary="单条数据流详情")
+@router.get(
+    "/data-flows/{flow_name}",
+    response_model=DataFlowDetailResponse,
+    summary="单条数据流详情",
+)
 async def get_data_flow_detail(
     flow_name: str,
     window_minutes: int = Query(default=60, ge=1, le=1440),
@@ -1053,7 +1310,9 @@ async def get_data_flow_detail(
     )
 
 
-@router.get("/services", response_model=ServiceOverviewResponse, summary="模块与服务状态总览")
+@router.get(
+    "/services", response_model=ServiceOverviewResponse, summary="模块与服务状态总览"
+)
 async def get_service_overview(
     window_minutes: int = Query(default=60, ge=1, le=1440),
     only_degraded: bool = Query(default=False),
@@ -1062,23 +1321,39 @@ async def get_service_overview(
 ) -> ServiceOverviewResponse:
     modules, services, _, _ = await _build_service_payload(db, window_minutes)
     if only_degraded:
-        services = [service for service in services if service.degraded or service.status != "HEALTHY"]
+        services = [
+            service
+            for service in services
+            if service.degraded or service.status != "HEALTHY"
+        ]
     if only_external:
-        services = [service for service in services if service.service_kind == "external"]
+        services = [
+            service for service in services if service.service_kind == "external"
+        ]
     module_keys = {service.module_key for service in services}
     modules = [module for module in modules if module.module_key in module_keys]
-    return ServiceOverviewResponse(meta=_meta(window_minutes), modules=modules, services=services)
+    return ServiceOverviewResponse(
+        meta=_meta(window_minutes), modules=modules, services=services
+    )
 
 
-@router.get("/services/{service_name}", response_model=ServiceDetailResponse, summary="单服务健康详情")
+@router.get(
+    "/services/{service_name}",
+    response_model=ServiceDetailResponse,
+    summary="单服务健康详情",
+)
 async def get_service_detail(
     service_name: str,
     window_minutes: int = Query(default=60, ge=1, le=1440),
     db: AsyncSession = Depends(get_session),
 ) -> ServiceDetailResponse:
-    modules, services, timelines, failures = await _build_service_payload(db, window_minutes)
+    modules, services, timelines, failures = await _build_service_payload(
+        db, window_minutes
+    )
     del modules
-    service = next((item for item in services if item.service_key == service_name), None)
+    service = next(
+        (item for item in services if item.service_key == service_name), None
+    )
     if service is None:
         raise HTTPException(status_code=404, detail=f"服务 {service_name} 不存在")
     return ServiceDetailResponse(

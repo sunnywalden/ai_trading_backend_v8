@@ -5,6 +5,7 @@
 2. 主数据流链路监测
 3. 模块与细粒度服务状态
 """
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -33,6 +34,10 @@ class LifecycleHeadlineMetrics(BaseModel):
     p95_stage_seconds: float = 0.0
     warn_stage_count: int = 0
     critical_stage_count: int = 0
+    # V10.4.4 Position-centric fields
+    active_positions: int = 0
+    exception_positions: int = 0
+    stuck_slices: int = 0
 
 
 class LifecycleStageMetric(BaseModel):
@@ -82,6 +87,8 @@ class LifecycleOverviewResponse(BaseModel):
     plan_fsm: list[LifecycleFsmStateMetric] = Field(default_factory=list)
     position_fsm: list[LifecycleFsmStateMetric] = Field(default_factory=list)
     exceptions: list[LifecycleExceptionItem] = Field(default_factory=list)
+    # V10.4.4: closing reason distribution (last 30 days)
+    closing_reason_distribution: dict[str, int] = Field(default_factory=dict)
 
 
 class LifecycleTimelineEvent(BaseModel):

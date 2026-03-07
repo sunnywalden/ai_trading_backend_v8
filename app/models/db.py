@@ -1,8 +1,10 @@
-from sqlalchemy.orm import declarative_base
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
-from sqlalchemy import text
 from typing import AsyncGenerator
+
 import redis.asyncio as redis
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import declarative_base
+
 from app.core.config import settings
 
 Base = declarative_base()
@@ -15,30 +17,27 @@ engine_kwargs = {
 }
 
 if settings.DB_TYPE == "mysql":
-    engine_kwargs.update({
-        "pool_pre_ping": True,
-        "pool_recycle": 3600,
-        "pool_size": 10,
-        "max_overflow": 20,
-    })
+    engine_kwargs.update(
+        {
+            "pool_pre_ping": True,
+            "pool_recycle": 3600,
+            "pool_size": 10,
+            "max_overflow": 20,
+        }
+    )
 
 engine = create_async_engine(settings.DATABASE_URL, **engine_kwargs)
 
 # 创建异步会话工厂
-SessionLocal = async_sessionmaker(
-    engine, 
-    expire_on_commit=False, 
-    class_=AsyncSession
-)
+SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 # 创建 Redis 客户端
 redis_client = None
 if settings.REDIS_ENABLED:
     redis_client = redis.from_url(
-        settings.REDIS_URL,
-        encoding="utf-8",
-        decode_responses=True
+        settings.REDIS_URL, encoding="utf-8", decode_responses=True
     )
+
 
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
     """获取数据库异步会话的依赖项"""
@@ -50,6 +49,7 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
 
 
 from contextlib import asynccontextmanager
+
 
 @asynccontextmanager
 async def get_session_ctx():
@@ -112,27 +112,32 @@ async def ensure_mysql_tables() -> None:
         return
 
     # 导入所有模型，确保它们注册到 Base.metadata
-    import app.models.trading_plan  # noqa: F401
-    import app.models.equity_snapshot  # noqa: F401
-    import app.models.trade_pnl_attribution  # noqa: F401
-    import app.models.trade_journal  # noqa: F401
-    import app.models.price_alert  # noqa: F401
+    import app.models.algo_execution_task  # noqa: F401
     import app.models.audit_log  # noqa: F401
-    import app.models.notification  # noqa: F401
+    import app.models.autonomy_audit_log  # noqa: F401
+
     # V10 新增
     import app.models.backtest_task  # noqa: F401
-    import app.models.portfolio_snapshot  # noqa: F401
-    import app.models.paper_account  # noqa: F401
     import app.models.copilot_message  # noqa: F401
-    import app.models.algo_execution_task  # noqa: F401
-    import app.models.autonomy_audit_log  # noqa: F401
-    import app.models.etf_watchlist      # V10.1: ETF自选池
+    import app.models.equity_snapshot  # noqa: F401
+    import app.models.etf_watchlist  # V10.1: ETF自选池
+    import app.models.execution_intent  # V10.3.2: 执行幂等意图
+    import app.models.execution_slice  # V10.4.4: 执行切片
+    import app.models.fsm_transition_log  # V10.3: FSM事件日志
     import app.models.market_universe_symbol  # 机会扫描本地全量股票池
+    import app.models.notification  # noqa: F401
+    import app.models.paper_account  # noqa: F401
+    import app.models.portfolio_snapshot  # noqa: F401
+    import app.models.position  # V10.4.4: 仓位聚合根
+    import app.models.position_eval_task  # noqa: F401
+    import app.models.position_lifecycle_event  # V10.4.4: 生命周期事件
+    import app.models.price_alert  # noqa: F401
+
     # 持仓评估任务
     import app.models.task_config as task_cfg  # noqa: F401
-    import app.models.position_eval_task    # noqa: F401
-    import app.models.fsm_transition_log    # V10.3: FSM事件日志
-    import app.models.execution_intent      # V10.3.2: 执行幂等意图
+    import app.models.trade_journal  # noqa: F401
+    import app.models.trade_pnl_attribution  # noqa: F401
+    import app.models.trading_plan  # noqa: F401
 
     # 使用 SQLAlchemy metadata.create_all 自动创建所有缺失的表
     async with engine.begin() as conn:
@@ -150,72 +155,120 @@ async def ensure_mysql_schema_updates() -> None:
         (
             "trading_signals",
             "quantity_mode",
-            "ALTER TABLE trading_signals ADD COLUMN quantity_mode VARCHAR(16) NULL COMMENT 'V10.3.2: 数量语义模式 PCT_EQUITY/ABS_SHARES'"
+            "ALTER TABLE trading_signals ADD COLUMN quantity_mode VARCHAR(16) NULL COMMENT 'V10.3.2: 数量语义模式 PCT_EQUITY/ABS_SHARES'",
         ),
         (
             "trading_signals",
             "quantity_value",
-            "ALTER TABLE trading_signals ADD COLUMN quantity_value FLOAT NULL COMMENT 'V10.3.2: 数量语义原始值'"
+            "ALTER TABLE trading_signals ADD COLUMN quantity_value FLOAT NULL COMMENT 'V10.3.2: 数量语义原始值'",
         ),
         (
-            "trading_signals", 
-            "pnl", 
-            "ALTER TABLE trading_signals ADD COLUMN pnl FLOAT NULL COMMENT '盈亏（绝对金额）'"
+            "trading_signals",
+            "pnl",
+            "ALTER TABLE trading_signals ADD COLUMN pnl FLOAT NULL COMMENT '盈亏（绝对金额）'",
         ),
         (
-            "trading_signals", 
-            "pnl_pct", 
-            "ALTER TABLE trading_signals ADD COLUMN pnl_pct FLOAT NULL COMMENT '盈亏百分比'"
+            "trading_signals",
+            "pnl_pct",
+            "ALTER TABLE trading_signals ADD COLUMN pnl_pct FLOAT NULL COMMENT '盈亏百分比'",
         ),
         (
-            "trading_signals", 
-            "is_winner", 
-            "ALTER TABLE trading_signals ADD COLUMN is_winner VARCHAR(8) NULL COMMENT 'YES/NO - 是否盈利交易'"
+            "trading_signals",
+            "is_winner",
+            "ALTER TABLE trading_signals ADD COLUMN is_winner VARCHAR(8) NULL COMMENT 'YES/NO - 是否盈利交易'",
         ),
         (
-            "trading_plan", 
-            "plan_type", 
-            "ALTER TABLE trading_plan ADD COLUMN plan_type VARCHAR(16) NOT NULL DEFAULT 'MANUAL' COMMENT 'V10.1: 计划类型'"
+            "trading_plan",
+            "plan_type",
+            "ALTER TABLE trading_plan ADD COLUMN plan_type VARCHAR(16) NOT NULL DEFAULT 'MANUAL' COMMENT 'V10.1: 计划类型'",
         ),
         (
             "trading_plan",
             "plan_status",
-            "ALTER TABLE trading_plan ADD COLUMN plan_status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE' COMMENT 'V10.1: 计划状态'"
+            "ALTER TABLE trading_plan ADD COLUMN plan_status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE' COMMENT 'V10.1: 计划状态'",
         ),
         (
             "trading_plan",
             "plan_tags",
-            "ALTER TABLE trading_plan ADD COLUMN plan_tags JSON NULL COMMENT 'V10.1: 扩展标签'"
+            "ALTER TABLE trading_plan ADD COLUMN plan_tags JSON NULL COMMENT 'V10.1: 扩展标签'",
         ),
         (
             "trading_plan",
             "target_position",
-            "ALTER TABLE trading_plan ADD COLUMN target_position DECIMAL(10, 4) NOT NULL DEFAULT 0.0 COMMENT 'V10.1: 目标仓位'"
+            "ALTER TABLE trading_plan ADD COLUMN target_position DECIMAL(10, 4) NOT NULL DEFAULT 0.0 COMMENT 'V10.1: 目标仓位'",
         ),
         (
             "trading_plan",
             "valid_from",
-            "ALTER TABLE trading_plan ADD COLUMN valid_from DATETIME NULL COMMENT 'V10.1: 有效期开始'"
+            "ALTER TABLE trading_plan ADD COLUMN valid_from DATETIME NULL COMMENT 'V10.1: 有效期开始'",
         ),
         (
             "trading_plan",
             "valid_until",
-            "ALTER TABLE trading_plan ADD COLUMN valid_until DATETIME NULL COMMENT 'V10.1: 有效期截止'"
+            "ALTER TABLE trading_plan ADD COLUMN valid_until DATETIME NULL COMMENT 'V10.1: 有效期截止'",
         ),
         # V10.3: 交易可观测性字段
-        ("trading_plan", "direction",          "ALTER TABLE trading_plan ADD COLUMN direction VARCHAR(4) NULL COMMENT 'V10.3: BUY/SELL'"),
-        ("trading_plan", "confidence",         "ALTER TABLE trading_plan ADD COLUMN confidence DECIMAL(5,2) NULL COMMENT 'V10.3: AI置信度'"),
-        ("trading_plan", "reasoning",          "ALTER TABLE trading_plan ADD COLUMN reasoning TEXT NULL COMMENT 'V10.3: AI决策摘要'"),
-        ("trading_plan", "autonomy_action",    "ALTER TABLE trading_plan ADD COLUMN autonomy_action VARCHAR(20) NULL COMMENT 'V10.3: AUTO_EXECUTE/PENDING_CONFIRM'"),
-        ("trading_plan", "source",             "ALTER TABLE trading_plan ADD COLUMN source VARCHAR(20) NULL COMMENT 'V10.3: AI_AUTONOMOUS/AI_ADVISORY/MANUAL'"),
-        ("trading_plan", "pipeline_stage",     "ALTER TABLE trading_plan ADD COLUMN pipeline_stage SMALLINT NULL COMMENT 'V10.3: Pipeline阶段0-16'"),
-        ("trading_plan", "stage_entered_at",   "ALTER TABLE trading_plan ADD COLUMN stage_entered_at DATETIME NULL COMMENT 'V10.3: 进入当前阶段时间'"),
-        ("trading_plan", "stage_history",      "ALTER TABLE trading_plan ADD COLUMN stage_history JSON NULL COMMENT 'V10.3: 阶段历史'"),
-        ("trading_plan", "provenance_snapshot","ALTER TABLE trading_plan ADD COLUMN provenance_snapshot JSON NULL COMMENT 'V10.3: 决策溯源快照'"),
-        ("trading_plan", "position_fsm_state", "ALTER TABLE trading_plan ADD COLUMN position_fsm_state VARCHAR(20) NULL COMMENT 'V10.3: 持仓FSM状态'"),
+        (
+            "trading_plan",
+            "direction",
+            "ALTER TABLE trading_plan ADD COLUMN direction VARCHAR(4) NULL COMMENT 'V10.3: BUY/SELL'",
+        ),
+        (
+            "trading_plan",
+            "confidence",
+            "ALTER TABLE trading_plan ADD COLUMN confidence DECIMAL(5,2) NULL COMMENT 'V10.3: AI置信度'",
+        ),
+        (
+            "trading_plan",
+            "reasoning",
+            "ALTER TABLE trading_plan ADD COLUMN reasoning TEXT NULL COMMENT 'V10.3: AI决策摘要'",
+        ),
+        (
+            "trading_plan",
+            "autonomy_action",
+            "ALTER TABLE trading_plan ADD COLUMN autonomy_action VARCHAR(20) NULL COMMENT 'V10.3: AUTO_EXECUTE/PENDING_CONFIRM'",
+        ),
+        (
+            "trading_plan",
+            "source",
+            "ALTER TABLE trading_plan ADD COLUMN source VARCHAR(20) NULL COMMENT 'V10.3: AI_AUTONOMOUS/AI_ADVISORY/MANUAL'",
+        ),
+        (
+            "trading_plan",
+            "pipeline_stage",
+            "ALTER TABLE trading_plan ADD COLUMN pipeline_stage SMALLINT NULL COMMENT 'V10.3: Pipeline阶段0-16'",
+        ),
+        (
+            "trading_plan",
+            "stage_entered_at",
+            "ALTER TABLE trading_plan ADD COLUMN stage_entered_at DATETIME NULL COMMENT 'V10.3: 进入当前阶段时间'",
+        ),
+        (
+            "trading_plan",
+            "stage_history",
+            "ALTER TABLE trading_plan ADD COLUMN stage_history JSON NULL COMMENT 'V10.3: 阶段历史'",
+        ),
+        (
+            "trading_plan",
+            "provenance_snapshot",
+            "ALTER TABLE trading_plan ADD COLUMN provenance_snapshot JSON NULL COMMENT 'V10.3: 决策溯源快照'",
+        ),
+        (
+            "trading_plan",
+            "position_fsm_state",
+            "ALTER TABLE trading_plan ADD COLUMN position_fsm_state VARCHAR(20) NULL COMMENT 'V10.3: 持仓FSM状态'",
+        ),
         # V10.2-M1: 审计日志体制上下文字段（兼容历史库缺列）
-        ("autonomy_audit_log", "regime_at_decision", "ALTER TABLE autonomy_audit_log ADD COLUMN regime_at_decision VARCHAR(32) NULL COMMENT 'V10.2: 决策时市场体制'"),
-        ("autonomy_audit_log", "regime_confidence", "ALTER TABLE autonomy_audit_log ADD COLUMN regime_confidence FLOAT NULL COMMENT 'V10.2: 体制置信度'"),
+        (
+            "autonomy_audit_log",
+            "regime_at_decision",
+            "ALTER TABLE autonomy_audit_log ADD COLUMN regime_at_decision VARCHAR(32) NULL COMMENT 'V10.2: 决策时市场体制'",
+        ),
+        (
+            "autonomy_audit_log",
+            "regime_confidence",
+            "ALTER TABLE autonomy_audit_log ADD COLUMN regime_confidence FLOAT NULL COMMENT 'V10.2: 体制置信度'",
+        ),
     ]
 
     async with engine.begin() as conn:
@@ -231,7 +284,7 @@ async def ensure_mysql_schema_updates() -> None:
                         AND table_name = :table_name
                         """
                     ),
-                    {"table_name": table_name}
+                    {"table_name": table_name},
                 )
                 if (result.scalar() or 0) == 0:
                     continue
@@ -247,10 +300,10 @@ async def ensure_mysql_schema_updates() -> None:
                         AND column_name = :column_name
                         """
                     ),
-                    {"table_name": table_name, "column_name": column_name}
+                    {"table_name": table_name, "column_name": column_name},
                 )
                 exists = (result.scalar() or 0) > 0
-                
+
                 # 3. 如果不存在则添加
                 if not exists:
                     await conn.execute(text(add_sql))
@@ -273,7 +326,10 @@ async def ensure_mysql_schema_updates() -> None:
             )
             row = result.fetchone()
             column_type = (row[0] or "") if row else ""
-            if column_type.lower().startswith("enum(") and "'SKIPPED'" not in column_type:
+            if (
+                column_type.lower().startswith("enum(")
+                and "'SKIPPED'" not in column_type
+            ):
                 await conn.execute(
                     text(
                         """
@@ -294,7 +350,7 @@ async def ensure_mysql_schema_updates() -> None:
                 "copilot_messages",
                 "role",
                 16,
-                "ALTER TABLE copilot_messages MODIFY COLUMN role VARCHAR(16) NOT NULL COMMENT 'user/assistant/system'"
+                "ALTER TABLE copilot_messages MODIFY COLUMN role VARCHAR(16) NOT NULL COMMENT 'user/assistant/system'",
             ),
         ]
         for table_name, column_name, min_length, modify_sql in column_type_fixes:
@@ -309,7 +365,7 @@ async def ensure_mysql_schema_updates() -> None:
                         AND column_name = :column_name
                         """
                     ),
-                    {"table_name": table_name, "column_name": column_name}
+                    {"table_name": table_name, "column_name": column_name},
                 )
                 row = result.fetchone()
                 if row and (row[0] or 0) < min_length:
