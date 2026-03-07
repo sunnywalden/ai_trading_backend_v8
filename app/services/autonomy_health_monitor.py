@@ -8,8 +8,8 @@ autonomy_health_monitor.py — V10.4 M4 自主循环健康监控服务
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone, timedelta
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -243,6 +243,7 @@ class AutonomyHealthMonitor:
         name = "market_data_lag"
         try:
             from sqlalchemy import text
+
             # 与 signal_freshness 语义保持一致：无活跃计划时不做行情时效硬告警
             active_row = (await db.execute(
                 text(
@@ -307,7 +308,8 @@ class AutonomyHealthMonitor:
     async def check_llm_health(self, db) -> HealthCheckResult:
         name = "llm_health"
         try:
-            from app.services.ai_client_manager import get_circuit_breaker_status, AIProvider
+            from app.services.ai_client_manager import (
+                AIProvider, get_circuit_breaker_status)
             status = get_circuit_breaker_status()
             broken_providers = list(status.keys())
             if not broken_providers:
@@ -363,6 +365,7 @@ class AutonomyHealthMonitor:
         name = "signal_freshness"
         try:
             from sqlalchemy import text
+
             # 仅当存在活跃计划时才检查信号新鲜度，避免“空仓/停机期”误报
             active_row = (await db.execute(
                 text(
@@ -385,12 +388,31 @@ class AutonomyHealthMonitor:
             if hasattr(latest, 'replace'):
                 latest = latest.replace(tzinfo=timezone.utc)
             age_min = (datetime.now(tz=timezone.utc) - latest).total_seconds() / 60
+
+            # 盘中/盘后使用不同阈值（与 market_data_lag 逻辑一致）
+            from zoneinfo import ZoneInfo
+            now_et = datetime.now(tz=ZoneInfo("America/New_York"))
+            in_session = (
+                now_et.weekday() < 5
+                and (
+                    (now_et.hour > 9 or (now_et.hour == 9 and now_et.minute >= 30))
+                    and now_et.hour < 16
+                )
+            )
             if age_min <= 30:
                 return HealthCheckResult(name=name, status="OK",
                                          message=f"最新信号 {age_min:.1f}min 前生成")
             elif age_min <= 60:
                 return HealthCheckResult(name=name, status="WARN",
                                          message=f"信号已 {age_min:.1f}min 未更新")
+            elif not in_session and age_min <= 12 * 60:
+                # 盘后 12 小时内的信号陈旧属正常，降级为 WARN
+                return HealthCheckResult(
+                    name=name,
+                    status="WARN",
+                    message=f"盘后信号已 {age_min:.1f}min 未更新（非交易时段）",
+                    detail={"age_minutes": age_min, "in_session": False},
+                )
             else:
                 return HealthCheckResult(name=name, status="CRITICAL",
                                          message=f"信号已 {age_min:.1f}min 未更新！",
