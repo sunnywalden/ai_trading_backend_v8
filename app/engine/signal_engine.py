@@ -10,23 +10,22 @@
 """
 import asyncio
 from datetime import datetime, timedelta
-from typing import List, Optional, Dict, Any
-from uuid import uuid4
 from decimal import Decimal
+from typing import Any, Dict, List, Optional
+from uuid import uuid4
 
-from sqlalchemy import select, and_, or_, desc
+from sqlalchemy import and_, desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.trading_signal import (
-    TradingSignal, SignalType, SignalStatus, SignalSource, SignalPerformance
-)
+from app.broker.factory import make_option_broker_client
+from app.core.cache import cache
+from app.core.trade_mode import TradeMode
 from app.models.strategy import Strategy, StrategyRun, StrategyRunAsset
+from app.models.trading_signal import (SignalPerformance, SignalSource,
+                                       SignalStatus, SignalType, TradingSignal)
+from app.services.account_service import AccountService
 from app.services.risk_config_service import RiskConfigService
 from app.services.safety_guard import SafetyGuard
-from app.services.account_service import AccountService
-from app.broker.factory import make_option_broker_client
-from app.core.trade_mode import TradeMode
-from app.core.cache import cache
 
 
 class SignalEngine:
@@ -322,7 +321,7 @@ class SignalEngine:
             signal.risk_check_passed = "NO"
             signal.risk_check_details = {
                 "reason": check.reason,
-                "triggers": check.triggers
+                "triggers": getattr(check, "triggers", [])
             }
             signal.validation_errors = [check.reason]
             await self.session.commit()

@@ -43,6 +43,7 @@ async def call_ai(
         messages=messages,
         temperature=temperature,
         max_tokens=max_tokens,
+        **kwargs,
     )
     return {
         "content": content or "",
