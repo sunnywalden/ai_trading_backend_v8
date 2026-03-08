@@ -59,8 +59,8 @@
 - **Portfolio Exposure Center**：行业/因子/地理敞口 + 相关矩阵
 - **Smart Alert Center**：AI分级 + 告警聚合 + 建议行动
 
-### Phase 13: 巩固、治理与完整性 🚀 V10.4 当前规划
-> 详细规划见：[docs/archived/v10/v10.4/RELEASE_PLAN_V10.4.md](../archived/v10/v10.4/RELEASE_PLAN_V10.4.md)
+### Phase 13: 巩固、治理与完整性 ✅ V10.4 已完成（归档）
+> 详细规划：[V10.4 Release Plan](../archived/v10/v10.4/RELEASE_PLAN_V10.4.md)
 
 - **M1 数据闭环治理**：`actual_return` 自动回填 Job + IC 真实化（移除 fallback）+ 因子快照自动化 + 2026 年事件日历 + LLM 调用 `LLMCallGuard`
 - **M2 UI 大清洗**：47 页 → ≤38 页，6 导航组 → 4 组，执行三页合并，双仪表盘合并，系统监控整合
@@ -80,6 +80,7 @@
 - **M4 Live Safety & Model Degradation Guard**：模型退化监控、数据新鲜度 kill matrix、券商执行完整性监控、自主度自适应降级（FULL → SEMI → ADVISORY）
 - **M5 Research-to-Live Governance**：shadow live、策略晋级流水线、实验总账、上线/回滚证据链，确保策略和参数变更能被审计、验证、回溯
 - **前端重点**：围绕 Alpha Lab、Portfolio Construction Console、Execution Policy Console、Promotion Pipeline Board 做决策级可视化，而非继续横向扩页
+- **★ V10.5.1 补丁（已交付）**：事后决策剖析自动化（`post_mortem_jobs.py` EventBus + Cron) + 事件日历 freshness 修复 + `confirmed=False` 体制修复
 
 ### Phase 15: V11 计划 🔜
 - 期权执行开启（`STOCK,ETF,OPTION` 全模式）
