@@ -15,22 +15,26 @@ ABTestEngine：
     - 监控实验进度，执行 p-value 显著性检验
     - 实验通过后自动应用新参数
 """
+
 from __future__ import annotations
 
 import json
 import logging
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Any
 from decimal import Decimal
+from typing import Any, Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, not_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.event_bus import event_bus, Topics
+from app.core.event_bus import Topics, event_bus
 from app.models.ai_insight import ABExperiment, AIInsight, ExperimentStatus, InsightType
 
 logger = logging.getLogger(__name__)
+
+FAILED_POST_MORTEM_LESSON_SUMMARY = "Analysis generation failed. Review manually."
+POST_MORTEM_CREATED_BY_JOB = "post_mortem_service"
 
 
 class InsightService:
@@ -49,6 +53,14 @@ class InsightService:
         from sqlalchemy import func, select
 
         stmt = select(AIInsight)
+        stmt = stmt.where(
+            not_(
+                and_(
+                    AIInsight.created_by_job == POST_MORTEM_CREATED_BY_JOB,
+                    AIInsight.summary == FAILED_POST_MORTEM_LESSON_SUMMARY,
+                )
+            )
+        )
         if active_only:
             stmt = stmt.where(AIInsight.active == True)  # noqa: E712
         if insight_type:
@@ -63,8 +75,14 @@ class InsightService:
         rows = list((await db.execute(stmt)).scalars().all())
         return rows, total
 
-    async def get_insight(self, db: AsyncSession, insight_id: int) -> Optional[AIInsight]:
-        return (await db.execute(select(AIInsight).where(AIInsight.id == insight_id))).scalars().first()
+    async def get_insight(
+        self, db: AsyncSession, insight_id: int
+    ) -> Optional[AIInsight]:
+        return (
+            (await db.execute(select(AIInsight).where(AIInsight.id == insight_id)))
+            .scalars()
+            .first()
+        )
 
     async def create_insight(self, db: AsyncSession, data: dict) -> AIInsight:
         insight = AIInsight(**data)
@@ -74,7 +92,9 @@ class InsightService:
         await event_bus.publish(Topics.INSIGHT_GENERATED, insight.to_dict())
         return insight
 
-    async def toggle_active(self, db: AsyncSession, insight_id: int, active: bool) -> bool:
+    async def toggle_active(
+        self, db: AsyncSession, insight_id: int, active: bool
+    ) -> bool:
         result = await db.execute(
             update(AIInsight).where(AIInsight.id == insight_id).values(active=active)
         )
@@ -82,7 +102,9 @@ class InsightService:
         # rowcount not defined in stub
         return result.rowcount > 0  # type: ignore[attr-defined]
 
-    async def record_application(self, db: AsyncSession, insight_id: int, success: bool) -> None:
+    async def record_application(
+        self, db: AsyncSession, insight_id: int, success: bool
+    ) -> None:
         from sqlalchemy import literal
 
         await db.execute(
@@ -118,7 +140,9 @@ class WeeklyInsightGenerator:
 
         raw_insights = await self._call_deepseek(trade_data)
         if not raw_insights:
-            logger.info("[WeeklyInsight] AI generation empty, using rule-based fallback")
+            logger.info(
+                "[WeeklyInsight] AI generation empty, using rule-based fallback"
+            )
             raw_insights = self._rule_based_insights(trade_data)
         if not raw_insights:
             return []
@@ -178,7 +202,8 @@ class WeeklyInsightGenerator:
 
     async def _fetch_recent_journal_trades(self, db: AsyncSession) -> list[dict]:
         """从 trade_journal 组装洞察训练样本（兜底数据源）。"""
-        from sqlalchemy import select, or_
+        from sqlalchemy import or_, select
+
         from app.models.trade_journal import TradeJournal
 
         since = datetime.now(tz=timezone.utc) - timedelta(days=30)
@@ -226,19 +251,25 @@ class WeeklyInsightGenerator:
                 hold_days = max(0, (exit_date - entry_date).days)
 
             execution_quality = self._to_float(getattr(j, "execution_quality", None))
-            execution_score = execution_quality / 100.0 if execution_quality > 1 else execution_quality
+            execution_score = (
+                execution_quality / 100.0
+                if execution_quality > 1
+                else execution_quality
+            )
 
-            results.append({
-                "symbol": getattr(j, "symbol", "UNKNOWN"),
-                "pnl_pct": pnl_pct,
-                "category": category,
-                "alpha_source": "JOURNAL_FALLBACK",
-                "execution_score": execution_score if execution_score > 0 else None,
-                "position_mgmt_score": None,
-                "regime_at_entry": None,
-                "scale_in_count": 0,
-                "hold_days": hold_days,
-            })
+            results.append(
+                {
+                    "symbol": getattr(j, "symbol", "UNKNOWN"),
+                    "pnl_pct": pnl_pct,
+                    "category": category,
+                    "alpha_source": "JOURNAL_FALLBACK",
+                    "execution_score": execution_score if execution_score > 0 else None,
+                    "position_mgmt_score": None,
+                    "regime_at_entry": None,
+                    "scale_in_count": 0,
+                    "hold_days": hold_days,
+                }
+            )
 
         return results
 
@@ -356,45 +387,49 @@ Return ONLY a valid JSON array, no markdown.
 
         insights: list[dict] = []
 
-        insights.append({
-            "type": "PATTERN" if win_rate >= 0.5 else "TRAP",
-            "title": f"近30天样本胜率 {win_rate * 100:.1f}% 的交易行为特征",
-            "summary": (
-                f"样本数 {n}，平均盈利单 {avg_win * 100:.2f}% ，平均亏损单 {avg_loss * 100:.2f}% 。"
-                "建议围绕高质量入场条件做筛选，并减少低把握度信号频次。"
-            ),
-            "confidence": 0.66,
-            "win_rate_impact": 0.02 if win_rate < 0.5 else 0.01,
-            "regime": None,
-            "symbol": None,
-            "evidence": {"sample_size": n, "win_rate": round(win_rate, 4)},
-            "actionable_rule": {
-                "action": "FILTER_SIGNALS",
-                "condition": "仅执行置信度Top分位信号",
-                "params": {"min_confidence_quantile": 0.7},
-            },
-        })
-
-        if (avg_exec_win - avg_exec_loss) > 0.08:
-            insights.append({
-                "type": "EXECUTION",
-                "title": "执行质量与盈亏相关性显著",
-                "summary": "高执行质量样本显著优于低执行质量样本，建议优先在流动性充足时段执行。",
-                "confidence": 0.68,
-                "win_rate_impact": 0.015,
+        insights.append(
+            {
+                "type": "PATTERN" if win_rate >= 0.5 else "TRAP",
+                "title": f"近30天样本胜率 {win_rate * 100:.1f}% 的交易行为特征",
+                "summary": (
+                    f"样本数 {n}，平均盈利单 {avg_win * 100:.2f}% ，平均亏损单 {avg_loss * 100:.2f}% 。"
+                    "建议围绕高质量入场条件做筛选，并减少低把握度信号频次。"
+                ),
+                "confidence": 0.66,
+                "win_rate_impact": 0.02 if win_rate < 0.5 else 0.01,
                 "regime": None,
                 "symbol": None,
-                "evidence": {
-                    "sample_size": n,
-                    "avg_exec_win": round(avg_exec_win, 4),
-                    "avg_exec_loss": round(avg_exec_loss, 4),
-                },
+                "evidence": {"sample_size": n, "win_rate": round(win_rate, 4)},
                 "actionable_rule": {
-                    "action": "EXECUTION_OPTIMIZE",
-                    "condition": "流动性不足或冲击成本偏高时降速",
-                    "params": {"prefer_algo": "TWAP", "slippage_cap_bps": 25},
+                    "action": "FILTER_SIGNALS",
+                    "condition": "仅执行置信度Top分位信号",
+                    "params": {"min_confidence_quantile": 0.7},
                 },
-            })
+            }
+        )
+
+        if (avg_exec_win - avg_exec_loss) > 0.08:
+            insights.append(
+                {
+                    "type": "EXECUTION",
+                    "title": "执行质量与盈亏相关性显著",
+                    "summary": "高执行质量样本显著优于低执行质量样本，建议优先在流动性充足时段执行。",
+                    "confidence": 0.68,
+                    "win_rate_impact": 0.015,
+                    "regime": None,
+                    "symbol": None,
+                    "evidence": {
+                        "sample_size": n,
+                        "avg_exec_win": round(avg_exec_win, 4),
+                        "avg_exec_loss": round(avg_exec_loss, 4),
+                    },
+                    "actionable_rule": {
+                        "action": "EXECUTION_OPTIMIZE",
+                        "condition": "流动性不足或冲击成本偏高时降速",
+                        "params": {"prefer_algo": "TWAP", "slippage_cap_bps": 25},
+                    },
+                }
+            )
 
         return insights[:4]
 
@@ -452,15 +487,21 @@ class ABTestEngine:
         self,
         db: AsyncSession,
         experiment_id: int,
-        control_results: list[float],    # 对照组每笔 pnl_pct
+        control_results: list[float],  # 对照组每笔 pnl_pct
         treatment_results: list[float],  # 实验组每笔 pnl_pct
     ) -> ABExperiment:
         """执行 t-test 并更新实验状态。"""
         from scipy import stats  # type: ignore
 
-        exp = (await db.execute(
-            select(ABExperiment).where(ABExperiment.id == experiment_id)
-        )).scalars().first()
+        exp = (
+            (
+                await db.execute(
+                    select(ABExperiment).where(ABExperiment.id == experiment_id)
+                )
+            )
+            .scalars()
+            .first()
+        )
         if not exp:
             raise ValueError(f"Experiment {experiment_id} not found")
 
@@ -470,9 +511,11 @@ class ABTestEngine:
 
         # explicitly cast to float to appease type checker
         # some callers may pass tuples/Any; silence type checker with ignores
-        control_wr: float = float(sum(1 for r in control_results   if float(r) > 0)) / len(control_results)  # type: ignore[arg-type]
+        control_wr: float = float(sum(1 for r in control_results if float(r) > 0)) / len(control_results)  # type: ignore[arg-type]
         treatment_wr: float = float(sum(1 for r in treatment_results if float(r) > 0)) / len(treatment_results)  # type: ignore[arg-type]
-        _, p_value = stats.ttest_ind(control_results, treatment_results, equal_var=False)
+        _, p_value = stats.ttest_ind(
+            control_results, treatment_results, equal_var=False
+        )
         p_value = float(p_value)  # type: ignore[arg-type]
 
         passed = (p_value < 0.05) and (treatment_wr > control_wr)
@@ -508,13 +551,15 @@ class ABTestEngine:
         status: Optional[str] = None,
         limit: int = 20,
     ) -> list[ABExperiment]:
-        stmt = select(ABExperiment).order_by(ABExperiment.start_date.desc()).limit(limit)
+        stmt = (
+            select(ABExperiment).order_by(ABExperiment.start_date.desc()).limit(limit)
+        )
         if status:
             stmt = stmt.where(ABExperiment.status == status)
         return list((await db.execute(stmt)).scalars().all())
 
 
 # ── 模块级单例 ────────────────────────────────────────────────────────────────
-insight_service            = InsightService()
-weekly_insight_generator   = WeeklyInsightGenerator()
-ab_test_engine             = ABTestEngine()
+insight_service = InsightService()
+weekly_insight_generator = WeeklyInsightGenerator()
+ab_test_engine = ABTestEngine()

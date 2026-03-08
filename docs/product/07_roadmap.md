@@ -71,7 +71,17 @@
 - **M6 文档重构**：PRODUCT.md 拆分为模块化多文件，主文件 ≤300 行
 - **★ V10.4.2 信号精英化**：五层信号漏斗 + Conviction Score + 多维共振门控 + 幽灵交易追踪 → 详细规划：[docs/archived/v10/v10.4/RELEASE_PLAN_V10.4.2.md](../archived/v10/v10.4/RELEASE_PLAN_V10.4.2.md)
 
-### Phase 14: V11 计划 🔜
+### Phase 14: 机构级研究与交易纪律 🚀 V10.5.1 当前规划
+> 详细规划见：[docs/archived/v10/v10.5/RELEASE_PLAN_V10.5.1.md](../archived/v10/v10.5/RELEASE_PLAN_V10.5.1.md)
+
+- **M1 Alpha Truth Stack**：策略/信号从 gross alpha 升级到 net alpha 真相治理，新增 Strategy Scorecard 2.0、信号衰减、影子组合、Purged Walk-Forward、成本后收益归因
+- **M2 Portfolio Construction 2.0**：风险预算树 + 流动性感知 sizing + 边际 VaR/ES/turnover/alpha 贡献 + correlation cluster / sector / factor / event / liquidity 多约束组合构建
+- **M3 Execution Policy Engine**：订单紧急度、参与率、滑点预算、预交易成本模型、child-order 调度、成交后 replay，正式把执行层从“下单路由”升级为“执行策略系统”
+- **M4 Live Safety & Model Degradation Guard**：模型退化监控、数据新鲜度 kill matrix、券商执行完整性监控、自主度自适应降级（FULL → SEMI → ADVISORY）
+- **M5 Research-to-Live Governance**：shadow live、策略晋级流水线、实验总账、上线/回滚证据链，确保策略和参数变更能被审计、验证、回溯
+- **前端重点**：围绕 Alpha Lab、Portfolio Construction Console、Execution Policy Console、Promotion Pipeline Board 做决策级可视化，而非继续横向扩页
+
+### Phase 15: V11 计划 🔜
 - 期权执行开启（`STOCK,ETF,OPTION` 全模式）
 - 多账户 / 多用户支持
 - LLM Fine-tuning 个人交易风格适配
