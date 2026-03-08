@@ -40,7 +40,21 @@ class DecisionPostMortemService:
             return True
         factual_summary = (pm.factual_summary or "").strip().lower()
         key_lessons = (pm.key_lessons or "").strip().lower()
-        return factual_summary.startswith(_FAILED_SUMMARY_PREFIX.lower()) or key_lessons == _FAILED_LESSONS_TEXT.lower()
+        return (
+            factual_summary.startswith(_FAILED_SUMMARY_PREFIX.lower())
+            or key_lessons == _FAILED_LESSONS_TEXT.lower()
+        )
+
+    @staticmethod
+    def _result_indicates_failure(result: dict[str, Any] | None) -> bool:
+        if not result:
+            return True
+        factual_summary = str(result.get("factual_summary") or "").strip().lower()
+        key_lessons = str(result.get("key_lessons") or "").strip().lower()
+        return (
+            factual_summary.startswith(_FAILED_SUMMARY_PREFIX.lower())
+            or key_lessons == _FAILED_LESSONS_TEXT.lower()
+        )
 
     @staticmethod
     def _normalize_text(value: Any) -> str:
@@ -57,7 +71,9 @@ class DecisionPostMortemService:
         if not raw:
             return default
         lowered = raw.lower()
-        if lowered.startswith("primary error category") or lowered.startswith("primary cognitive bias"):
+        if lowered.startswith("primary error category") or lowered.startswith(
+            "primary cognitive bias"
+        ):
             return default
         normalized = re.sub(r"[^a-z0-9]+", "_", lowered).strip("_")
         if not normalized:
@@ -82,7 +98,9 @@ class DecisionPostMortemService:
         pm.counterfactual_hold = cls._normalize_text(result.get("counterfactual_hold"))
         pm.counterfactual_sell = cls._normalize_text(result.get("counterfactual_sell"))
         pm.key_lessons = cls._normalize_text(result.get("key_lessons"))
-        pm.improvement_suggestions = cls._normalize_text(result.get("improvement_suggestions"))
+        pm.improvement_suggestions = cls._normalize_text(
+            result.get("improvement_suggestions")
+        )
         pm.pattern_tags = cls._normalize_tags(result.get("pattern_tags"))
         pm.error_category = cls._normalize_label(result.get("error_category"), 64)
         pm.cognitive_bias = cls._normalize_label(result.get("cognitive_bias"), 64)
@@ -90,8 +108,12 @@ class DecisionPostMortemService:
         pm.generation_latency_ms = int(result.get("latency_ms") or 0)
 
     @classmethod
-    def _apply_failure(cls, pm: DecisionPostMortem, error: Any, latency_ms: int = 0) -> None:
-        summary = cls._truncate(f"{_FAILED_SUMMARY_PREFIX} {error}", 4000, default=_FAILED_SUMMARY_PREFIX)
+    def _apply_failure(
+        cls, pm: DecisionPostMortem, error: Any, latency_ms: int = 0
+    ) -> None:
+        summary = cls._truncate(
+            f"{_FAILED_SUMMARY_PREFIX} {error}", 4000, default=_FAILED_SUMMARY_PREFIX
+        )
         pm.factual_summary = summary
         pm.counterfactual_buy = ""
         pm.counterfactual_hold = ""
@@ -130,10 +152,15 @@ class DecisionPostMortemService:
         existing = await self._get_by_trade_id(db, trade_id)
         if existing:
             if (existing.status or "").lower() in {"pending", "running"}:
-                logger.info("PostMortem: request already running for trade_id=%s", trade_id)
+                logger.info(
+                    "PostMortem: request already running for trade_id=%s", trade_id
+                )
                 return existing, False
             if self._should_regenerate(existing):
-                logger.info("PostMortem: regenerating stale/failed record for trade_id=%s", trade_id)
+                logger.info(
+                    "PostMortem: regenerating stale/failed record for trade_id=%s",
+                    trade_id,
+                )
                 pm = existing
                 pm.status = "running"
                 pm.model_used = PM_MODEL
@@ -247,12 +274,26 @@ class DecisionPostMortemService:
                 hold_days=hold_days,
                 context=trade_context or {},
             )
+            if self._result_indicates_failure(result):
+                self._apply_failure(
+                    pm,
+                    result.get("factual_summary")
+                    or result.get("key_lessons")
+                    or "unknown error",
+                    latency_ms=int(result.get("latency_ms") or 0),
+                )
+                await db.flush()
+                return pm
             self._apply_result(pm, result)
             pm.status = "completed"
 
             # 自动生成 LESSON Insight
             insight_id = await self._create_lesson_insight(
-                db, account_id, symbol, pm.key_lessons or "", pm.improvement_suggestions or ""
+                db,
+                account_id,
+                symbol,
+                pm.key_lessons or "",
+                pm.improvement_suggestions or "",
             )
             pm.insight_id = insight_id
         except Exception as e:
@@ -294,7 +335,9 @@ class DecisionPostMortemService:
                 )
                 await db.commit()
         except Exception as exc:
-            logger.exception("PostMortem background generation failed for pm_id=%s: %s", pm_id, exc)
+            logger.exception(
+                "PostMortem background generation failed for pm_id=%s: %s", pm_id, exc
+            )
             await self._mark_background_failure(pm_id, exc)
 
     async def get_post_mortems(
@@ -333,7 +376,9 @@ class DecisionPostMortemService:
                 DecisionPostMortem.created_at >= cutoff,
                 DecisionPostMortem.status == "completed",
             )
-            .group_by(DecisionPostMortem.error_category, DecisionPostMortem.cognitive_bias)
+            .group_by(
+                DecisionPostMortem.error_category, DecisionPostMortem.cognitive_bias
+            )
             .order_by(desc("cnt"))
         )
         rows = (await db.execute(stmt)).all()
@@ -342,24 +387,25 @@ class DecisionPostMortemService:
         cognitive_biases: dict[str, int] = {}
         for r in rows:
             if r.error_category:
-                error_categories[r.error_category] = error_categories.get(r.error_category, 0) + r.cnt
+                error_categories[r.error_category] = (
+                    error_categories.get(r.error_category, 0) + r.cnt
+                )
             if r.cognitive_bias:
-                cognitive_biases[r.cognitive_bias] = cognitive_biases.get(r.cognitive_bias, 0) + r.cnt
+                cognitive_biases[r.cognitive_bias] = (
+                    cognitive_biases.get(r.cognitive_bias, 0) + r.cnt
+                )
 
         # 聚合 pattern_tags
         tag_counts: dict[str, int] = {}
-        tag_stmt = (
-            select(DecisionPostMortem.pattern_tags)
-            .where(
-                DecisionPostMortem.account_id == account_id,
-                DecisionPostMortem.created_at >= cutoff,
-                DecisionPostMortem.pattern_tags.isnot(None),
-            )
+        tag_stmt = select(DecisionPostMortem.pattern_tags).where(
+            DecisionPostMortem.account_id == account_id,
+            DecisionPostMortem.created_at >= cutoff,
+            DecisionPostMortem.pattern_tags.isnot(None),
         )
         tag_rows = (await db.execute(tag_stmt)).scalars().all()
         for tags in tag_rows:
             if tags:
-                for tag in (tags if isinstance(tags, list) else []):
+                for tag in tags if isinstance(tags, list) else []:
                     tag_counts[tag] = tag_counts.get(tag, 0) + 1
 
         return {
@@ -378,7 +424,9 @@ class DecisionPostMortemService:
     ) -> list[dict[str, Any]]:
         """返回可用于生成事后剖析的交易候选（优先 trade_journal 已平仓记录）。"""
         # 当前用户已生成过剖析的 trade_id，避免重复
-        existing_stmt = select(DecisionPostMortem.trade_id).where(DecisionPostMortem.account_id == account_id)
+        existing_stmt = select(DecisionPostMortem.trade_id).where(
+            DecisionPostMortem.account_id == account_id
+        )
         existing_trade_ids = set((await db.execute(existing_stmt)).scalars().all())
 
         # 优先按当前 account_id/account_id 查询，避免多用户混淆
@@ -417,7 +465,9 @@ class DecisionPostMortemService:
                 closed_predicate,
             ]
             if keyword:
-                fallback_filters.append(func.upper(TradeJournal.symbol).like(f"%{keyword}%"))
+                fallback_filters.append(
+                    func.upper(TradeJournal.symbol).like(f"%{keyword}%")
+                )
 
             fallback_stmt = (
                 select(TradeJournal)
@@ -449,7 +499,12 @@ class DecisionPostMortemService:
             quantity = _to_float(getattr(r, "quantity", None), 0.0)
             realized_raw = getattr(r, "realized_pnl", None)
             realized = _to_float(realized_raw, 0.0)
-            if realized_raw is None and entry_price > 0 and exit_price > 0 and quantity > 0:
+            if (
+                realized_raw is None
+                and entry_price > 0
+                and exit_price > 0
+                and quantity > 0
+            ):
                 realized = (exit_price - entry_price) * quantity
             created_at = getattr(r, "created_at", None)
             hold_days = int(getattr(r, "holding_days", 0) or 0)
@@ -551,7 +606,9 @@ class DecisionPostMortemService:
 
         from app.services.ai_client import call_ai
 
-        pnl_pct = ((exit_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
+        pnl_pct = (
+            ((exit_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
+        )
         direction_label = "bought" if direction == "BUY" else "shorted"
 
         prompt = f"""You are a professional quantitative trading analyst. Analyze this closed trade and provide a thorough post-mortem.
@@ -582,7 +639,10 @@ Provide your analysis in the following EXACT JSON format:
             resp = await call_ai(
                 model=PM_MODEL,
                 messages=[
-                    {"role": "system", "content": "You are a rigorous quantitative trading post-mortem analyst. Always respond in the exact JSON format requested."},
+                    {
+                        "role": "system",
+                        "content": "You are a rigorous quantitative trading post-mortem analyst. Always respond in the exact JSON format requested.",
+                    },
                     {"role": "user", "content": prompt},
                 ],
                 max_tokens=2048,
@@ -619,7 +679,9 @@ Provide your analysis in the following EXACT JSON format:
 
         candidates: list[str] = []
 
-        fenced_blocks = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL | re.IGNORECASE)
+        fenced_blocks = re.findall(
+            r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL | re.IGNORECASE
+        )
         candidates.extend(block for block in fenced_blocks if block)
 
         brace_match = re.search(r"\{.*\}", text, flags=re.DOTALL)
@@ -655,12 +717,15 @@ Provide your analysis in the following EXACT JSON format:
         """自动创建 LESSON 类型 Insight。"""
         try:
             from app.models.ai_insight import AIInsight
+
             insight = AIInsight(
                 insight_type="LESSON",
                 symbol=symbol,
                 title=f"Post-mortem lesson: {symbol}",
                 summary=key_lessons[:1000] if key_lessons else "",
-                evidence=improvement_suggestions[:1000] if improvement_suggestions else "",
+                evidence=(
+                    improvement_suggestions[:1000] if improvement_suggestions else ""
+                ),
                 created_by_job="post_mortem_service",
             )
             db.add(insight)
@@ -711,7 +776,7 @@ def _to_float(v: Any, default: float = 0.0) -> float:
 
 
 def _normalize_direction(v: Any) -> str:
-    raw = (str(v or "").strip().upper())
+    raw = str(v or "").strip().upper()
     if raw in {"BUY", "LONG", "B"}:
         return "long"
     if raw in {"SELL", "SHORT", "S"}:

@@ -1,8 +1,9 @@
 """V10.3: 智能订单簿 Pydantic Schemas"""
 from __future__ import annotations
+
 from datetime import datetime
 from decimal import Decimal
-from typing import Optional, Any
+from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
@@ -20,6 +21,9 @@ class OrderBookRow(BaseModel):
     plan_id: int
     account_id: str
     symbol: str
+    execution_intent_db_id: Optional[int] = None
+    execution_intent_key: Optional[str] = None
+    broker_order_id: Optional[str] = None
     market: Optional[str] = None           # US / HK / CN
     direction: Optional[str] = None        # BUY / SELL
     strategy_source: Optional[str] = None  # 策略名称

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import get_current_user
 from app.engine.portfolio.optimizer import portfolio_optimizer
 from app.models.db import get_session
+from app.services.v1051_research_service import v1051_research_service
 
 router = APIRouter(prefix="/portfolio", tags=["V10-Portfolio"])
 
@@ -28,6 +29,7 @@ async def get_latest_snapshot(
 ):
     """获取最新组合优化快照"""
     from sqlalchemy import select
+
     from app.models.portfolio_snapshot import PortfolioSnapshot
 
     try:
@@ -78,9 +80,11 @@ async def get_snapshot_history(
     current_user: str = Depends(get_current_user),
 ):
     """获取组合优化历史快照列表"""
-    from sqlalchemy import select
-    from app.models.portfolio_snapshot import PortfolioSnapshot
     import json
+
+    from sqlalchemy import select
+
+    from app.models.portfolio_snapshot import PortfolioSnapshot
 
     def ensure_obj(val):
         if isinstance(val, str):
@@ -117,6 +121,18 @@ async def get_snapshot_history(
         import logging
         logging.getLogger(__name__).error(f"Failed to fetch portfolio history: {e}")
         return []
+
+
+@router.get("/construction")
+async def get_portfolio_construction(
+    session: AsyncSession = Depends(get_session),
+    current_user: str = Depends(get_current_user),
+):
+    """V10.5.1: 组合构建视图，输出权重迁移、风险预算与执行质量摘要。"""
+    return await v1051_research_service.get_portfolio_construction_snapshot(
+        session,
+        current_user,
+    )
 
 
 @router.post("/optimize")

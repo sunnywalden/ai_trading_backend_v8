@@ -12,14 +12,14 @@ Implementation Shortfall (IS) 四分解:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, date
+from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import select, func, desc
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.execution_quality_log import ExecutionQualityLog
 from app.models.execution_intent import AutonomousExecutionIntent
+from app.models.execution_quality_log import ExecutionQualityLog
 
 logger = logging.getLogger(__name__)
 
@@ -150,20 +150,22 @@ class ExecutionMicroscopeService:
         db: AsyncSession,
         account_id: str,
         limit: int = 50,
+        symbol: str | None = None,
     ) -> list[dict[str, Any]]:
         """返回最近 N 笔执行质量记录（摘要）。"""
         await self._ensure_seeded_from_intents(db, account_id=account_id, days=90)
 
-        stmt = (
-            select(ExecutionQualityLog)
-            .where(ExecutionQualityLog.account_id == account_id)
-            .order_by(desc(ExecutionQualityLog.created_at))
-            .limit(limit)
+        stmt = select(ExecutionQualityLog).where(
+            ExecutionQualityLog.account_id == account_id
         )
+        if symbol:
+            stmt = stmt.where(ExecutionQualityLog.symbol == symbol.upper())
+        stmt = stmt.order_by(desc(ExecutionQualityLog.created_at)).limit(limit)
         rows = (await db.execute(stmt)).scalars().all()
         return [
             {
                 "id": r.id,
+                "intent_id": r.intent_id,
                 "symbol": r.symbol,
                 "total_is_bps": r.total_is_bps,
                 "delay_cost_bps": r.delay_cost_bps,
@@ -184,6 +186,7 @@ class ExecutionMicroscopeService:
         db: AsyncSession,
         account_id: str,
         days: int = 30,
+        symbol: str | None = None,
     ) -> list[dict[str, Any]]:
         """返回按 symbol × algo_type 聚合的平均 IS，用于热力图。"""
         from datetime import timedelta
@@ -203,8 +206,12 @@ class ExecutionMicroscopeService:
                 ExecutionQualityLog.account_id == account_id,
                 ExecutionQualityLog.created_at >= cutoff,
             )
-            .group_by(ExecutionQualityLog.symbol, "hour_of_day")
-            .order_by(ExecutionQualityLog.symbol, "hour_of_day")
+        )
+        if symbol:
+            stmt = stmt.where(ExecutionQualityLog.symbol == symbol.upper())
+        stmt = stmt.group_by(ExecutionQualityLog.symbol, "hour_of_day").order_by(
+            ExecutionQualityLog.symbol,
+            "hour_of_day",
         )
         rows = (await db.execute(stmt)).all()
         return [
@@ -224,10 +231,13 @@ class ExecutionMicroscopeService:
         db: AsyncSession,
         account_id: str,
         days: int = 30,
+        symbol: str | None = None,
     ) -> list[dict[str, Any]]:
         """按日期返回平均 IS 趋势。"""
         from datetime import timedelta
-        from sqlalchemy import cast, Date as SQLDate
+
+        from sqlalchemy import Date as SQLDate
+        from sqlalchemy import cast
 
         await self._ensure_seeded_from_intents(db, account_id=account_id, days=days)
 
@@ -246,9 +256,10 @@ class ExecutionMicroscopeService:
                 ExecutionQualityLog.account_id == account_id,
                 ExecutionQualityLog.created_at >= cutoff,
             )
-            .group_by("date")
-            .order_by("date")
         )
+        if symbol:
+            stmt = stmt.where(ExecutionQualityLog.symbol == symbol.upper())
+        stmt = stmt.group_by("date").order_by("date")
         rows = (await db.execute(stmt)).all()
         return [
             {

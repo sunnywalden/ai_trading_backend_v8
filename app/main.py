@@ -59,6 +59,7 @@ from app.providers.market_data_provider import MarketDataProvider, market_data_p
 # V10 新路由
 from app.routers import ai_advisor  # AI 交易决策（统一入口）
 from app.routers import ai_hub  # V10.3.3: AI 中枢 2.0
+from app.routers import alpha_lab  # V10.5.1: Alpha Lab
 from app.routers import attribution  # V10.2-M5: 交易归因
 from app.routers import autonomy  # V10: AI自主中枢
 from app.routers import backtest  # V10: 回测引擎
@@ -68,6 +69,8 @@ from app.routers import etf  # V10.1: ETF自选列表
 from app.routers import events  # V10.2-M2: 事件日历围栏
 from app.routers import execution_algo  # V10: 算法执行
 from app.routers import execution_center  # NEW: 执行中心（Layer 3）
+from app.routers import execution_policy  # V10.5.1: Execution Policy Console
+from app.routers import governance  # V10.5.1: Promotion Pipeline
 from app.routers import insights  # V10.2-M6: AI 洞察
 from app.routers import lifecycle  # V10.3: 交易生命周期中心
 from app.routers import market_universe  # 市场全量池状态
@@ -625,6 +628,15 @@ app.include_router(
 app.include_router(
     performance.router, dependencies=[Depends(get_current_user)]
 )  # NEW: Alpha/Beta性能分析指标
+app.include_router(
+    alpha_lab.router, dependencies=[Depends(get_current_user)]
+)  # V10.5.1: Alpha Lab
+app.include_router(
+    execution_policy.router, dependencies=[Depends(get_current_user)]
+)  # V10.5.1: Execution Policy
+app.include_router(
+    governance.router, dependencies=[Depends(get_current_user)]
+)  # V10.5.1: Promotion Pipeline
 
 # V9 路由注册
 app.include_router(

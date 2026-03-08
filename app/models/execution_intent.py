@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, Float, Index, Integer, String, Text, text
+from sqlalchemy import DateTime, Float, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.db import Base
@@ -14,7 +14,11 @@ class AutonomousExecutionIntent(Base):
 
     __tablename__ = "autonomous_execution_intent"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
     intent_id: Mapped[str] = mapped_column(
         String(64), unique=True, nullable=False, index=True
     )
@@ -22,14 +26,26 @@ class AutonomousExecutionIntent(Base):
         String(128), unique=True, nullable=False, index=True
     )
 
-    account_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    signal_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    account_id: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        index=True,
+    )
+    signal_id: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        index=True,
+    )
     signal_db_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     symbol: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     action: Mapped[str] = mapped_column(String(8), nullable=False)
     qty: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
 
-    status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING")
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="PENDING",
+    )
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
 

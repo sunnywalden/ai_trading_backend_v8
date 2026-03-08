@@ -8,13 +8,16 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.services.risk_gate_service import risk_gate_service
 
 logger = logging.getLogger(__name__)
+
+AUTONOMOUS_ENGINE_PAUSED_KEY = "autonomous_engine:paused"
+AUTONOMOUS_ENGINE_PAUSE_TTL_SECONDS = 86400 * 7
 
 
 class AutonomousEngine:
@@ -34,9 +37,14 @@ class AutonomousEngine:
         # 尝试持久化到 Redis（如果 Redis 可用）
         try:
             import asyncio
+
             from app.core.cache import cache
             asyncio.get_event_loop().create_task(
-                cache.set("autonomous_engine:paused", "1", expire=86400 * 7)
+                cache.set(
+                    AUTONOMOUS_ENGINE_PAUSED_KEY,
+                    "1",
+                    expire=AUTONOMOUS_ENGINE_PAUSE_TTL_SECONDS,
+                )
             )
         except Exception:
             pass
@@ -46,9 +54,10 @@ class AutonomousEngine:
         logger.info("AutonomousEngine RESUMED")
         try:
             import asyncio
+
             from app.core.cache import cache
             asyncio.get_event_loop().create_task(
-                cache.delete("autonomous_engine:paused")
+                cache.delete(AUTONOMOUS_ENGINE_PAUSED_KEY)
             )
         except Exception:
             pass
@@ -103,6 +112,58 @@ class AutonomousEngine:
         if is_closing:
             return "FAST_CLOSE"
         return "STANDARD"
+
+    @staticmethod
+    def _path_rank(path: str) -> int:
+        if path == "FORCE_EXIT":
+            return 3
+        if path == "FAST_CLOSE":
+            return 2
+        return 1
+
+    @staticmethod
+    def _resolve_action_direction(action: str, default_direction: str) -> str:
+        if action == "BUY":
+            return "LONG"
+        if action == "SELL":
+            return "SHORT"
+        return default_direction
+
+    @staticmethod
+    def _resolve_bypass_reason(
+        is_force_exit: bool,
+        is_closing: bool,
+        closing_intent: Any,
+    ) -> Optional[str]:
+        if is_force_exit:
+            return "force_exit"
+        if is_closing:
+            return closing_intent
+        return None
+
+    @staticmethod
+    def _accepted_gate_reason(is_force_exit: bool, is_closing: bool) -> str:
+        if is_force_exit:
+            return "force-exit-priority-path"
+        if is_closing:
+            return "closing-fast-path"
+        return "accepted-by-risk-gate"
+
+    @staticmethod
+    def _submitted_order_reason(is_force_exit: bool, is_closing: bool) -> str:
+        if is_force_exit:
+            return "force-exit-submitted"
+        if is_closing:
+            return "closing-order-submitted"
+        return "order-submitted"
+
+    @staticmethod
+    def _fallback_action(sig_dir: str) -> Optional[str]:
+        if sig_dir in ("LONG", "BUY"):
+            return "BUY"
+        if sig_dir in ("SHORT", "SELL"):
+            return "SELL"
+        return None
 
     def _is_closing_signal_preview(self, signal: dict) -> bool:
         signal_type = str(signal.get("signal_type") or "").upper()
@@ -229,7 +290,7 @@ class AutonomousEngine:
 
         def _sort_key(item: dict) -> tuple[int, float, int, float, int]:
             path = str(item.get("execution_path") or "STANDARD").upper()
-            path_rank = 3 if path == "FORCE_EXIT" else 2 if path == "FAST_CLOSE" else 1
+            path_rank = self._path_rank(path)
             quality_score = float(item.get("signal_quality_score") or 0.0)
             quota_rank = 1 if item.get("signal_quality_quota_exempt") else 0
             priority = int(item.get("priority") or 0)
@@ -266,7 +327,7 @@ class AutonomousEngine:
         """应用启动时从 Redis 恢复暂停状态，防止重启丢失互斥状态。"""
         try:
             from app.core.cache import cache
-            val = await cache.get("autonomous_engine:paused")
+            val = await cache.get(AUTONOMOUS_ENGINE_PAUSED_KEY)
             if val:
                 self.is_running = False
                 logger.warning("[AutonomousEngine] Restored PAUSED state from Redis")
@@ -287,7 +348,8 @@ class AutonomousEngine:
         regime_at_decision: Optional[str] = None
         regime_confidence: Optional[float] = None
         try:
-            from app.services.regime_strategy_allocator import fetch_current_regime_from_redis
+            from app.services.regime_strategy_allocator import \
+                fetch_current_regime_from_redis
             regime_info = await fetch_current_regime_from_redis()
             if regime_info.get("regime") not in (None, "UNKNOWN"):
                 regime_at_decision = regime_info["regime"]
@@ -326,7 +388,9 @@ class AutonomousEngine:
         # ⚘️ 竞争防护：立刻将所有信号标记为 QUEUED，防止运行相邻 jobs 重复拥取
         #  (run_daily_trading_cycle 在 08:00 + run_autonomous_decision_cycle 每 30m 均可能调用这里)
         from sqlalchemy import update as sa_update
-        from app.models.trading_signal import TradingSignal as _TSModel, SignalStatus as _SS
+
+        from app.models.trading_signal import SignalStatus as _SS
+        from app.models.trading_signal import TradingSignal as _TSModel
         signal_ids = [s["id"] for s in signals]
         try:
             await db.execute(
@@ -366,11 +430,13 @@ class AutonomousEngine:
                     )
                 else:
                     from app.services.signal_quality_funnel import (
-                        signal_quality_funnel, SignalFunnelInput,
-                    )
+                        SignalFunnelInput, signal_quality_funnel)
                     _funnel_input = self._build_signal_funnel_input(signal, regime_at_decision)
                     _action = str(decision.get("action", "HOLD")).upper()
-                    _funnel_input.direction = "LONG" if _action == "BUY" else ("SHORT" if _action == "SELL" else _funnel_input.direction)
+                    _funnel_input.direction = self._resolve_action_direction(
+                        _action,
+                        _funnel_input.direction,
+                    )
                     _funnel_input.symbol = str(decision.get("symbol") or _funnel_input.symbol)
                     _funnel_decision = await signal_quality_funnel.evaluate(
                         signal                  = _funnel_input,
@@ -426,7 +492,11 @@ class AutonomousEngine:
                 execution_path=execution_path,
                 is_closing=is_closing,
                 is_force_exit=is_force_exit,
-                bypass_reason=("force_exit" if is_force_exit else signal_meta.get("closing_intent") if is_closing else None),
+                bypass_reason=self._resolve_bypass_reason(
+                    is_force_exit,
+                    is_closing,
+                    signal_meta.get("closing_intent"),
+                ),
             )
 
             order_id: Optional[str] = None
@@ -496,7 +566,7 @@ class AutonomousEngine:
                     signal=signal,
                     decision=decision,
                     status="PENDING",
-                    reason="force-exit-priority-path" if is_force_exit else ("closing-fast-path" if is_closing else "accepted-by-risk-gate"),
+                    reason=self._accepted_gate_reason(is_force_exit, is_closing),
                 )
                 if not execution_intent_id:
                     await self._update_signal_status(db, signal["id"], _SS.REJECTED)
@@ -671,7 +741,10 @@ class AutonomousEngine:
                             db,
                             execution_intent_id,
                             status="SUCCESS",
-                            reason="force-exit-submitted" if is_force_exit else ("closing-order-submitted" if is_closing else "order-submitted"),
+                            reason=self._submitted_order_reason(
+                                is_force_exit,
+                                is_closing,
+                            ),
                             order_id=order_id,
                         )
                         if level == "SEMI":
@@ -747,6 +820,7 @@ class AutonomousEngine:
         {"action":"BUY","symbol":"AAPL","qty":50,"algo":"TWAP","confidence":0.85,"reasoning":"..."}
         """
         import json
+
         from app.core.config import settings as cfg
 
         symbol = signal.get("symbol", "")
@@ -858,7 +932,9 @@ class AutonomousEngine:
 
             from app.broker.factory import is_hk_stock as _is_hk_reduce
             qty_final = int(round(qty_abs)) if _is_hk_reduce(symbol) else round(float(qty_abs), 4)
-            algo = "MKT" if _market_active else ("LMT" if current_price > 0 else "MKT")
+            algo = "MKT"
+            if not _market_active and current_price > 0:
+                algo = "LMT"
 
             payload = {
                 "action": action,
@@ -879,7 +955,7 @@ class AutonomousEngine:
         prompt = f"""你是顶级量化交易 AI。基于以下信号做出交易决策。
 
 信号: {json.dumps({**signal, "quantity_mode_normalized": quantity_mode, "quantity_pct_of_portfolio": round(qty_pct * 100, 1)}, ensure_ascii=False)}
-当前持仓: {json.dumps({k: v for k, v in positions.items()}, ensure_ascii=False)}
+当前持仓: {json.dumps(dict(positions.items()), ensure_ascii=False)}
 账户净值: ${equity:,.2f}
 允许标的类型: {cfg.ALLOWED_ASSET_TYPES}
 参考：数量模式={quantity_mode}，信号建议仓位比例={qty_pct*100:.1f}%，参考价格={price_label}，对应参考股数={ref_qty if ref_qty > 0 else '请根据市价自行估算'}
@@ -925,7 +1001,7 @@ class AutonomousEngine:
             )
 
             if should_fallback_entry_add:
-                fallback_action = "BUY" if sig_dir in ("LONG", "BUY") else "SELL" if sig_dir in ("SHORT", "SELL") else None
+                fallback_action = self._fallback_action(sig_dir)
                 if fallback_action:
                     _fallback_algo = "LMT" if current_price > 0 else "MKT"
                     logger.warning(
@@ -953,8 +1029,8 @@ class AutonomousEngine:
             }
 
         def _parse_ai_json(raw: str) -> Optional[dict]:
-            import json as _json
             import ast as _ast
+            import json as _json
 
             if not raw:
                 return None
@@ -1102,7 +1178,9 @@ class AutonomousEngine:
         - 超时 / 连接失败均不向上抛出，返回 None（调用方降级为 HOLD）
         """
         import asyncio
-        from openai import AsyncOpenAI, APITimeoutError, APIConnectionError, APIStatusError
+
+        from openai import (APIConnectionError, APIStatusError,
+                            APITimeoutError, AsyncOpenAI)
 
         model = settings.AI_COMPLEX_MODEL if model_type == "complex" else settings.AI_LIGHTWEIGHT_MODEL
 
@@ -1271,6 +1349,7 @@ class AutonomousEngine:
 
         try:
             from sqlalchemy import update as sa_update
+
             from app.models.execution_intent import AutonomousExecutionIntent
 
             payload: dict[str, Any] = {"status": status}
@@ -1308,7 +1387,11 @@ class AutonomousEngine:
         if not norm_dir:
             return False
 
-        from sqlalchemy import select as sa_select, and_, or_, desc as sa_desc
+        from sqlalchemy import and_
+        from sqlalchemy import desc as sa_desc
+        from sqlalchemy import or_
+        from sqlalchemy import select as sa_select
+
         from app.models.trading_plan import TradingPlan
 
         cutoff = datetime.utcnow() - timedelta(minutes=cooldown_minutes)
@@ -1385,8 +1468,12 @@ class AutonomousEngine:
         - TTL: 仅处理 24h 内创建的信号，防止执行历史积压信号
         - 数量: 单次最多处理 10 条
         """
-        from sqlalchemy import select, and_, or_, desc as sa_desc, update as sa_upd
-        from app.models.trading_signal import TradingSignal, SignalStatus
+        from sqlalchemy import and_
+        from sqlalchemy import desc as sa_desc
+        from sqlalchemy import or_, select
+        from sqlalchemy import update as sa_upd
+
+        from app.models.trading_signal import SignalStatus, TradingSignal
 
         cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
 
@@ -1524,9 +1611,10 @@ class AutonomousEngine:
         execution_slice_id so both models stay in sync.
         """
         try:
-            from app.services.position_lifecycle_manager import PositionLifecycleManager
             from app.models.execution_slice import SliceAction
             from app.models.position import ClosingReason
+            from app.services.position_lifecycle_manager import \
+                PositionLifecycleManager
 
             plm = PositionLifecycleManager(db)
             sig_type = str(signal.get("signal_type") or "").upper()
@@ -1609,7 +1697,9 @@ class AutonomousEngine:
             if _pos_id and execution_intent_id:
                 try:
                     from sqlalchemy import update as _sa_upd
-                    from app.models.execution_intent import AutonomousExecutionIntent
+
+                    from app.models.execution_intent import \
+                        AutonomousExecutionIntent
                     await db.execute(
                         _sa_upd(AutonomousExecutionIntent)
                         .where(AutonomousExecutionIntent.intent_id == execution_intent_id)
@@ -1644,8 +1734,9 @@ class AutonomousEngine:
         """执行成功后自动创建 TradingPlan，使生命周期中心可见该自主决策活动。"""
         try:
             from decimal import Decimal
-            from app.models.trading_plan import TradingPlan
+
             from app.models.fsm_transition_log import FsmTransitionLog
+            from app.models.trading_plan import TradingPlan
             from app.services.lifecycle_service import lifecycle_service
 
             direction = (decision.get("action") or "BUY").upper()
@@ -1694,11 +1785,13 @@ class AutonomousEngine:
                 plan_tags={
                     "signal_id": str(signal.get("signal_id") or signal.get("id") or "") or None,
                     "signal_db_id": signal.get("id"),
+                    "execution_intent_id": execution_intent_id,
                     "order_id": str(order_id or "") or None,
                     "algo_type": decision.get("algo"),
                 },
                 provenance_snapshot={
                     "execution_ref": {
+                        "execution_intent_id": execution_intent_id,
                         "signal_id": str(signal.get("signal_id") or signal.get("id") or "") or None,
                         "signal_db_id": signal.get("id"),
                         "order_id": str(order_id or "") or None,
@@ -1742,9 +1835,9 @@ class AutonomousEngine:
         TWAP/VWAP 算法单只能在正常交易时段提交；非交易时段自动降级为 LMT（有参考价）或 MKT。
         """
         try:
-            from app.services.order_service import OrderService
-            from app.core.market_hours import is_symbol_market_active
             from app.broker.factory import is_hk_stock as _is_hk
+            from app.core.market_hours import is_symbol_market_active
+            from app.services.order_service import OrderService
 
             symbol = decision["symbol"]
             raw_algo = (decision.get("algo") or "MARKET").upper()
@@ -1812,7 +1905,9 @@ class AutonomousEngine:
         """
         try:
             from datetime import date as _date
+
             from sqlalchemy import select as _select
+
             from app.models.trade_journal import TradeJournal
             from app.services.journal_service import JournalService
 
@@ -1870,7 +1965,9 @@ class AutonomousEngine:
         """平仓时，找到最近一条 DRAFT 建仓日志并关闭（写入 exit_price / realized_pnl / CLOSED）。"""
         try:
             from datetime import date as _date
+
             from sqlalchemy import select as _select
+
             from app.models.trade_journal import TradeJournal
 
             stmt = (
@@ -1950,12 +2047,13 @@ class AutonomousEngine:
         遇到锁超时自动重试一次（等待 1s）。
         """
         import asyncio
-        from sqlalchemy import update as _upd
-        from app.models.trading_signal import TradingSignal as _TS
-
         # 如果状态变为 EXECUTED，同步写入 executed_at
         from datetime import datetime as _dt
+
+        from sqlalchemy import update as _upd
+
         from app.models.trading_signal import SignalStatus as _SSEnum
+        from app.models.trading_signal import TradingSignal as _TS
         _values: dict = {"status": new_status}
         if hasattr(new_status, "value") and new_status == _SSEnum.EXECUTED:
             _values["executed_at"] = _dt.utcnow()
@@ -2002,7 +2100,9 @@ class AutonomousEngine:
           - positions    : PositionMonitor.get_positions_snapshot()（真实仓位）
         """
         from datetime import date
-        from sqlalchemy import func, select as sa_select
+
+        from sqlalchemy import func
+        from sqlalchemy import select as sa_select
 
         result: dict = {"trades": 0, "realized_pnl": 0.0, "equity": 100000.0, "positions": {}}
 
@@ -2105,8 +2205,9 @@ class AutonomousEngine:
 
     async def revoke_order(self, account_id: str, exec_id: str, reason: str, db: AsyncSession) -> dict:
         """在撤单窗口内撤销 AI 自动执行的订单"""
-        from app.core.cache import cache
         from sqlalchemy import text as sql_text
+
+        from app.core.cache import cache
 
         revoke_key = f"revoke_window:{account_id}:{exec_id}"
         window_open = False

@@ -19,12 +19,14 @@ import logging
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.broker.factory import make_option_broker_client
 from app.core.auth import get_current_user
 from app.models.db import get_session
-from app.broker.factory import make_option_broker_client
-from app.services.execution_microscope_service import execution_microscope_service
-from app.services.signal_intelligence_service import signal_intelligence_service
+from app.services.execution_microscope_service import \
+    execution_microscope_service
 from app.services.risk_observability_service import risk_observability_service
+from app.services.signal_intelligence_service import \
+    signal_intelligence_service
 
 logger = logging.getLogger(__name__)
 
@@ -50,37 +52,55 @@ async def _resolve_observability_account_id(account_id: str | None, current_user
 @router.get("/execution-quality")
 async def get_execution_quality(
     account_id: str | None = Query(default=None, description="账户ID，不传则自动解析当前券商账户"),
+    symbol: str | None = Query(default=None, description="可选标的过滤"),
     limit: int = Query(default=50, ge=1, le=200),
     db: AsyncSession = Depends(get_session),
     user_id: str = Depends(get_current_user),
 ):
     """返回最近 N 笔 IS 四分解执行质量记录。"""
     resolved_account_id = await _resolve_observability_account_id(account_id, user_id)
-    return await execution_microscope_service.get_quality_summary(db, resolved_account_id, limit=limit)
+    return await execution_microscope_service.get_quality_summary(
+        db,
+        resolved_account_id,
+        limit=limit,
+        symbol=symbol,
+    )
 
 
 @router.get("/execution-quality/trend")
 async def get_execution_quality_trend(
     account_id: str | None = Query(default=None, description="账户ID，不传则自动解析当前券商账户"),
+    symbol: str | None = Query(default=None, description="可选标的过滤"),
     days: int = Query(default=30, ge=1, le=90),
     db: AsyncSession = Depends(get_session),
     user_id: str = Depends(get_current_user),
 ):
     """返回按日聚合的平均 IS 趋势，用于折线图。"""
     resolved_account_id = await _resolve_observability_account_id(account_id, user_id)
-    return await execution_microscope_service.get_avg_is_by_date(db, resolved_account_id, days=days)
+    return await execution_microscope_service.get_avg_is_by_date(
+        db,
+        resolved_account_id,
+        days=days,
+        symbol=symbol,
+    )
 
 
 @router.get("/fill-heatmap")
 async def get_fill_heatmap(
     account_id: str | None = Query(default=None, description="账户ID，不传则自动解析当前券商账户"),
+    symbol: str | None = Query(default=None, description="可选标的过滤"),
     days: int = Query(default=30, ge=1, le=90),
     db: AsyncSession = Depends(get_session),
     user_id: str = Depends(get_current_user),
 ):
     """返回 symbol × algo_type 平均 IS 热力图数据。"""
     resolved_account_id = await _resolve_observability_account_id(account_id, user_id)
-    return await execution_microscope_service.get_fill_heatmap(db, resolved_account_id, days=days)
+    return await execution_microscope_service.get_fill_heatmap(
+        db,
+        resolved_account_id,
+        days=days,
+        symbol=symbol,
+    )
 
 
 # ─────────────────── Signal Intelligence Observatory ───────────────────────

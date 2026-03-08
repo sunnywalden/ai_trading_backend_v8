@@ -3,21 +3,21 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime, timezone, date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Optional, overload
 
+from sqlalchemy import and_, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, and_, or_, desc
 
-from app.models.trading_plan import TradingPlan
+from app.models.execution_intent import AutonomousExecutionIntent
 from app.models.fsm_transition_log import FsmTransitionLog
-from app.schemas.order_book import (
-    OrderBookRow, OrderBookGroup, OrderBookResponse, OrderBookSummary,
-    OrderBookFilter, RiskBadgeInfo,
-    StopLossUpdateResponse,
-)
+from app.models.trading_plan import TradingPlan
 from app.schemas.lifecycle import PIPELINE_STAGE_NAMES
+from app.schemas.order_book import (OrderBookFilter, OrderBookGroup,
+                                    OrderBookResponse, OrderBookRow,
+                                    OrderBookSummary, RiskBadgeInfo,
+                                    StopLossUpdateResponse)
 
 logger = logging.getLogger(__name__)
 
@@ -142,9 +142,31 @@ def _safe_float(val: Any, default: Optional[float] = 0.0) -> Optional[float]:
         return default
 
 
-def _plan_to_row(plan: TradingPlan) -> OrderBookRow:
+def _extract_execution_ref(plan: TradingPlan) -> dict[str, Any]:
+    tags = plan.plan_tags or {}
+    snapshot = plan.provenance_snapshot or {}
+    execution_ref = snapshot.get("execution_ref", {}) if isinstance(snapshot, dict) else {}
+    return {
+        "intent_key": (
+            tags.get("execution_intent_id")
+            or execution_ref.get("execution_intent_id")
+            or execution_ref.get("intent_id")
+        ),
+        "signal_id": tags.get("signal_id") or execution_ref.get("signal_id"),
+        "signal_db_id": (
+            tags.get("signal_db_id") or execution_ref.get("signal_db_id")
+        ),
+        "order_id": tags.get("order_id") or execution_ref.get("order_id"),
+    }
+
+
+def _plan_to_row(
+    plan: TradingPlan,
+    execution_ref: dict[str, Any] | None = None,
+) -> OrderBookRow:
     tags = plan.plan_tags or {}
     badges = _build_risk_badges(plan, tags)
+    resolved_ref = execution_ref or {}
 
     # 分组
     group = _plan_group(plan)
@@ -162,6 +184,9 @@ def _plan_to_row(plan: TradingPlan) -> OrderBookRow:
         plan_id=plan.id,
         account_id=plan.account_id,
         symbol=plan.symbol,
+        execution_intent_db_id=resolved_ref.get("execution_intent_db_id"),
+        execution_intent_key=resolved_ref.get("execution_intent_key"),
+        broker_order_id=resolved_ref.get("broker_order_id"),
         market=tags.get("market"),
         direction=plan.direction,
         strategy_source=tags.get("strategy_source", plan.plan_type),
@@ -193,6 +218,109 @@ def _plan_to_row(plan: TradingPlan) -> OrderBookRow:
 
 
 class OrderBookService:
+
+    async def _resolve_execution_refs(
+        self,
+        db: AsyncSession,
+        plans: list[TradingPlan],
+    ) -> dict[int, dict[str, Any]]:
+        if not plans:
+            return {}
+
+        refs_by_plan = {plan.id: _extract_execution_ref(plan) for plan in plans}
+        account_ids = {plan.account_id for plan in plans if plan.account_id}
+        intent_keys = {
+            str(ref["intent_key"]).strip()
+            for ref in refs_by_plan.values()
+            if ref.get("intent_key")
+        }
+        order_ids = {
+            str(ref["order_id"]).strip()
+            for ref in refs_by_plan.values()
+            if ref.get("order_id")
+        }
+        signal_ids = {
+            str(ref["signal_id"]).strip()
+            for ref in refs_by_plan.values()
+            if ref.get("signal_id")
+        }
+        signal_db_ids = {
+            int(ref["signal_db_id"])
+            for ref in refs_by_plan.values()
+            if ref.get("signal_db_id") not in (None, "")
+        }
+
+        conditions = []
+        if intent_keys:
+            conditions.append(AutonomousExecutionIntent.intent_id.in_(intent_keys))
+        if order_ids:
+            conditions.append(AutonomousExecutionIntent.order_id.in_(order_ids))
+        if signal_ids:
+            conditions.append(AutonomousExecutionIntent.signal_id.in_(signal_ids))
+        if signal_db_ids:
+            conditions.append(
+                AutonomousExecutionIntent.signal_db_id.in_(signal_db_ids)
+            )
+        if not conditions or not account_ids:
+            return {}
+
+        stmt = select(AutonomousExecutionIntent).where(
+            AutonomousExecutionIntent.account_id.in_(account_ids),
+            or_(*conditions),
+        )
+        intents = list((await db.execute(stmt)).scalars().all())
+
+        by_intent_key = {
+            str(intent.intent_id): intent for intent in intents if intent.intent_id
+        }
+        by_order_id = {
+            str(intent.order_id): intent for intent in intents if intent.order_id
+        }
+        by_signal_id = {
+            str(intent.signal_id): intent for intent in intents if intent.signal_id
+        }
+        by_signal_db_id = {
+            int(intent.signal_db_id): intent
+            for intent in intents
+            if intent.signal_db_id is not None
+        }
+
+        resolved: dict[int, dict[str, Any]] = {}
+        for plan in plans:
+            ref = refs_by_plan.get(plan.id, {})
+            intent_key = str(ref.get("intent_key") or "").strip()
+            order_id = str(ref.get("order_id") or "").strip()
+            signal_id = str(ref.get("signal_id") or "").strip()
+            signal_db_id = ref.get("signal_db_id")
+
+            intent = None
+            if intent_key:
+                intent = by_intent_key.get(intent_key)
+            if intent is None and order_id:
+                intent = by_order_id.get(order_id)
+            if intent is None and signal_id:
+                intent = by_signal_id.get(signal_id)
+            if intent is None and signal_db_id not in (None, ""):
+                try:
+                    intent = by_signal_db_id.get(int(signal_db_id))
+                except (TypeError, ValueError):
+                    intent = None
+
+            resolved[plan.id] = {
+                "execution_intent_db_id": int(intent.id) if intent else None,
+                "execution_intent_key": (
+                    str(intent.intent_id)
+                    if intent and intent.intent_id
+                    else (intent_key or None)
+                ),
+                "broker_order_id": (
+                    str(intent.order_id)
+                    if intent and intent.order_id
+                    else (order_id or None)
+                ),
+            }
+
+        return resolved
 
     async def list_orders(
         self,
@@ -246,8 +374,9 @@ class OrderBookService:
         )
         result = await db.execute(stmt)
         plans = result.scalars().all()
+        execution_refs = await self._resolve_execution_refs(db, list(plans))
 
-        rows = [_plan_to_row(p) for p in plans]
+        rows = [_plan_to_row(p, execution_refs.get(p.id)) for p in plans]
 
         # 分组
         active_rows    = [r for r in rows if r.group == "active"]
@@ -321,7 +450,8 @@ class OrderBookService:
         plan = result.scalar_one_or_none()
         if not plan:
             return None
-        return _plan_to_row(plan)
+        execution_refs = await self._resolve_execution_refs(db, [plan])
+        return _plan_to_row(plan, execution_refs.get(plan.id))
 
     async def update_stop_loss(
         self,
