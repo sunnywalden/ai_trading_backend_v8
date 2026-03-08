@@ -2,14 +2,13 @@
 import logging
 from datetime import datetime
 from typing import List, Optional
-from sqlalchemy import select, func, and_
+
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.task_config import TaskTriggerConfig
 from app.models.position_eval_task import PositionEvalTask
-from app.schemas.position_eval import (
-    TriggerEvalTaskRequest,
-)
+from app.models.task_config import TaskTriggerConfig
+from app.schemas.position_eval import TriggerEvalTaskRequest
 
 logger = logging.getLogger(__name__)
 
@@ -192,7 +191,9 @@ class PositionEvalService:
     ) -> list:
         """内部：执行持仓评估，返回每个标的的结果列表"""
         from app.broker.factory import make_option_broker_client
-        from app.services.position_scoring_service import PositionScoringService
+        from app.services.position_query_service import PositionQueryService
+        from app.services.position_scoring_service import \
+            PositionScoringService
 
         broker = make_option_broker_client()
         scorer = PositionScoringService()
@@ -203,20 +204,31 @@ class PositionEvalService:
         if task.scope == "SYMBOL_LIST" and task.symbols:
             symbols = task.symbols
         else:
-            # 从 broker 拉取当前持仓
+            symbols = []
             try:
-                # 获取股票/ETF持仓
-                u_positions = await broker.list_underlying_positions(account_id)
-                symbols = [p.symbol for p in u_positions if p.symbol]
-                
-                # 如果有期权持仓也包含进来
-                o_positions = await broker.list_option_positions(account_id)
-                symbols.extend([p.contract.underlying for p in o_positions if p.contract.underlying])
-                
-                # 去重
-                symbols = list(set(symbols))
+                pos_query = PositionQueryService(self.session)
+                active_positions = await pos_query.get_active_positions(account_id)
+                symbols = [str(p.get("symbol")) for p in active_positions if p.get("symbol")]
             except Exception:
                 symbols = []
+
+            if not symbols:
+                try:
+                    u_positions = await broker.list_underlying_positions(account_id)
+                    symbols = [p.symbol for p in u_positions if p.symbol]
+
+                    o_positions = await broker.list_option_positions(account_id)
+                    symbols.extend(
+                        [
+                            p.contract.underlying
+                            for p in o_positions
+                            if p.contract.underlying
+                        ]
+                    )
+                except Exception:
+                    symbols = []
+
+            symbols = list(dict.fromkeys(symbols))
 
         task.total_symbols = len(symbols)
         await self.session.commit()

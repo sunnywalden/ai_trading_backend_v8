@@ -167,25 +167,35 @@ async def get_positions_assessment(
                     option_by_underlying[underlying] = []
                 option_by_underlying[underlying].append(opt_pos)
 
-        # 合并股票和期权持仓的标的列表（去重）
-        all_symbols = set([p.symbol for p in stock_positions])
-        all_symbols.update(option_by_underlying.keys())
+        # 读取真实生命周期仓位（V10.4.4，替代遗留的 TradingPlan）
+        from app.services.position_query_service import PositionQueryService
 
-        if not all_symbols:
-            return PositionsAssessmentResponse(
-                positions=[],
-                summary={
-                    "total_positions": 0,
-                    "total_value": 0.0,
-                    "total_pnl": 0.0,
-                    "avg_score": 0.0,
-                    "high_risk_count": 0,
-                    "buy_recommendation_count": 0,
-                },
-            )
+        pos_query_service = PositionQueryService(session)
+        active_positions_ds = await pos_query_service.get_active_positions(account_id)
 
-        # 提取股票代码列表
-        symbols = list(all_symbols)
+        active_symbols = [
+            str(p.get("symbol")) for p in active_positions_ds if p.get("symbol")
+        ]
+
+        # 生命周期仓位是主口径；仅在没有真实仓位时回退到 broker 持仓
+        if active_symbols:
+            symbols = list(dict.fromkeys(active_symbols))
+        else:
+            all_symbols = set([p.symbol for p in stock_positions])
+            all_symbols.update(option_by_underlying.keys())
+            if not all_symbols:
+                return PositionsAssessmentResponse(
+                    positions=[],
+                    summary={
+                        "total_positions": 0,
+                        "total_value": 0.0,
+                        "total_pnl": 0.0,
+                        "avg_score": 0.0,
+                        "high_risk_count": 0,
+                        "buy_recommendation_count": 0,
+                    },
+                )
+            symbols = list(all_symbols)
 
         # 批量计算评分
         scoring_service = PositionScoringService()
@@ -193,12 +203,6 @@ async def get_positions_assessment(
             symbols, force_refresh=force_refresh
         )
         technical_service = TechnicalAnalysisService(session)
-
-        # 读取真实生命周期仓位（V10.4.4，替代遗留的 TradingPlan）
-        from app.services.position_query_service import PositionQueryService
-
-        pos_query_service = PositionQueryService(session)
-        active_positions_ds = await pos_query_service.get_active_positions(account_id)
 
         # 构建按 symbol 的仓位映射
         pos_map = {}
@@ -224,17 +228,42 @@ async def get_positions_assessment(
                 (p for p in stock_positions if p.symbol == symbol), None
             )
             symbol_options = option_by_underlying.get(symbol, [])
+            pos_record = pos_map.get(symbol)
+            lifecycle_direction = str(
+                (pos_record or {}).get("direction") or "LONG"
+            ).upper()
+            lifecycle_qty = float(
+                (pos_record or {}).get("open_qty")
+                or (pos_record or {}).get("total_qty")
+                or 0.0
+            )
+            lifecycle_avg_entry = float(
+                (pos_record or {}).get("avg_entry_price") or 0.0
+            )
+            lifecycle_unrealized_pct = (pos_record or {}).get("unrealized_pnl_pct")
+            lifecycle_unrealized = (pos_record or {}).get("unrealized_pnl")
 
-            stock_quantity = stock_position.quantity if stock_position else 0
+            stock_quantity = (
+                stock_position.quantity
+                if stock_position
+                else abs(lifecycle_qty)
+            )
             stock_avg_cost = (
                 stock_position.avg_price
                 if stock_position and stock_position.avg_price
-                else 0.0
+                else lifecycle_avg_entry
             )
+            derived_lifecycle_price = lifecycle_avg_entry
+            if lifecycle_avg_entry > 0 and lifecycle_unrealized_pct is not None:
+                pct = float(lifecycle_unrealized_pct)
+                if lifecycle_direction == "SHORT":
+                    derived_lifecycle_price = lifecycle_avg_entry * (1 - pct)
+                else:
+                    derived_lifecycle_price = lifecycle_avg_entry * (1 + pct)
             stock_last_price = (
                 stock_position.last_price
                 if stock_position and stock_position.last_price
-                else stock_avg_cost
+                else derived_lifecycle_price
             )
             stock_market_value = stock_quantity * stock_last_price
             stock_pnl = (
@@ -242,6 +271,8 @@ async def get_positions_assessment(
                 if stock_avg_cost > 0
                 else 0.0
             )
+            if lifecycle_unrealized is not None and not stock_position:
+                stock_pnl = float(lifecycle_unrealized)
 
             option_market_value = 0.0
             option_pnl = 0.0
@@ -325,7 +356,6 @@ async def get_positions_assessment(
                 else symbol
             )
             # 使用 V10.4.4 Position 数据计算与入场价的偏差
-            pos_record = pos_map.get(symbol)
             pos_avg_entry = pos_record.get("avg_entry_price") if pos_record else None
             plan_deviation = (
                 min(
