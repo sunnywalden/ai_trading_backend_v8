@@ -29,10 +29,44 @@ Base URL 以你的启动参数为准（示例：`http://localhost:8088`）。
 - 交易归因（/api/v1/attribution）— V10.2-M5
 - AI 洞察 & 进化（/api/v1/insights）— V10.2-M6
 - Trading Copilot（/api/v1/copilot）— V10 & V10.2-M7
+- **Alpha Truth Stack（/api/v1/observability）— V10.5.1 M1**
+- **Portfolio Construction 2.0（/api/v1/portfolio）— V10.5.1 M2**
+- **Execution Policy & Microscope（/api/v1/execution-policy）— V10.5.1 M3**
+- **Live Safety & Model Degradation（/api/v1/live-safety）— V10.5.1 M4**
 
 ---
 
-## Health（系统接口）
+## 仓位中心化与精细化执行（/api/v1/positions）— V10.4.x
+
+### GET /api/v1/positions/{id}/timeline
+- 用途：获取特定仓位的全生命周期审计时间线（Append-Only）
+- 响应关键字段：`events: [{timestamp, type, action, details, actor}]`
+
+### POST /api/v1/positions/slices
+- 用途：为特定仓位手动或自动生成执行切片（Execution Slices）
+- 请求：`{position_id, slice_count, logic: "TWAP|VWAP|AGGRESSIVE"}`
+- 响应：`{slices: [{slice_id, status, target_qty, priority}]}`
+
+### GET /api/v1/positions/active
+- 用途：获取所有活跃仓位及其关联的执行状态与切片进度
+- 响应：`PositionDetailResponse[]`
+
+---
+
+## 交易计划可观测性（/api/v1/observability）— V10.3.x
+
+### GET /api/v1/observability/fsm-logs
+- 用途：查询交易计划（Plan）与仓位（Position）的状态机转换日志
+- Query：`target_id?: str`, `entity_type: "PLAN|POSITION"`, `limit: 50`
+- 响应：`FSMLogResponse`
+
+### GET /api/v1/trading-plan/{id}/provenance
+- 用途：追溯特定交易计划决策时的 AI 推理依据、信心指数及当时的市场原始快照
+- 响应关键字段：`{plan_id, reasoning, confidence_score, provenance_snapshot: {regime, greeks, sentiment}}`
+
+---
+
+## 市场体制感知（/api/v1/regime）— V10.2-M1
 
 ### GET /health
 
@@ -601,8 +635,78 @@ CACHE_TTL_GEOPOLITICAL_HOURS=24
 
 ---
 
+## Alpha Truth Stack（/api/v1/observability / alpha-lab）— V10.5.1 M1
+
+### GET /api/v1/observability/signal-intelligence
+- 用途：维护每个信号维度的 Information Coefficient (IC) 滚动序列与 alpha 半衰期。
+- 响应关键字段：`{ metrics: { [dimension]: { ic_5d, ic_20d, ic_60d, alpha_halflife_days, crowding_score } }, timestamp }`
+
+### GET /api/v1/observability/signal-correlation
+- 用途：标的间信号相关性矩阵。
+- 响应关键字段：`{ correlation_matrix: { [symbol]: { [symbol]: float } }, avg_correlation }`
+
+### GET /api/v1/alpha-lab/snapshot
+- 用途：获取 Alpha Lab 实验室快照，包含 Purged Walk-Forward 验证结果与影子组合表现。
+- Query: `lookback_days?: int` (默认 90)
+- 响应关键字段：`{ shadow_portfolio_pnl, purged_wf_results, total_alpha_decay_pct, generated_at }`
+
+---
+
+## Portfolio Construction 2.0（/api/v1/portfolio）— V10.5.1 M2
+
+### GET /api/v1/portfolio/latest
+- 用途：获取最新的组合优化快照（含权重、有效前沿与风险指标）。
+- 响应主要字段：`{ method, weights, frontier, metrics: { expected_return, volatility, sharpe }, created_at }`
+
+### GET /api/v1/portfolio/history
+- 用途：获取组合优化历史记录。
+- Query: `limit?: int` (默认 10)
+- 响应：`PortfolioSnapshot[]` 列表。
+
+### GET /api/v1/observability/risk-cluster
+- 用途：实时计算五个主因子敞口（Market/HML/SMB/MOM/QMJ）及组合内相关性风险。
+- 响应关键字段：`{ factor_exposures: { [factor]: z_score }, expected_shortfall_975, correlation_mean, confidence_calibration_ece }`
+
+---
+
+## Execution Policy & Microscope（/api/v1/execution-policy / observability）— V10.5.1 M3
+
+### GET /api/v1/execution-policy/overview
+- 用途：获取执行策略总览，包含订单紧急度与参与率。
+- Query: `limit?`, `symbol?`, `action?`, `orderId?`
+- 响应：`ExecutionPolicyOverviewResponse`
+
+### GET /api/v1/execution-policy/intents/{intent_id}
+- 用途：获取单笔意图的细粒度执行策略详情。
+- 响应关键字段：`{ urgency_level, participation_rate_cap, slippage_budget, price_post_anchoring, playback_ready }`
+
+### GET /api/v1/observability/execution-quality
+- 用途：计算 Implementation Shortfall (IS) 四分解：迟延成本、市场冲击、机会成本、时机成本。
+- Query: `symbol?`, `limit?`
+- 响应关键字段：`{ total_is_bps, breakdown: { delay_cost, impact_cost, opportunity_cost, timing_cost }, vs_vwap_deviation }`
+
+---
+
+## Live Safety & Model Degradation（/api/v1/live-safety）— V10.5.1 M4
+
+### GET /api/v1/live-safety/degradation
+- 用途：监测模型命中率漂移、置信度校准漂移及执行成本异常。
+- 响应状态值：`HEALTHY | WARN | CRITICAL`
+
+### GET /api/v1/live-safety/freshness
+- 用途：检测行情、仓位、事件、因子、体制五类数据源的陈旧度。
+- 响应关键字段：`{ source_freshness: { [source]: seconds_lag }, recommended_action: "NONE | DEGRADE_TO_SEMI | FREEZE_NEW_OPEN" }`
+
+### GET /api/v1/live-safety/throttle
+- 用途：综合模型退化与数据陈旧度的自主度节流建议。
+- Query: `current_level` (FULL/SEMI/ADVISORY)
+- 响应：`{ recommended_level, upgrade_inhibited, reason, degradation_summary }`
+
+---
+
 ## 更新历史
 
+- **2026-03-08**: V10.5.1 上线；新增 Alpha Truth Stack, Portfolio 2.0, Execution Policy, Live Safety 共 14 个核心端点；同步 v10.5.1 架构更新。
 - **2026-02-28**: V10.2-M2~M8 上线；新增事件日历、动态仓位、信号融合、交易归因、AI 洞察进化、Copilot Deep Research 共 18 个端点；文档补全
 - **2026-02-27**: V10.2-M1 上线；新增 `/api/v1/regime` 4 个端点
 - **2026-01-16**: 统一所有接口路径为 `/api/v1` 前缀（除 `/health` 外）；更新文档所有接口路径
