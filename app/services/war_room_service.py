@@ -97,6 +97,56 @@ class WarRoomService:
 
         return positions
 
+    async def _load_lifecycle_positions(
+        self,
+        db: AsyncSession,
+        account_id: str,
+    ) -> list[dict[str, Any]]:
+        """从 V10.4.4 Position 聚合根读取真实活跃仓位。"""
+        from app.services.position_query_service import PositionQueryService
+
+        svc = PositionQueryService(db)
+        rows = await svc.get_active_positions(account_id)
+
+        positions: list[dict[str, Any]] = []
+        for row in rows:
+            qty = float(row.get("open_qty") or row.get("total_qty") or 0.0)
+            if qty == 0:
+                continue
+
+            entry_price = float(row.get("avg_entry_price") or 0.0)
+            current_price = entry_price
+            pnl_pct = row.get("unrealized_pnl_pct")
+            direction = str(row.get("direction") or "LONG").upper()
+            side = "short" if direction == "SHORT" else "long"
+
+            if pnl_pct is not None and entry_price > 0:
+                pct = float(pnl_pct)
+                if side == "short":
+                    current_price = entry_price * (1 - pct)
+                else:
+                    current_price = entry_price * (1 + pct)
+
+            market_value = abs(qty) * (current_price if current_price > 0 else entry_price)
+            unrealized_pnl = row.get("unrealized_pnl")
+            if unrealized_pnl is None and pnl_pct is not None:
+                unrealized_pnl = market_value * float(pnl_pct)
+
+            positions.append(
+                {
+                    "symbol": row.get("symbol"),
+                    "direction": side,
+                    "quantity": round(abs(qty), 4),
+                    "market_value": round(float(market_value or 0.0), 2),
+                    "unrealized_pnl": round(float(unrealized_pnl or 0.0), 2),
+                    "unrealized_pnl_pct": round(float(pnl_pct or 0.0), 4)
+                    if pnl_pct is not None
+                    else None,
+                }
+            )
+
+        return positions
+
     async def _load_signal_positions_fallback(
         self,
         db: AsyncSession,
@@ -157,7 +207,11 @@ class WarRoomService:
         数据来源：trading_plan / position / trade_attribution。
         """
         try:
-            positions = await self._load_plan_positions(db, account_id)
+            positions = await self._load_lifecycle_positions(db, account_id)
+            if not positions:
+                positions = await self._load_broker_positions(account_id)
+            if not positions:
+                positions = await self._load_plan_positions(db, account_id)
             if not positions:
                 positions = await self._load_signal_positions_fallback(db, account_id)
         except Exception:
@@ -338,7 +392,9 @@ class WarRoomService:
 
         # 持仓列表：经纪商实时持仓 → 计划持仓 → 信号观察仓
         try:
-            positions = await self._load_broker_positions(account_id)
+            positions = await self._load_lifecycle_positions(db, account_id)
+            if not positions:
+                positions = await self._load_broker_positions(account_id)
             if not positions:
                 positions = await self._load_plan_positions(db, account_id)
             if not positions:

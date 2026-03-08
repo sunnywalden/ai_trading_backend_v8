@@ -101,6 +101,7 @@ class CopilotService:
         positions_count = int(context.get("positions_count") or 0)
         positions_preview = context.get("positions_preview") or []
         pnl_info = context.get("pnl_ticker") or {}
+        factor_exposure = context.get("factor_exposure") or {}
 
         snapshot = result.get("portfolio_snapshot")
         if not isinstance(snapshot, dict):
@@ -110,6 +111,12 @@ class CopilotService:
         snapshot["positions_count"] = positions_count
         if snapshot.get("unrealized_pnl_pct") is None:
             snapshot["unrealized_pnl_pct"] = pnl_info.get("unrealized_pnl_pct")
+        if snapshot.get("top_contributor") is None:
+            snapshot["top_contributor"] = pnl_info.get("top_contributor")
+        if snapshot.get("beta_exposure") is None:
+            snapshot["beta_exposure"] = factor_exposure.get("portfolio_beta")
+        if snapshot.get("mom_exposure") is None:
+            snapshot["mom_exposure"] = factor_exposure.get("beta_mom")
 
         summary = str(result.get("summary") or "")
         false_empty_markers = ("空仓", "无持仓", "持仓 0", "持仓0", "positions_count: 0")
@@ -146,6 +153,57 @@ class CopilotService:
 
         if positions_count > 0 and not result.get("top_signals"):
             result["top_signals"] = context.get("top_signals") or []
+
+        has_factor_snapshot = any(
+            factor_exposure.get(key) is not None
+            for key in (
+                "portfolio_beta",
+                "beta_market",
+                "beta_hml",
+                "beta_smb",
+                "beta_mom",
+                "beta_qmj",
+            )
+        )
+
+        def _normalize_text_list(items: Any) -> list[str]:
+            if not isinstance(items, list):
+                return []
+            return [str(item).strip() for item in items if str(item).strip()]
+
+        key_themes = _normalize_text_list(result.get("key_themes"))
+        risk_alerts = _normalize_text_list(result.get("risk_alerts"))
+        missing_factor_markers = ("五因子", "因子")
+        missing_words = ("缺失", "未知", "暂无", "没有", "未生成")
+
+        if has_factor_snapshot:
+            def _is_false_missing_text(text: str) -> bool:
+                return any(m in text for m in missing_factor_markers) and any(
+                    w in text for w in missing_words
+                )
+
+            key_themes = [item for item in key_themes if not _is_false_missing_text(item)]
+            risk_alerts = [item for item in risk_alerts if not _is_false_missing_text(item)]
+
+            max_corr = factor_exposure.get("max_pairwise_corr")
+            portfolio_beta = factor_exposure.get("portfolio_beta")
+            if max_corr is not None and float(max_corr) >= 0.85:
+                risk_alerts.append("组合相关性偏高，需防范同涨同跌带来的集中回撤。")
+            if portfolio_beta is not None and float(portfolio_beta) >= 1.2:
+                risk_alerts.append("组合 Beta 偏高，市场回撤时净值波动可能被放大。")
+        elif positions_count > 0:
+            risk_alerts = [
+                item
+                for item in risk_alerts
+                if not (
+                    any(m in item for m in missing_factor_markers)
+                    and any(w in item for w in missing_words)
+                )
+            ]
+            risk_alerts.append("五因子快照暂未生成，当前提示基于真实持仓与盈亏数据。")
+
+        result["key_themes"] = list(dict.fromkeys(key_themes))[:4]
+        result["risk_alerts"] = list(dict.fromkeys(risk_alerts))[:4]
 
         return result
 

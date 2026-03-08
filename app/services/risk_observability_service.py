@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import numpy as np
-from sqlalchemy import select, desc, func
+from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.portfolio_factor_exposure import PortfolioFactorExposure
@@ -65,6 +65,42 @@ def _estimate_factor_betas(
 class RiskObservabilityService:
     """风险可观测性——因子敞口快照 + ES@97.5% + 相关性告警。"""
 
+    async def _load_symbol_weights_from_positions(
+        self,
+        db: AsyncSession,
+        account_id: str,
+    ) -> dict[str, float]:
+        from app.models.position import Position, PositionStatus
+
+        active_statuses = [
+            PositionStatus.PENDING.value,
+            PositionStatus.OPENING.value,
+            PositionStatus.ACTIVE.value,
+            PositionStatus.SCALING_IN.value,
+            PositionStatus.SCALING_OUT.value,
+            PositionStatus.CLOSING.value,
+            PositionStatus.PARTIALLY_CLOSED.value,
+            PositionStatus.EXCEPTION.value,
+        ]
+        stmt = (
+            select(Position.symbol, Position.open_qty, Position.avg_entry_price)
+            .where(
+                Position.account_id == account_id,
+                Position.status.in_(active_statuses),
+            )
+        )
+        rows = (await db.execute(stmt)).all()
+
+        weights: dict[str, float] = {}
+        for row in rows:
+            qty = abs(float(row.open_qty or 0.0))
+            px = float(row.avg_entry_price or 0.0)
+            mv = qty * px if px > 0 else qty
+            if mv <= 0:
+                continue
+            weights[row.symbol] = weights.get(row.symbol, 0.0) + mv
+        return weights
+
     async def ensure_recent_snapshot(
         self,
         db: AsyncSession,
@@ -88,7 +124,9 @@ class RiskObservabilityService:
 
     async def seed_snapshot_from_live_data(self, db: AsyncSession, account_id: str) -> bool:
         """从实时持仓/信号数据构建快照，解决冷启动或任务中断造成的空图问题。"""
-        symbol_weights = await self._load_symbol_weights_from_plans(db, account_id)
+        symbol_weights = await self._load_symbol_weights_from_positions(db, account_id)
+        if not symbol_weights:
+            symbol_weights = await self._load_symbol_weights_from_plans(db, account_id)
         if not symbol_weights:
             symbol_weights = await self._load_symbol_weights_from_signals(db, account_id)
         if not symbol_weights:
