@@ -8,6 +8,7 @@
 依赖注入：
 - `db: AsyncSession` 每次调用时传入
 """
+
 from __future__ import annotations
 
 import logging
@@ -19,11 +20,11 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.event_bus import Topics, event_bus
-from app.models.event_calendar import (EventCalendarEntry, EventRiskLevel,
-                                       EventType)
+from app.models.event_calendar import EventCalendarEntry, EventRiskLevel, EventType
 from app.models.trading_signal import TradingSignal
 
 logger = logging.getLogger(__name__)
+
 
 def _nth_weekday_of_month(year: int, month: int, weekday: int, n: int) -> datetime:
     """返回某年某月第 n 个 weekday（Mon=0 ... Sun=6）的 UTC 日期（00:00）。"""
@@ -45,7 +46,11 @@ def _build_macro_events_for_year(year: int) -> list[dict]:
                 "date": dt,
                 "type": EventType.FOMC.value,
                 "title": f"FOMC Rate Decision {dt.strftime('%b %Y')}",
-                "risk": EventRiskLevel.HIGH.value if month not in (11, 12) else EventRiskLevel.EXTREME.value,
+                "risk": (
+                    EventRiskLevel.HIGH.value
+                    if month not in (11, 12)
+                    else EventRiskLevel.EXTREME.value
+                ),
             }
         )
 
@@ -122,10 +127,14 @@ class EventCalendarService:
             except Exception as e:
                 logger.warning(f"[EventCalendar] publish alert failed: {e}")
 
-        logger.info(f"[EventCalendar] scan complete. {len(new_entries)} new entries, symbols={len(symbols)}")
+        logger.info(
+            f"[EventCalendar] scan complete. {len(new_entries)} new entries, symbols={len(symbols)}"
+        )
         return new_entries
 
-    async def resolve_scan_symbols(self, db: AsyncSession, limit: int = 60) -> list[str]:
+    async def resolve_scan_symbols(
+        self, db: AsyncSession, limit: int = 60
+    ) -> list[str]:
         """统一解析事件扫描标的：持仓 -> 最近信号 -> 本地全量池（兜底）。"""
         symbols: list[str] = []
         seen: set[str] = set()
@@ -158,12 +167,14 @@ class EventCalendarService:
                     LIMIT :limit
                     """
                 ),
-                                {"limit": limit},
+                {"limit": limit},
             )
             for row in held.fetchall():
                 _push(row[0])
         except Exception as e:
-            logger.warning(f"[EventCalendar] resolve symbols from positions failed: {e}")
+            logger.warning(
+                f"[EventCalendar] resolve symbols from positions failed: {e}"
+            )
 
         # 2) 最近信号（避免持仓为空时完全无扫描）
         if len(symbols) < limit:
@@ -183,7 +194,9 @@ class EventCalendarService:
                 for row in sig_rows.fetchall():
                     _push(row[0])
             except Exception as e:
-                logger.warning(f"[EventCalendar] resolve symbols from signals failed: {e}")
+                logger.warning(
+                    f"[EventCalendar] resolve symbols from signals failed: {e}"
+                )
 
         # 3) 最终兜底样本，保证链路始终可产出数据，但避免打大量无效 ticker
         if not symbols:
@@ -228,10 +241,14 @@ class EventCalendarService:
         await self._upsert_macro_events(db, now, horizon)
 
         # 再检查是否仍为空；为空则按需触发一次扫描
-        count_stmt = select(EventCalendarEntry.id).where(
-            EventCalendarEntry.event_date >= now,
-            EventCalendarEntry.event_date <= horizon,
-        ).limit(1)
+        count_stmt = (
+            select(EventCalendarEntry.id)
+            .where(
+                EventCalendarEntry.event_date >= now,
+                EventCalendarEntry.event_date <= horizon,
+            )
+            .limit(1)
+        )
         has_any = (await db.execute(count_stmt)).scalars().first()
         if has_any:
             return
@@ -250,7 +267,9 @@ class EventCalendarService:
 
         symbols = await self.resolve_scan_symbols(db, limit=30)
         if symbols:
-            await self.scan_and_upsert(db, symbols=symbols, lookahead_days=min(max(days, 3), 14))
+            await self.scan_and_upsert(
+                db, symbols=symbols, lookahead_days=min(max(days, 3), 14)
+            )
 
     # ── 内部：yfinance 财报日历 ─────────────────────────────────────────────
 
@@ -284,14 +303,18 @@ class EventCalendarService:
             for dt_raw in dates:
                 try:
                     if hasattr(dt_raw, "to_pydatetime"):
-                        dt: datetime = dt_raw.to_pydatetime().replace(tzinfo=timezone.utc)
+                        dt: datetime = dt_raw.to_pydatetime().replace(
+                            tzinfo=timezone.utc
+                        )
                     else:
-                        dt = datetime.fromisoformat(str(dt_raw)).replace(tzinfo=timezone.utc)
+                        dt = datetime.fromisoformat(str(dt_raw)).replace(
+                            tzinfo=timezone.utc
+                        )
                     if not (from_dt <= dt <= to_dt):
                         continue
                     # 查 duplicate
                     stmt = select(EventCalendarEntry).where(
-                        EventCalendarEntry.symbol     == symbol,
+                        EventCalendarEntry.symbol == symbol,
                         EventCalendarEntry.event_type == EventType.EARNINGS,
                         EventCalendarEntry.event_date == dt,
                     )
@@ -311,7 +334,9 @@ class EventCalendarService:
                     await db.flush()
                     new_entries.append(entry)
                 except Exception as inner:
-                    logger.warning(f"[EventCalendar] parse earnings date error {symbol}: {inner}")
+                    logger.warning(
+                        f"[EventCalendar] parse earnings date error {symbol}: {inner}"
+                    )
             await db.commit()
             return new_entries
         except Exception as e:
@@ -341,6 +366,10 @@ class EventCalendarService:
                     )
                     existing = (await db.execute(stmt)).scalars().first()
                     if existing:
+                        # 每次扫描都刷新 updated_at，让 freshness guard 知道扫描器仍在正常工作
+                        existing.updated_at = datetime.now(timezone.utc).replace(
+                            tzinfo=None
+                        )
                         continue
                     entry = EventCalendarEntry(
                         symbol="MARKET",
@@ -375,10 +404,14 @@ class EventCalendarService:
         if auto_seed_if_empty and not symbol:
             await self.ensure_calendar_seeded(db, days=days)
 
-        stmt = select(EventCalendarEntry).where(
-            EventCalendarEntry.event_date >= now,
-            EventCalendarEntry.event_date <= horizon,
-        ).order_by(EventCalendarEntry.event_date)
+        stmt = (
+            select(EventCalendarEntry)
+            .where(
+                EventCalendarEntry.event_date >= now,
+                EventCalendarEntry.event_date <= horizon,
+            )
+            .order_by(EventCalendarEntry.event_date)
+        )
         if symbol:
             stmt = stmt.where(EventCalendarEntry.symbol == symbol)
         result = await db.execute(stmt)
@@ -403,13 +436,19 @@ class EventCalendarService:
     def _event_priority(entry: EventCalendarEntry) -> tuple[int, datetime, int]:
         """同 key 冲突时保留更“终态”的记录，避免同时出现已覆盖+待应用。"""
         # 优先级：overridden > applied > pending
-        state_score = 3 if bool(entry.fence_overridden) else (2 if bool(entry.fence_applied) else 1)
+        state_score = (
+            3
+            if bool(entry.fence_overridden)
+            else (2 if bool(entry.fence_applied) else 1)
+        )
         updated_at = entry.updated_at or entry.created_at or entry.event_date
         if updated_at.tzinfo is None:
             updated_at = updated_at.replace(tzinfo=timezone.utc)
         return (state_score, updated_at, int(entry.id or 0))
 
-    def _dedupe_events(self, entries: list[EventCalendarEntry]) -> list[EventCalendarEntry]:
+    def _dedupe_events(
+        self, entries: list[EventCalendarEntry]
+    ) -> list[EventCalendarEntry]:
         if len(entries) <= 1:
             return entries
 
