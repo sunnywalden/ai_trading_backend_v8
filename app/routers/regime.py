@@ -5,6 +5,7 @@
   GET  /api/v1/regime/history           — 分页体制历史记录
   GET  /api/v1/regime/strategy-weights  — 当前体制下各策略类别权重倍数
   POST /api/v1/regime/override          — 管理员手动覆写当前体制
+  POST /api/v1/regime/classify          — 管理员手动触发立即重新分类（V10.5.1）
 """
 from __future__ import annotations
 
@@ -17,22 +18,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import get_current_user
 from app.models.db import get_session
 from app.models.market_regime import MarketRegime, RegimeType
-from app.schemas.regime import (
-    RegimeCurrentResponse,
-    RegimeHistoryResponse,
-    RegimeOverrideRequest,
-    RegimeOverrideResponse,
-    RegimeResponse,
-    RegimeScoresSchema,
-    RegimeStrategyWeightSchema,
-    RegimeStrategyWeightsResponse,
-)
-from app.services.regime_classifier import RegimeClassifier, _parse_var_multipliers
+from app.schemas.regime import (RegimeClassifyResponse, RegimeCurrentResponse,
+                                RegimeHistoryResponse, RegimeOverrideRequest,
+                                RegimeOverrideResponse, RegimeResponse,
+                                RegimeScoresSchema, RegimeStrategyWeightSchema,
+                                RegimeStrategyWeightsResponse)
+from app.services.regime_classifier import (RegimeClassifier,
+                                            _parse_var_multipliers)
 from app.services.regime_strategy_allocator import (
-    fetch_current_regime_from_redis,
-    fetch_regime_weights_from_redis,
-    get_regime_strategy_weights,
-)
+    fetch_current_regime_from_redis, fetch_regime_weights_from_redis,
+    get_regime_strategy_weights)
 
 logger = logging.getLogger(__name__)
 
@@ -227,7 +222,7 @@ async def override_regime(
         await db.refresh(new_regime)
 
         # 触发 REGIME_CHANGED 事件（立即更新 RiskGate + Redis）
-        from app.core.event_bus import event_bus, Topics
+        from app.core.event_bus import Topics, event_bus
         from app.services.regime_classifier import _parse_var_multipliers
         await event_bus.publish(
             Topics.REGIME_CHANGED,
@@ -270,3 +265,54 @@ async def _close_regime_static(db: AsyncSession, close_time: datetime) -> None:
         .where(MarketRegime.valid_until.is_(None))
         .values(valid_until=close_time)
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /classify  (V10.5.1)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post(
+    "/classify",
+    response_model=RegimeClassifyResponse,
+    summary="立即触发体制重新分类（管理员）",
+    description=(
+        "跳过每日 cron 时间限制，立即执行一次市场体制分类。"
+        "体制不变时刷新 classification_date（消除陈旧告警），体制切换时写入新记录并广播事件。"
+        "需要管理员权限。"
+    ),
+)
+async def trigger_classify(
+    db: AsyncSession = Depends(get_session),
+    user: str = Depends(get_current_user),
+) -> RegimeClassifyResponse:
+    logger.info(f"[RegimeRouter] Manual classify triggered by {user}")
+    try:
+        from app.services.regime_classifier import regime_classifier
+
+        result = await regime_classifier.run(db)
+
+        current = await RegimeClassifier.get_current_regime(db)
+        regime_schema = _orm_to_schema(current) if current else None
+
+        confirmed = result.get("confirmed", False)
+        candidate = result.get("candidate")
+        confidence = result.get("confidence", 0.0)
+
+        if confirmed:
+            message = f"体制已切换至 {candidate}（置信度 {confidence:.1%}）"
+        else:
+            message = f"体制未变（{candidate}），已刷新 classification_date"
+
+        logger.info(f"[RegimeRouter] Manual classify complete: {message}")
+        return RegimeClassifyResponse(
+            success=True,
+            message=message,
+            candidate=candidate,
+            confirmed=confirmed,
+            confidence=round(confidence, 4),
+            regime=regime_schema,
+        )
+
+    except Exception as exc:
+        logger.error(f"[RegimeRouter] Manual classify failed: {exc}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Classification failed: {exc}")
