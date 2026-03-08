@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache import cache
 from app.core.config import settings
+from app.models.copilot_message import CopilotMessage
 from app.models.trading_plan import TradingPlan
 
 logger = logging.getLogger(__name__)
@@ -362,7 +363,10 @@ class CopilotService:
         from sqlalchemy import text
 
         row = await db.execute(
-            text("SELECT action_intent FROM copilot_messages WHERE id=:id AND account_id=:aid"),
+            text(
+                f"SELECT action_intent FROM {CopilotMessage.__tablename__} "
+                "WHERE id=:id AND account_id=:aid"
+            ),
             {"id": int(action_id), "aid": account_id},
         )
         record = row.fetchone()
@@ -429,7 +433,10 @@ class CopilotService:
 
         # 标记已确认
         await db.execute(
-            text("UPDATE copilot_messages SET action_confirmed=1 WHERE id=:id"),
+            text(
+                f"UPDATE {CopilotMessage.__tablename__} "
+                "SET action_confirmed=1 WHERE id=:id"
+            ),
             {"id": int(action_id)},
         )
         await db.commit()
@@ -602,7 +609,7 @@ class CopilotService:
 
         result = await db.execute(
             text(
-                "SELECT role, content FROM copilot_messages "
+                f"SELECT role, content FROM {CopilotMessage.__tablename__} "
                 "WHERE account_id=:aid AND session_id=:sid ORDER BY created_at LIMIT 20"
             ),
             {"aid": account_id, "sid": session_id},

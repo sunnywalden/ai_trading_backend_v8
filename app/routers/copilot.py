@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
+from app.models.copilot_message import CopilotMessage
 from app.models.db import get_session
 from app.models.trading_plan import TradingPlan
 from app.models.trading_signal import TradingSignal
@@ -63,7 +64,10 @@ async def get_history(
     """获取对话历史"""
     from sqlalchemy import text
 
-    query = "SELECT id, role, content, model_used, action_intent, created_at FROM copilot_messages WHERE account_id=:aid"
+    query = (
+        "SELECT id, role, content, model_used, action_intent, created_at "
+        f"FROM {CopilotMessage.__tablename__} WHERE account_id=:aid"
+    )
     params: dict[str, Any] = {"aid": current_user}
     if session_id:
         query += " AND session_id=:sid"
