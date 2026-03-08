@@ -45,7 +45,8 @@ _EXECUTED_STATUSES = ("EXECUTED", "COMPLETED", "CLOSED", "DONE")
 
 async def _do_journal_auto_close(session: AsyncSession) -> dict:
     """核心逻辑：找已执行的出场信号，关闭对应的 DRAFT 建仓日志。"""
-    from app.models.trade_journal import TradeJournal  # noqa: 懒导入 — ORM 必须在 app 启动后注册
+    from app.models.trade_journal import \
+        TradeJournal  # noqa: 懒导入 — ORM 必须在 app 启动后注册
     from app.models.trading_signal import TradingSignal
 
     # 找已成交的出场信号（有 executed_price）
@@ -169,9 +170,10 @@ async def _do_signal_return_backfill_extra(session: AsyncSession) -> int:
     Path B: 旧 COMPLETED 日志无 signal_id，但有 entry+exit+account+symbol →
             尝试按 account_id + symbol + date 段匹配 TradingSignal，写入 actual_return
     """
+    from sqlalchemy import update as _update
+
     from app.models.trade_journal import TradeJournal  # noqa: 懒导入
     from app.models.trading_signal import TradingSignal
-    from sqlalchemy import update as _update
     updated = 0
 
     # ── Path A：signal_id 链路 ──
@@ -303,14 +305,20 @@ async def signal_return_backfill_extra_job() -> None:
 
 async def _trigger_ic_recompute_all() -> None:
     """触发所有账户的 IC 重算（在新 actual_return 写入后调用）。"""
-    from app.models.db import SessionLocal
     from sqlalchemy import text
+
+    from app.models.db import SessionLocal
+    from app.models.trading_signal import TradingSignal
     try:
-        from app.services.signal_intelligence_service import SignalIntelligenceService
+        from app.services.signal_intelligence_service import \
+            SignalIntelligenceService
         svc = SignalIntelligenceService()
         async with SessionLocal() as session:
             rows = (await session.execute(
-                text("SELECT DISTINCT account_id FROM trading_signals LIMIT 50")
+                text(
+                    f"SELECT DISTINCT account_id FROM {TradingSignal.__tablename__} "
+                    "LIMIT 50"
+                )
             )).fetchall()
             for (acc_id,) in rows:
                 try:
@@ -352,7 +360,8 @@ async def attribution_daily_backfill_job() -> None:
 async def broker_order_sync_job() -> None:
     """Job ④: 定时执行券商订单状态对账，并修复 stage7/stage8 残留计划。"""
     from app.models.db import SessionLocal
-    from app.services.broker_order_sync_service import reconcile_broker_order_status
+    from app.services.broker_order_sync_service import \
+        reconcile_broker_order_status
     from app.services.lifecycle_service import lifecycle_service
 
     try:

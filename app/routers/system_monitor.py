@@ -16,8 +16,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.market_hours import is_symbol_market_active
 from app.models.db import get_session, redis_client
+from app.models.execution_intent import AutonomousExecutionIntent
 from app.models.fsm_transition_log import FsmTransitionLog
+from app.models.technical_indicator import TechnicalIndicator
 from app.models.trading_plan import TradingPlan
+from app.models.trading_signal import TradingSignal
 from app.routers.api_monitoring import monitoring_health_check
 from app.schemas.lifecycle import PIPELINE_P50_BENCHMARKS, PIPELINE_STAGE_NAMES
 from app.schemas.system_monitor import (DataFlowDetailResponse,
@@ -551,7 +554,7 @@ async def _build_lifecycle_detail(
         intent_row = (
             await db.execute(
                 text(
-                    "SELECT idempotency_key FROM autonomous_execution_intent "
+                    f"SELECT idempotency_key FROM {AutonomousExecutionIntent.__tablename__} "
                     "WHERE symbol = :symbol ORDER BY updated_at DESC LIMIT 1"
                 ),
                 {"symbol": plan.symbol},
@@ -690,12 +693,12 @@ async def _build_data_flow_payload(
     requires_live_market_data = has_active_pipeline and bool(active_market_symbols)
 
     signal_ts = await _load_latest_timestamp(
-        db, ["SELECT MAX(created_at) FROM trading_signals"]
+        db, [f"SELECT MAX(created_at) FROM {TradingSignal.__tablename__}"]
     )
     market_ts = await _load_latest_timestamp(
         db,
         [
-            "SELECT MAX(timestamp) FROM technical_indicators",
+            f"SELECT MAX(timestamp) FROM {TechnicalIndicator.__tablename__}",
             "SELECT MAX(timestamp) FROM technical_indicator",
         ],
     )

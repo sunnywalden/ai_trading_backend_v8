@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.cache import cache
 from app.core.config import settings
+from app.models.trading_plan import TradingPlan
 
 logger = logging.getLogger(__name__)
 
@@ -380,7 +381,8 @@ class CopilotService:
             if symbol and price > 0:
                 await db.execute(
                     text(
-                        "UPDATE trading_plan SET stop_loss=:p, updated_at=CURRENT_TIMESTAMP "
+                        f"UPDATE {TradingPlan.__tablename__} "
+                        "SET stop_loss=:p, updated_at=CURRENT_TIMESTAMP "
                         "WHERE account_id=:a AND symbol=:s AND plan_status='ACTIVE'"
                     ),
                     {"p": price, "a": account_id, "s": symbol},
@@ -412,7 +414,8 @@ class CopilotService:
             # 将账户所有活跃计划标记为已取消（不直接触发真实撤单，由 OrderService 异步处理）
             await db.execute(
                 text(
-                    "UPDATE trading_plan SET plan_status='CANCELLED', updated_at=CURRENT_TIMESTAMP "
+                    f"UPDATE {TradingPlan.__tablename__} "
+                    "SET plan_status='CANCELLED', updated_at=CURRENT_TIMESTAMP "
                     "WHERE account_id=:a AND plan_status='ACTIVE'"
                 ),
                 {"a": account_id},

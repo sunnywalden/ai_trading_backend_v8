@@ -4,14 +4,17 @@ API监控路由
 提供API调用统计、Rate Limit监控和警告信息
 """
 
-from fastapi import APIRouter, Query, Depends
-from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, List
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List
 
-from app.services.api_monitoring_service import api_monitor, APIProvider, APIRateLimit
-from app.models.db import redis_client, get_session
-from app.core.auth import get_current_user
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.auth import get_current_user
+from app.models.db import get_session, redis_client
+from app.models.llm_call_log import LlmCallLog
+from app.services.api_monitoring_service import (APIProvider, APIRateLimit,
+                                                 api_monitor)
 
 router = APIRouter(tags=["API Monitoring"])
 
@@ -180,6 +183,8 @@ async def get_llm_stats(
     since = datetime.now(tz=timezone.utc) - timedelta(hours=hours)
 
     try:
+        llm_call_log_table = LlmCallLog.__tablename__
+
         # ── 聚合统计 ──
         agg_sql = text(
             """
@@ -191,9 +196,9 @@ async def get_llm_stats(
                 SUM(CASE WHEN status='ERROR'        THEN 1 ELSE 0 END) AS error_count,
                 SUM(CASE WHEN degraded=1            THEN 1 ELSE 0 END) AS degraded,
                 AVG(latency_ms)                                  AS avg_latency_ms
-            FROM llm_call_log
+            FROM {table_name}
             WHERE created_at >= :since
-            """
+            """.format(table_name=llm_call_log_table)
         )
         row = (await session.execute(agg_sql, {"since": since})).fetchone()
         row = row if row is not None else (0, 0, 0, 0, 0, 0, None)
@@ -207,7 +212,7 @@ async def get_llm_stats(
 
         # ── 延迟分位数（取最近 1000 条排序后近似） ──
         lat_sql = text(
-            "SELECT latency_ms FROM llm_call_log "
+            f"SELECT latency_ms FROM {llm_call_log_table} "
             "WHERE created_at >= :since AND status='SUCCESS' "
             "ORDER BY latency_ms LIMIT 1000"
         )
@@ -219,7 +224,7 @@ async def get_llm_stats(
         # ── 按 model 分组 ──
         model_sql = text(
             "SELECT model, COUNT(*) AS cnt "
-            "FROM llm_call_log WHERE created_at >= :since "
+            f"FROM {llm_call_log_table} WHERE created_at >= :since "
             "GROUP BY model ORDER BY cnt DESC LIMIT 10"
         )
         by_model = [
@@ -230,7 +235,7 @@ async def get_llm_stats(
         # ── 按 caller 分组 ──
         caller_sql = text(
             "SELECT caller, COUNT(*) AS cnt "
-            "FROM llm_call_log WHERE created_at >= :since "
+            f"FROM {llm_call_log_table} WHERE created_at >= :since "
             "GROUP BY caller ORDER BY cnt DESC LIMIT 20"
         )
         by_caller = [

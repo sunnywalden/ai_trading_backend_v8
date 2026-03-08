@@ -80,7 +80,8 @@ async def list_tasks(
     result = await session.execute(
         text(
             "SELECT id, strategy_name, symbols, status, result, created_at "
-            "FROM backtest_tasks WHERE account_id=:aid ORDER BY created_at DESC LIMIT :lim"
+            f"FROM {BacktestTask.__tablename__} "
+            "WHERE account_id=:aid ORDER BY created_at DESC LIMIT :lim"
         ),
         {"aid": current_user, "lim": limit},
     )
@@ -112,7 +113,10 @@ async def get_task_report(
     from sqlalchemy import text
 
     result = await session.execute(
-        text("SELECT * FROM backtest_tasks WHERE id=:id AND account_id=:aid"),
+        text(
+            f"SELECT * FROM {BacktestTask.__tablename__} "
+            "WHERE id=:id AND account_id=:aid"
+        ),
         {"id": task_id, "aid": current_user},
     )
     row = result.fetchone()

@@ -1,7 +1,8 @@
 """V10: Trading Copilot 路由"""
+
 import uuid
 from datetime import datetime, timezone
-from typing import Optional, Any, Dict
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -9,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
 from app.models.db import get_session
+from app.models.trading_plan import TradingPlan
+from app.models.trading_signal import TradingSignal
 from app.services.copilot_service import copilot_service
 
 router = APIRouter(prefix="/copilot", tags=["V10-Copilot"])
@@ -88,8 +91,7 @@ async def get_history(
 
 @router.get("/morning-brief")
 async def morning_brief(
-    refresh: bool = False,
-    current_user: str = Depends(get_current_user)
+    refresh: bool = False, current_user: str = Depends(get_current_user)
 ):
     """获取今日盘前摘要 (V10 structured)"""
     return await copilot_service.morning_brief(current_user, force_refresh=refresh)
@@ -104,7 +106,9 @@ async def confirm_action(
     """确认并执行 Copilot 检测到的操作意图"""
     result = await copilot_service.confirm_action(current_user, action_id, session)
     if not result["success"]:
-        raise HTTPException(status_code=400, detail=result.get("reason", "Action failed"))
+        raise HTTPException(
+            status_code=400, detail=result.get("reason", "Action failed")
+        )
     return result
 
 
@@ -121,6 +125,7 @@ async def deep_research(
 ):
     """M7 深度研究: 6 数据源 + deepseek-reasoner 生成结构化研究报告"""
     from app.services.copilot_partner_service import copilot_partner_service
+
     report = await copilot_partner_service.deep_research.research(
         symbol=body.symbol.upper(),
         query=body.query or f"Comprehensive analysis of {body.symbol}",
@@ -144,7 +149,8 @@ async def get_copilot_context(
     - LLM 提供商健康状态
     - 最新宏观风险评分
     """
-    from sqlalchemy import text, select, func
+    from sqlalchemy import text
+
     from app.services.ai_client_manager import get_circuit_breaker_status
 
     ctx: Dict[str, Any] = {
@@ -156,8 +162,9 @@ async def get_copilot_context(
     try:
         r = await session.execute(
             text(
-                "SELECT COUNT(*) FROM trading_plans "
-                "WHERE account_id=:aid AND UPPER(plan_status) IN ('ACTIVE','PARTIAL')"
+                f"SELECT COUNT(*) FROM {TradingPlan.__tablename__} "
+                "WHERE account_id=:aid "
+                "AND UPPER(plan_status) IN ('ACTIVE','PARTIAL')"
             ),
             {"aid": current_user},
         )
@@ -169,7 +176,7 @@ async def get_copilot_context(
     try:
         r = await session.execute(
             text(
-                "SELECT COUNT(*) FROM trading_signals "
+                f"SELECT COUNT(*) FROM {TradingSignal.__tablename__} "
                 "WHERE account_id=:aid AND DATE(created_at)=CURDATE()"
             ),
             {"aid": current_user},
@@ -179,7 +186,7 @@ async def get_copilot_context(
         try:
             r = await session.execute(
                 text(
-                    "SELECT COUNT(*) FROM trading_signals "
+                    f"SELECT COUNT(*) FROM {TradingSignal.__tablename__} "
                     "WHERE account_id=:aid AND DATE(created_at)=DATE('now')"
                 ),
                 {"aid": current_user},
@@ -204,7 +211,9 @@ async def get_copilot_context(
     # ─── 最新市场体制 ───
     try:
         r = await session.execute(
-            text("SELECT regime_label FROM market_regime_snapshots ORDER BY created_at DESC LIMIT 1")
+            text(
+                "SELECT regime_label FROM market_regime_snapshots ORDER BY created_at DESC LIMIT 1"
+            )
         )
         row = r.fetchone()
         ctx["market_regime"] = row[0] if row else None
@@ -214,7 +223,9 @@ async def get_copilot_context(
     # ─── 宏观风险评分 ───
     try:
         r = await session.execute(
-            text("SELECT composite_score FROM macro_risk_scores ORDER BY created_at DESC LIMIT 1")
+            text(
+                "SELECT composite_score FROM macro_risk_scores ORDER BY created_at DESC LIMIT 1"
+            )
         )
         row = r.fetchone()
         ctx["macro_risk_score"] = float(row[0]) if row else None

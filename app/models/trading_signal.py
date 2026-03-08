@@ -4,15 +4,18 @@
 信号生命周期: GENERATED → VALIDATED → EXECUTED → EVALUATED → ARCHIVED
 """
 from datetime import datetime
-from typing import Optional, List, Dict, Any
-from sqlalchemy import (
-    Column, Integer, String, Float, DateTime, JSON, ForeignKey, Index, Text, Enum as SQLEnum
-)
-from sqlalchemy.orm import relationship, Mapped, mapped_column
-from sqlalchemy.sql import func
 from enum import Enum
+from typing import Any, Dict, List, Optional
+
+from sqlalchemy import JSON, Column, DateTime
+from sqlalchemy import Enum as SQLEnum
+from sqlalchemy import Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.sql import func
 
 from app.models.db import Base
+# 提前导入确保 SQLAlchemy mapper 配置时可解析 Strategy / StrategyRun
+from app.models.strategy import Strategy, StrategyRun  # noqa: E402
 
 
 class SignalType(str, Enum):
@@ -123,9 +126,9 @@ class TradingSignal(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.now(), onupdate=func.now())
     
-    # 关系
-    strategy: Mapped[Optional["Strategy"]] = relationship("Strategy", lazy="selectin")
-    strategy_run: Mapped[Optional["StrategyRun"]] = relationship("StrategyRun", lazy="selectin")
+    # 关系（直接引用类，确保 mapper 配置时无需字符串延迟解析）
+    strategy: Mapped[Optional["Strategy"]] = relationship(Strategy, lazy="selectin")
+    strategy_run: Mapped[Optional["StrategyRun"]] = relationship(StrategyRun, lazy="selectin")
     
     __table_args__ = (
         Index("ix_signals_status_priority", "status", "priority"),

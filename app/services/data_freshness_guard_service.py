@@ -23,7 +23,7 @@
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import desc, select
@@ -60,10 +60,81 @@ def _classify(age_h: float | None, warn_h: float, crit_h: float) -> str:
     return _OK
 
 
+def _classify_missing_source(source_key: str, now: datetime) -> str:
+    """对部分冷启动/休市场景做更温和的缺失分类。"""
+    if source_key == "event_calendar" and now.weekday() >= 5:
+        return _WARNING
+    if source_key == "factor_snapshot":
+        return _WARNING
+    if source_key == "market_regime":
+        return _WARNING
+    return _CRITICAL
+
+
+def _utc_now_naive() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
+def _effective_thresholds(
+    source_key: str,
+    warn_h: float,
+    crit_h: float,
+    now: datetime,
+) -> tuple[float, float]:
+    """按交易时段动态放宽 freshness 阈值，避免休市期间误报。"""
+    if source_key != "quote_data":
+        return warn_h, crit_h
+
+    # 周末：行情刷新通常停摆，不应按盘中阈值直接判 CRITICAL。
+    if now.weekday() >= 5:
+        return 24.0, 72.0
+
+    # 粗粒度覆盖港股/美股的主要活跃时段（UTC）。
+    utc_hour = now.hour
+    hk_session_open = 1 <= utc_hour < 8
+    us_session_open = 13 <= utc_hour < 21
+    if hk_session_open or us_session_open:
+        return warn_h, crit_h
+
+    # 工作日非盘中：放宽到隔夜容忍窗口。
+    return 12.0, 36.0
+
+
 class DataFreshnessGuardService:
     """V10.5.1 M4 — 数据陈旧度守卫服务。"""
 
     # ── 各数据源最新时间查询 ─────────────────────────────────────────────
+
+    @staticmethod
+    async def _has_portfolio_risk_context(
+        db: AsyncSession,
+        keys: list[str],
+    ) -> bool:
+        try:
+            from app.models.position import Position
+            from app.models.trading_plan import TradingPlan
+
+            pos_stmt = (
+                select(Position.id)
+                .where(Position.account_id.in_(keys))
+                .limit(1)
+            )
+            if (await db.execute(pos_stmt)).scalar_one_or_none() is not None:
+                return True
+
+            plan_stmt = (
+                select(TradingPlan.id)
+                .where(
+                    TradingPlan.account_id.in_(keys),
+                    TradingPlan.plan_status.in_(["ACTIVE", "PARTIAL"]),
+                )
+                .limit(1)
+            )
+            return (
+                (await db.execute(plan_stmt)).scalar_one_or_none() is not None
+            )
+        except Exception:
+            return False
 
     @staticmethod
     async def _latest_quote(db: AsyncSession) -> datetime | None:
@@ -82,40 +153,73 @@ class DataFreshnessGuardService:
             return None
 
     @staticmethod
-    async def _latest_position(db: AsyncSession, keys: list[str]) -> datetime | None:
+    async def _latest_position(
+        db: AsyncSession,
+        keys: list[str],
+    ) -> datetime | None:
         try:
-            from app.models.portfolio_snapshot import PortfolioSnapshot
+            from app.broker.factory import make_option_broker_client
+            from app.models.position import Position
 
             stmt = (
-                select(PortfolioSnapshot.created_at)
-                .where(PortfolioSnapshot.account_id.in_(keys))
-                .order_by(desc(PortfolioSnapshot.created_at))
+                select(Position.updated_at)
+                .where(Position.account_id.in_(keys))
+                .order_by(desc(Position.updated_at))
                 .limit(1)
             )
             result = await db.execute(stmt)
             row = result.scalar_one_or_none()
             if row is not None:
                 return row
-            # Fallback: account-agnostic check — if data pipeline has ANY recent snapshot,
-            # don't misfire FREEZE_NEW_OPEN due to account ID mismatch
+
+            # Fallback 1: account-agnostic internal positions,
+            # 避免 account_id 口径不一致误判。
             stmt_any = (
-                select(PortfolioSnapshot.created_at)
-                .order_by(desc(PortfolioSnapshot.created_at))
+                select(Position.updated_at)
+                .order_by(desc(Position.updated_at))
                 .limit(1)
             )
             result_any = await db.execute(stmt_any)
-            return result_any.scalar_one_or_none()
+            row_any = result_any.scalar_one_or_none()
+            if row_any is not None:
+                return row_any
+
+            # Fallback 2: 若本地无仓位记录，但 broker API 可正常返回（哪怕为空仓），
+            # 说明仓位通道是新鲜的，不应冻结新开仓。
+            broker = make_option_broker_client()
+            account_id = keys[0] if keys else ""
+            await broker.list_underlying_positions(
+                account_id,
+                force_refresh=True,
+            )
+            await broker.list_option_positions(account_id, force_refresh=True)
+            return _utc_now_naive()
         except Exception:
             return None
 
     @staticmethod
     async def _latest_event(db: AsyncSession) -> datetime | None:
         try:
-            from app.models.event_calendar import EventCalendar
+            from app.models.event_calendar import EventCalendarEntry
+            from app.services.event_calendar_service import \
+                event_calendar_service
 
             stmt = (
-                select(EventCalendar.created_at)
-                .order_by(desc(EventCalendar.created_at))
+                select(EventCalendarEntry.created_at)
+                .order_by(desc(EventCalendarEntry.created_at))
+                .limit(1)
+            )
+            result = await db.execute(stmt)
+            row = result.scalar_one_or_none()
+            if row is not None:
+                return row
+
+            # 冷启动自愈：复用事件服务已有 seed 逻辑，先补宏观事件，再按需轻量扫描。
+            await event_calendar_service.ensure_calendar_seeded(db, days=7)
+
+            stmt = (
+                select(EventCalendarEntry.created_at)
+                .order_by(desc(EventCalendarEntry.created_at))
                 .limit(1)
             )
             result = await db.execute(stmt)
@@ -124,19 +228,64 @@ class DataFreshnessGuardService:
             return None
 
     @staticmethod
-    async def _latest_factor(db: AsyncSession, keys: list[str]) -> datetime | None:
+    async def _latest_factor(
+        db: AsyncSession,
+        keys: list[str],
+    ) -> datetime | None:
         try:
             from app.models.portfolio_factor_exposure import \
                 PortfolioFactorExposure
 
             stmt = (
-                select(PortfolioFactorExposure.created_at)
+                select(PortfolioFactorExposure.snapshot_at)
                 .where(PortfolioFactorExposure.account_id.in_(keys))
-                .order_by(desc(PortfolioFactorExposure.created_at))
+                .order_by(desc(PortfolioFactorExposure.snapshot_at))
                 .limit(1)
             )
             result = await db.execute(stmt)
-            return result.scalar_one_or_none()
+            row = result.scalar_one_or_none()
+            if row is not None:
+                return row
+
+            stmt_any = (
+                select(PortfolioFactorExposure.snapshot_at)
+                .order_by(desc(PortfolioFactorExposure.snapshot_at))
+                .limit(1)
+            )
+            result_any = await db.execute(stmt_any)
+            row_any = result_any.scalar_one_or_none()
+            if row_any is not None:
+                return row_any
+
+            # 空仓/无活跃计划场景下，因子快照不应被视为故障。
+            if not await DataFreshnessGuardService._has_portfolio_risk_context(
+                db, keys
+            ):
+                return _utc_now_naive()
+
+            # 尝试即时补一张快照，解决冷启动窗口内 job 尚未运行的问题。
+            from app.services.risk_observability_service import \
+                risk_observability_service
+
+            account_id = keys[0] if keys else ""
+            seeded = await (
+                risk_observability_service.seed_snapshot_from_live_data(
+                    db,
+                    account_id,
+                )
+            )
+            if seeded:
+                retry_stmt = (
+                    select(PortfolioFactorExposure.snapshot_at)
+                    .where(PortfolioFactorExposure.account_id.in_(keys))
+                    .order_by(desc(PortfolioFactorExposure.snapshot_at))
+                    .limit(1)
+                )
+                retry_result = await db.execute(retry_stmt)
+                retry_row = retry_result.scalar_one_or_none()
+                if retry_row is not None:
+                    return retry_row
+            return None
         except Exception:
             return None
 
@@ -144,6 +293,9 @@ class DataFreshnessGuardService:
     async def _latest_regime(db: AsyncSession) -> datetime | None:
         try:
             from app.models.market_regime import MarketRegime
+            from app.services.regime_classifier import regime_classifier
+            from app.services.regime_strategy_allocator import \
+                fetch_current_regime_from_redis
 
             stmt = (
                 select(MarketRegime.created_at)
@@ -151,7 +303,20 @@ class DataFreshnessGuardService:
                 .limit(1)
             )
             result = await db.execute(stmt)
-            return result.scalar_one_or_none()
+            row = result.scalar_one_or_none()
+            if row is not None:
+                return row
+
+            cached = await fetch_current_regime_from_redis()
+            if cached.get("regime") and cached.get("regime") != "UNKNOWN":
+                return _utc_now_naive()
+
+            try:
+                await regime_classifier.run(db)
+                retry = await db.execute(stmt)
+                return retry.scalar_one_or_none()
+            except Exception:
+                return None
         except Exception:
             return None
 
@@ -173,28 +338,36 @@ class DataFreshnessGuardService:
     ) -> dict[str, Any]:
         """返回所有数据源的陈旧度矩阵与总体最高风险等级。"""
         keys = self._candidate_keys(account_id)
-        now = datetime.utcnow()
+        now = _utc_now_naive()
 
         latest_times: dict[str, datetime | None] = {
-            "quote_data":      await self._latest_quote(db),
-            "positions":       await self._latest_position(db, keys),
-            "event_calendar":  await self._latest_event(db),
+            "quote_data": await self._latest_quote(db),
+            "positions": await self._latest_position(db, keys),
+            "event_calendar": await self._latest_event(db),
             "factor_snapshot": await self._latest_factor(db, keys),
-            "market_regime":   await self._latest_regime(db),
+            "market_regime": await self._latest_regime(db),
         }
 
         matrix: list[dict[str, Any]] = []
         for source_key, warn_h, crit_h, action in _SOURCE_CONFIG:
             last_seen = latest_times.get(source_key)
             age_h = _age_hours(last_seen, now)
-            status = _classify(age_h, warn_h, crit_h)
+            effective_warn_h, effective_crit_h = _effective_thresholds(
+                source_key, warn_h, crit_h, now
+            )
+            if age_h is None:
+                status = _classify_missing_source(source_key, now)
+            else:
+                status = _classify(age_h, effective_warn_h, effective_crit_h)
             matrix.append(
                 {
                     "source": source_key,
                     "last_seen": last_seen.isoformat() if last_seen else None,
-                    "age_hours": round(age_h, 2) if age_h is not None else None,
-                    "warn_threshold_hours": warn_h,
-                    "crit_threshold_hours": crit_h,
+                    "age_hours": (
+                        round(age_h, 2) if age_h is not None else None
+                    ),
+                    "warn_threshold_hours": effective_warn_h,
+                    "crit_threshold_hours": effective_crit_h,
                     "status": status,
                     "action_on_critical": action,
                 }
@@ -212,7 +385,8 @@ class DataFreshnessGuardService:
 
         # 冻结新开仓标志：仓位数据 CRITICAL 时触发
         freeze_new_open = any(
-            m["status"] == _CRITICAL and m["action_on_critical"] == "FREEZE_NEW_OPEN"
+            m["status"] == _CRITICAL
+            and m["action_on_critical"] == "FREEZE_NEW_OPEN"
             for m in matrix
         )
         recommended_action: str
