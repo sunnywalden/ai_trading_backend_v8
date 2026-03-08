@@ -95,6 +95,25 @@ class AutonomyHealthMonitor:
 
         return TechnicalIndicator.__tablename__
 
+    @staticmethod
+    def _equity_snapshot_table_name() -> str:
+        from app.models.equity_snapshot import EquitySnapshot
+
+        return EquitySnapshot.__tablename__
+
+    @staticmethod
+    def _portfolio_factor_exposure_table_name() -> str:
+        from app.models.portfolio_factor_exposure import \
+            PortfolioFactorExposure
+
+        return PortfolioFactorExposure.__tablename__
+
+    @staticmethod
+    def _algo_execution_task_table_name() -> str:
+        from app.models.algo_execution_task import AlgoExecutionTask
+
+        return AlgoExecutionTask.__tablename__
+
     async def _has_operational_plans(self, db) -> bool:
         from sqlalchemy import text
 
@@ -161,15 +180,22 @@ class AutonomyHealthMonitor:
         name = "equity_snapshot_freshness"
         try:
             from sqlalchemy import text
+
+            equity_snapshot_table = self._equity_snapshot_table_name()
+            portfolio_factor_exposure_table = (
+                self._portfolio_factor_exposure_table_name()
+            )
             operational_active = await self._has_operational_plans(db)
             row = (await db.execute(
-                text("SELECT MAX(created_at) FROM equity_snapshots")
+                text(f"SELECT MAX(created_at) FROM {equity_snapshot_table}")
             )).fetchone()
             latest = row[0] if row else None
 
             # 回退：若权益快照缺失或过旧，使用风险快照作为系统活跃度近似
             fallback_row = (await db.execute(
-                text("SELECT MAX(snapshot_at) FROM portfolio_factor_exposure")
+                text(
+                    f"SELECT MAX(snapshot_at) FROM {portfolio_factor_exposure_table}"
+                )
             )).fetchone()
             fallback_latest = fallback_row[0] if fallback_row else None
 
@@ -359,10 +385,12 @@ class AutonomyHealthMonitor:
         name = "algo_task_backlog"
         try:
             from sqlalchemy import text
+
+            algo_execution_task_table = self._algo_execution_task_table_name()
             threshold_dt = datetime.now(tz=timezone.utc) - timedelta(minutes=5)
             row = (await db.execute(
                 text(
-                    "SELECT COUNT(*) FROM algo_execution_tasks "
+                    f"SELECT COUNT(*) FROM {algo_execution_task_table} "
                     "WHERE status='PENDING' AND created_at <= :threshold"
                 ),
                 {"threshold": threshold_dt.replace(tzinfo=None)},

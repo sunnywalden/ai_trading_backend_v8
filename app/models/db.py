@@ -148,12 +148,21 @@ async def ensure_mysql_schema_updates() -> None:
     if settings.DB_TYPE != "mysql":
         return
 
+    from app.models.autonomy_audit_log import AutonomyAuditLog
+    from app.models.copilot_message import CopilotMessage
     from app.models.trading_plan import TradingPlan
 
     trading_plan_table = TradingPlan.__tablename__
+    autonomy_audit_log_table = AutonomyAuditLog.__tablename__
+    copilot_messages_table = CopilotMessage.__tablename__
 
     def _trading_plan_add_column(definition_sql: str) -> str:
         return f"ALTER TABLE {trading_plan_table} ADD COLUMN {definition_sql}"
+
+    def _autonomy_audit_log_add_column(definition_sql: str) -> str:
+        return (
+            f"ALTER TABLE {autonomy_audit_log_table} ADD COLUMN {definition_sql}"
+        )
 
     # 定义需要检查的列更新
     # 格式: (table_name, column_name, add_column_sql)
@@ -303,14 +312,18 @@ async def ensure_mysql_schema_updates() -> None:
         ),
         # V10.2-M1: 审计日志体制上下文字段（兼容历史库缺列）
         (
-            "autonomy_audit_log",
+            autonomy_audit_log_table,
             "regime_at_decision",
-            "ALTER TABLE autonomy_audit_log ADD COLUMN regime_at_decision VARCHAR(32) NULL COMMENT 'V10.2: 决策时市场体制'",
+            _autonomy_audit_log_add_column(
+                "regime_at_decision VARCHAR(32) NULL COMMENT 'V10.2: 决策时市场体制'"
+            ),
         ),
         (
-            "autonomy_audit_log",
+            autonomy_audit_log_table,
             "regime_confidence",
-            "ALTER TABLE autonomy_audit_log ADD COLUMN regime_confidence FLOAT NULL COMMENT 'V10.2: 体制置信度'",
+            _autonomy_audit_log_add_column(
+                "regime_confidence FLOAT NULL COMMENT 'V10.2: 体制置信度'"
+            ),
         ),
     ]
 
@@ -390,10 +403,10 @@ async def ensure_mysql_schema_updates() -> None:
         # 格式: (table, column, min_char_length, modify_sql)
         column_type_fixes = [
             (
-                "copilot_messages",
+                copilot_messages_table,
                 "role",
                 16,
-                "ALTER TABLE copilot_messages MODIFY COLUMN role VARCHAR(16) NOT NULL COMMENT 'user/assistant/system'",
+                f"ALTER TABLE {copilot_messages_table} MODIFY COLUMN role VARCHAR(16) NOT NULL COMMENT 'user/assistant/system'",
             ),
         ]
         for table_name, column_name, min_length, modify_sql in column_type_fixes:

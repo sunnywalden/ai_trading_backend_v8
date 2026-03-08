@@ -10,9 +10,9 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
+from app.core.config import settings
 from app.models.db import SessionLocal
 from app.models.strategy import StrategyRun
-from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,8 @@ async def run_paper_graduation_check():
 
     async with SessionLocal() as session:
         try:
-            from sqlalchemy import select, distinct
+            from sqlalchemy import distinct, select
+
             from app.services.paper_trading_service import PaperTradingService
             svc = PaperTradingService()
 
@@ -80,9 +81,12 @@ async def run_paper_graduation_check():
                         # 写入审计日志（autonomy_audit_log 表）
                         try:
                             from sqlalchemy import text as _text
+
+                            from app.models.autonomy_audit_log import \
+                                AutonomyAuditLog
                             await session.execute(
                                 _text(
-                                    "INSERT INTO autonomy_audit_log "
+                                    f"INSERT INTO {AutonomyAuditLog.__tablename__} "
                                     "(account_id, event_type, detail, created_at) "
                                     "VALUES (:aid, 'PAPER_GRADUATION_ELIGIBLE', :detail, :ts)"
                                 ),

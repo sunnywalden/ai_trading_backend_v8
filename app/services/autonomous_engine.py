@@ -2227,9 +2227,12 @@ class AutonomousEngine:
             await order_svc.cancel_order(exec_id)
             
             # 更新审计日志
+            from app.models.autonomy_audit_log import AutonomyAuditLog
+
             await db.execute(
                 sql_text(
-                    "UPDATE autonomy_audit_log SET revoked_at=:now, revoke_reason=:reason WHERE order_id=:oid"
+                    f"UPDATE {AutonomyAuditLog.__tablename__} "
+                    "SET revoked_at=:now, revoke_reason=:reason WHERE order_id=:oid"
                 ),
                 {"now": datetime.now(timezone.utc), "reason": reason, "oid": exec_id}
             )
