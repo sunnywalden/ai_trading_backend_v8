@@ -9,15 +9,14 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import select, update, and_, text
+from sqlalchemy import and_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # 确保 SQLAlchemy 在首次映射时可解析 TradingSignal.relationship('Strategy'/'StrategyRun')
 # 该任务可能被独立脚本直接调用，未经过 app.main 的全量模型导入流程。
 import app.models.strategy  # noqa: F401
-
-from app.models.trading_signal import TradingSignal
 from app.models.trade_journal import TradeJournal
+from app.models.trading_signal import TradingSignal
 
 logger = logging.getLogger(__name__)
 
@@ -132,14 +131,19 @@ async def return_backfill_job() -> None:
 async def _trigger_ic_recompute() -> None:
     """触发 signal_intelligence_service 对所有用户重算 IC（T1.2）"""
     try:
-        from app.services.signal_intelligence_service import SignalIntelligenceService
         from app.models.db import SessionLocal
+        from app.models.trading_signal import TradingSignal
+        from app.services.signal_intelligence_service import \
+            SignalIntelligenceService
 
         svc = SignalIntelligenceService()
         async with SessionLocal() as session:
             # 获取所有有信号记录的 account_id 列表
             result = await session.execute(
-                text("SELECT DISTINCT account_id FROM trading_signals LIMIT 200")
+                text(
+                    f"SELECT DISTINCT account_id FROM {TradingSignal.__tablename__} "
+                    "LIMIT 200"
+                )
             )
             account_ids = [row[0] for row in result.fetchall()]
 

@@ -20,7 +20,7 @@ from app.models.db import (SessionLocal, engine, ensure_mysql_indexes,
 # 初始化系统日志
 setup_logging()
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 
 from fastapi.security import OAuth2PasswordRequestForm
 
@@ -267,13 +267,34 @@ async def _warm_up_caches() -> None:
     await asyncio.sleep(5)  # 等待调度器与 DB 连接池完全就绪
     logger.info("[WarmUp] Starting cache pre-warming...")
 
-    # 1. 市场体制
+    # 1. 市场体制（若表为空或超过 24h 未刷新，则立即同步跑一次分类）
     try:
         from app.services.regime_classifier import regime_classifier
 
+        _REGIME_STALE_H = 24.0
         async with SessionLocal() as _db:
-            await regime_classifier.get_current_regime(_db)
-        logger.info("[WarmUp] ✓ Market regime cached")
+            _current_regime = await regime_classifier.get_current_regime(_db)
+            _regime_stale = (
+                _current_regime is None
+                or (
+                    datetime.now(UTC).replace(tzinfo=None)
+                    - _current_regime.created_at
+                ).total_seconds()
+                / 3600
+                > _REGIME_STALE_H
+            )
+            if _regime_stale and settings.REGIME_ENABLED:
+                _reason = "no data" if _current_regime is None else "stale"
+                logger.info(
+                    "[WarmUp] Regime %s, bootstrapping synchronously...", _reason
+                )
+                try:
+                    await regime_classifier.run(_db)
+                    logger.info("[WarmUp] ✓ Market regime refreshed")
+                except Exception as _re:
+                    logger.warning(f"[WarmUp] regime bootstrap failed: {_re}")
+            else:
+                logger.info("[WarmUp] ✓ Market regime cached")
     except Exception as _e:
         logger.warning(f"[WarmUp] regime warm-up failed: {_e}")
 
@@ -293,10 +314,13 @@ async def _warm_up_caches() -> None:
     try:
         from sqlalchemy import text as _text
 
+        from app.models.price_alert import PriceAlert
+
         async with SessionLocal() as _db:
             await _db.execute(
                 _text(
-                    "SELECT COUNT(*) FROM price_alerts WHERE alert_status='ACTIVE' LIMIT 1"
+                    f"SELECT COUNT(*) FROM {PriceAlert.__tablename__} "
+                    "WHERE alert_status='ACTIVE' LIMIT 1"
                 )
             )
         logger.info("[WarmUp] ✓ Alerts cached")
@@ -319,15 +343,37 @@ async def _warm_up_caches() -> None:
     try:
         from sqlalchemy import text as _text
 
+        from app.models.trading_signal import TradingSignal
+
         async with SessionLocal() as _db:
             await _db.execute(
                 _text(
-                    "SELECT COUNT(*) FROM trading_signals WHERE status IN ('GENERATED', 'VALIDATED') LIMIT 1"
+                    f"SELECT COUNT(*) FROM {TradingSignal.__tablename__} "
+                    "WHERE status IN ('GENERATED', 'VALIDATED') LIMIT 1"
                 )
             )
         logger.info("[WarmUp] ✓ Signal count cached")
     except Exception as _e:
         logger.warning(f"[WarmUp] signal count warm-up failed: {_e}")
+
+    # 6. 事件日历种子（确保宏观事件行存在，避免冷启动 WARNING）
+    try:
+        from app.services.event_calendar_service import event_calendar_service
+
+        async with SessionLocal() as _db:
+            await event_calendar_service.ensure_calendar_seeded(_db, days=7)
+        logger.info("[WarmUp] ✓ Event calendar seeded")
+    except Exception as _e:
+        logger.warning(f"[WarmUp] event calendar warm-up failed: {_e}")
+
+    # 7. 因子敞口快照（首次写入，消除 5min 任务间隔内的冷启动 WARNING）
+    try:
+        from app.jobs.observability_jobs import take_factor_exposure_snapshot
+
+        await take_factor_exposure_snapshot()
+        logger.info("[WarmUp] ✓ Factor exposure snapshot seeded")
+    except Exception as _e:
+        logger.warning(f"[WarmUp] factor snapshot warm-up failed: {_e}")
 
     logger.info("[WarmUp] Cache pre-warming complete.")
 

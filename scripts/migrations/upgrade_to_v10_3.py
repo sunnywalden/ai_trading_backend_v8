@@ -24,10 +24,15 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
+from app.models.trading_plan import TradingPlan
+
+TRADING_PLAN_TABLE = TradingPlan.__tablename__
+
 
 async def get_db_engine():
-    from app.core.config import settings
     from sqlalchemy.ext.asyncio import create_async_engine
+
+    from app.core.config import settings
 
     db_url = settings.DATABASE_URL
     kwargs: dict = {"echo": False}
@@ -40,23 +45,23 @@ async def get_db_engine():
 # MySQL 8.0 不支持 ADD COLUMN IF NOT EXISTS，每列单独执行并忽略「已存在」错误
 MYSQL_UP_ALTER_COLUMNS: list[tuple[str, str]] = [
     # (column_name, ADD COLUMN sql)
-    ("direction",          "ALTER TABLE trading_plan ADD COLUMN direction VARCHAR(4) COMMENT '交易方向 BUY/SELL'"),
-    ("confidence",         "ALTER TABLE trading_plan ADD COLUMN confidence DECIMAL(5,2) COMMENT 'AI置信度 0-100'"),
-    ("reasoning",          "ALTER TABLE trading_plan ADD COLUMN reasoning TEXT COMMENT 'AI决策摘要'"),
-    ("autonomy_action",    "ALTER TABLE trading_plan ADD COLUMN autonomy_action VARCHAR(20) COMMENT 'AUTO_EXECUTE/PENDING_CONFIRM'"),
-    ("source",             "ALTER TABLE trading_plan ADD COLUMN source VARCHAR(20) COMMENT 'AI_AUTONOMOUS/AI_ADVISORY/MANUAL'"),
-    ("pipeline_stage",     "ALTER TABLE trading_plan ADD COLUMN pipeline_stage SMALLINT COMMENT '当前Pipeline阶段 0-16'"),
-    ("stage_entered_at",   "ALTER TABLE trading_plan ADD COLUMN stage_entered_at DATETIME COMMENT '进入当前阶段时间'"),
-    ("stage_history",      "ALTER TABLE trading_plan ADD COLUMN stage_history JSON COMMENT '[{stage,entered_at,exited_at}]'"),
-    ("provenance_snapshot","ALTER TABLE trading_plan ADD COLUMN provenance_snapshot JSON COMMENT '{six_dim_scores,regime,risk_gate_results}'"),
-    ("position_fsm_state", "ALTER TABLE trading_plan ADD COLUMN position_fsm_state VARCHAR(20) COMMENT '关联持仓最新FSM状态'"),
+    ("direction",          f"ALTER TABLE {TRADING_PLAN_TABLE} ADD COLUMN direction VARCHAR(4) COMMENT '交易方向 BUY/SELL'"),
+    ("confidence",         f"ALTER TABLE {TRADING_PLAN_TABLE} ADD COLUMN confidence DECIMAL(5,2) COMMENT 'AI置信度 0-100'"),
+    ("reasoning",          f"ALTER TABLE {TRADING_PLAN_TABLE} ADD COLUMN reasoning TEXT COMMENT 'AI决策摘要'"),
+    ("autonomy_action",    f"ALTER TABLE {TRADING_PLAN_TABLE} ADD COLUMN autonomy_action VARCHAR(20) COMMENT 'AUTO_EXECUTE/PENDING_CONFIRM'"),
+    ("source",             f"ALTER TABLE {TRADING_PLAN_TABLE} ADD COLUMN source VARCHAR(20) COMMENT 'AI_AUTONOMOUS/AI_ADVISORY/MANUAL'"),
+    ("pipeline_stage",     f"ALTER TABLE {TRADING_PLAN_TABLE} ADD COLUMN pipeline_stage SMALLINT COMMENT '当前Pipeline阶段 0-16'"),
+    ("stage_entered_at",   f"ALTER TABLE {TRADING_PLAN_TABLE} ADD COLUMN stage_entered_at DATETIME COMMENT '进入当前阶段时间'"),
+    ("stage_history",      f"ALTER TABLE {TRADING_PLAN_TABLE} ADD COLUMN stage_history JSON COMMENT '[{{stage,entered_at,exited_at}}]'"),
+    ("provenance_snapshot",f"ALTER TABLE {TRADING_PLAN_TABLE} ADD COLUMN provenance_snapshot JSON COMMENT '{{six_dim_scores,regime,risk_gate_results}}'"),
+    ("position_fsm_state", f"ALTER TABLE {TRADING_PLAN_TABLE} ADD COLUMN position_fsm_state VARCHAR(20) COMMENT '关联持仓最新FSM状态'"),
 ]
 
 MYSQL_UP_STATEMENTS: list[str] = [
     # ── 新增索引（忽略已存在） ───────────────────────────────────────────────
-    "ALTER TABLE trading_plan ADD INDEX idx_plan_pipeline_stage (pipeline_stage)",
-    "ALTER TABLE trading_plan ADD INDEX idx_plan_direction (direction)",
-    "ALTER TABLE trading_plan ADD INDEX idx_plan_source (source)",
+    f"ALTER TABLE {TRADING_PLAN_TABLE} ADD INDEX idx_plan_pipeline_stage (pipeline_stage)",
+    f"ALTER TABLE {TRADING_PLAN_TABLE} ADD INDEX idx_plan_direction (direction)",
+    f"ALTER TABLE {TRADING_PLAN_TABLE} ADD INDEX idx_plan_source (source)",
     # ── fsm_transition_log 新表 ──────────────────────────────────────────────
     """
     CREATE TABLE IF NOT EXISTS fsm_transition_log (
@@ -79,7 +84,7 @@ MYSQL_UP_STATEMENTS: list[str] = [
 MYSQL_DOWN_STATEMENTS: list[str] = [
     "DROP TABLE IF EXISTS fsm_transition_log;",
     """
-    ALTER TABLE trading_plan
+    ALTER TABLE {table_name}
         DROP COLUMN IF EXISTS direction,
         DROP COLUMN IF EXISTS confidence,
         DROP COLUMN IF EXISTS reasoning,
@@ -90,22 +95,22 @@ MYSQL_DOWN_STATEMENTS: list[str] = [
         DROP COLUMN IF EXISTS stage_history,
         DROP COLUMN IF EXISTS provenance_snapshot,
         DROP COLUMN IF EXISTS position_fsm_state;
-    """,
+    """.format(table_name=TRADING_PLAN_TABLE),
 ]
 
 # ── SQLite DDL ────────────────────────────────────────────────────────────────
 # SQLite 不支持 ADD COLUMN IF NOT EXISTS，需逐列执行
 SQLITE_UP_STATEMENTS: list[str] = [
-    "ALTER TABLE trading_plan ADD COLUMN direction          VARCHAR(4);",
-    "ALTER TABLE trading_plan ADD COLUMN confidence         DECIMAL(5,2);",
-    "ALTER TABLE trading_plan ADD COLUMN reasoning          TEXT;",
-    "ALTER TABLE trading_plan ADD COLUMN autonomy_action    VARCHAR(20);",
-    "ALTER TABLE trading_plan ADD COLUMN source             VARCHAR(20);",
-    "ALTER TABLE trading_plan ADD COLUMN pipeline_stage     SMALLINT;",
-    "ALTER TABLE trading_plan ADD COLUMN stage_entered_at   DATETIME;",
-    "ALTER TABLE trading_plan ADD COLUMN stage_history      JSON;",
-    "ALTER TABLE trading_plan ADD COLUMN provenance_snapshot JSON;",
-    "ALTER TABLE trading_plan ADD COLUMN position_fsm_state VARCHAR(20);",
+    f"ALTER TABLE {TRADING_PLAN_TABLE} ADD COLUMN direction          VARCHAR(4);",
+    f"ALTER TABLE {TRADING_PLAN_TABLE} ADD COLUMN confidence         DECIMAL(5,2);",
+    f"ALTER TABLE {TRADING_PLAN_TABLE} ADD COLUMN reasoning          TEXT;",
+    f"ALTER TABLE {TRADING_PLAN_TABLE} ADD COLUMN autonomy_action    VARCHAR(20);",
+    f"ALTER TABLE {TRADING_PLAN_TABLE} ADD COLUMN source             VARCHAR(20);",
+    f"ALTER TABLE {TRADING_PLAN_TABLE} ADD COLUMN pipeline_stage     SMALLINT;",
+    f"ALTER TABLE {TRADING_PLAN_TABLE} ADD COLUMN stage_entered_at   DATETIME;",
+    f"ALTER TABLE {TRADING_PLAN_TABLE} ADD COLUMN stage_history      JSON;",
+    f"ALTER TABLE {TRADING_PLAN_TABLE} ADD COLUMN provenance_snapshot JSON;",
+    f"ALTER TABLE {TRADING_PLAN_TABLE} ADD COLUMN position_fsm_state VARCHAR(20);",
     """
     CREATE TABLE IF NOT EXISTS fsm_transition_log (
         id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -132,8 +137,8 @@ SQLITE_DOWN_STATEMENTS: list[str] = [
 MYSQL_CHECK_QUERIES = [
     ("trading_plan.pipeline_stage 列",
      "SELECT COUNT(*) FROM information_schema.columns "
-     "WHERE table_schema=DATABASE() AND table_name='trading_plan' "
-     "AND column_name='pipeline_stage';"),
+    f"WHERE table_schema=DATABASE() AND table_name='{TRADING_PLAN_TABLE}' "
+    "AND column_name='pipeline_stage';"),
     ("fsm_transition_log 表",
      "SELECT COUNT(*) FROM information_schema.tables "
      "WHERE table_schema=DATABASE() AND table_name='fsm_transition_log';"),

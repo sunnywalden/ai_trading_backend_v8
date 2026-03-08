@@ -2,7 +2,8 @@ from typing import AsyncGenerator
 
 import redis.asyncio as redis
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (AsyncSession, async_sessionmaker,
+                                    create_async_engine)
 from sqlalchemy.orm import declarative_base
 
 from app.core.config import settings
@@ -115,7 +116,6 @@ async def ensure_mysql_tables() -> None:
     import app.models.algo_execution_task  # noqa: F401
     import app.models.audit_log  # noqa: F401
     import app.models.autonomy_audit_log  # noqa: F401
-
     # V10 新增
     import app.models.backtest_task  # noqa: F401
     import app.models.copilot_message  # noqa: F401
@@ -132,7 +132,6 @@ async def ensure_mysql_tables() -> None:
     import app.models.position_eval_task  # noqa: F401
     import app.models.position_lifecycle_event  # V10.4.4: 生命周期事件
     import app.models.price_alert  # noqa: F401
-
     # 持仓评估任务
     import app.models.task_config as task_cfg  # noqa: F401
     import app.models.trade_journal  # noqa: F401
@@ -148,6 +147,13 @@ async def ensure_mysql_schema_updates() -> None:
     """启动时检查并修复数据库表结构变更（如缺少的列）。"""
     if settings.DB_TYPE != "mysql":
         return
+
+    from app.models.trading_plan import TradingPlan
+
+    trading_plan_table = TradingPlan.__tablename__
+
+    def _trading_plan_add_column(definition_sql: str) -> str:
+        return f"ALTER TABLE {trading_plan_table} ADD COLUMN {definition_sql}"
 
     # 定义需要检查的列更新
     # 格式: (table_name, column_name, add_column_sql)
@@ -178,85 +184,122 @@ async def ensure_mysql_schema_updates() -> None:
             "ALTER TABLE trading_signals ADD COLUMN is_winner VARCHAR(8) NULL COMMENT 'YES/NO - 是否盈利交易'",
         ),
         (
-            "trading_plan",
+            trading_plan_table,
             "plan_type",
-            "ALTER TABLE trading_plan ADD COLUMN plan_type VARCHAR(16) NOT NULL DEFAULT 'MANUAL' COMMENT 'V10.1: 计划类型'",
+            _trading_plan_add_column(
+                "plan_type VARCHAR(16) NOT NULL DEFAULT 'MANUAL' "
+                "COMMENT 'V10.1: 计划类型'"
+            ),
         ),
         (
-            "trading_plan",
+            trading_plan_table,
             "plan_status",
-            "ALTER TABLE trading_plan ADD COLUMN plan_status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE' COMMENT 'V10.1: 计划状态'",
+            _trading_plan_add_column(
+                "plan_status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE' "
+                "COMMENT 'V10.1: 计划状态'"
+            ),
         ),
         (
-            "trading_plan",
+            trading_plan_table,
             "plan_tags",
-            "ALTER TABLE trading_plan ADD COLUMN plan_tags JSON NULL COMMENT 'V10.1: 扩展标签'",
+            _trading_plan_add_column(
+                "plan_tags JSON NULL COMMENT 'V10.1: 扩展标签'"
+            ),
         ),
         (
-            "trading_plan",
+            trading_plan_table,
             "target_position",
-            "ALTER TABLE trading_plan ADD COLUMN target_position DECIMAL(10, 4) NOT NULL DEFAULT 0.0 COMMENT 'V10.1: 目标仓位'",
+            _trading_plan_add_column(
+                "target_position DECIMAL(10, 4) NOT NULL DEFAULT 0.0 "
+                "COMMENT 'V10.1: 目标仓位'"
+            ),
         ),
         (
-            "trading_plan",
+            trading_plan_table,
             "valid_from",
-            "ALTER TABLE trading_plan ADD COLUMN valid_from DATETIME NULL COMMENT 'V10.1: 有效期开始'",
+            _trading_plan_add_column(
+                "valid_from DATETIME NULL COMMENT 'V10.1: 有效期开始'"
+            ),
         ),
         (
-            "trading_plan",
+            trading_plan_table,
             "valid_until",
-            "ALTER TABLE trading_plan ADD COLUMN valid_until DATETIME NULL COMMENT 'V10.1: 有效期截止'",
+            _trading_plan_add_column(
+                "valid_until DATETIME NULL COMMENT 'V10.1: 有效期截止'"
+            ),
         ),
         # V10.3: 交易可观测性字段
         (
-            "trading_plan",
+            trading_plan_table,
             "direction",
-            "ALTER TABLE trading_plan ADD COLUMN direction VARCHAR(4) NULL COMMENT 'V10.3: BUY/SELL'",
+            _trading_plan_add_column(
+                "direction VARCHAR(4) NULL COMMENT 'V10.3: BUY/SELL'"
+            ),
         ),
         (
-            "trading_plan",
+            trading_plan_table,
             "confidence",
-            "ALTER TABLE trading_plan ADD COLUMN confidence DECIMAL(5,2) NULL COMMENT 'V10.3: AI置信度'",
+            _trading_plan_add_column(
+                "confidence DECIMAL(5,2) NULL COMMENT 'V10.3: AI置信度'"
+            ),
         ),
         (
-            "trading_plan",
+            trading_plan_table,
             "reasoning",
-            "ALTER TABLE trading_plan ADD COLUMN reasoning TEXT NULL COMMENT 'V10.3: AI决策摘要'",
+            _trading_plan_add_column(
+                "reasoning TEXT NULL COMMENT 'V10.3: AI决策摘要'"
+            ),
         ),
         (
-            "trading_plan",
+            trading_plan_table,
             "autonomy_action",
-            "ALTER TABLE trading_plan ADD COLUMN autonomy_action VARCHAR(20) NULL COMMENT 'V10.3: AUTO_EXECUTE/PENDING_CONFIRM'",
+            _trading_plan_add_column(
+                "autonomy_action VARCHAR(20) NULL "
+                "COMMENT 'V10.3: AUTO_EXECUTE/PENDING_CONFIRM'"
+            ),
         ),
         (
-            "trading_plan",
+            trading_plan_table,
             "source",
-            "ALTER TABLE trading_plan ADD COLUMN source VARCHAR(20) NULL COMMENT 'V10.3: AI_AUTONOMOUS/AI_ADVISORY/MANUAL'",
+            _trading_plan_add_column(
+                "source VARCHAR(20) NULL "
+                "COMMENT 'V10.3: AI_AUTONOMOUS/AI_ADVISORY/MANUAL'"
+            ),
         ),
         (
-            "trading_plan",
+            trading_plan_table,
             "pipeline_stage",
-            "ALTER TABLE trading_plan ADD COLUMN pipeline_stage SMALLINT NULL COMMENT 'V10.3: Pipeline阶段0-16'",
+            _trading_plan_add_column(
+                "pipeline_stage SMALLINT NULL COMMENT 'V10.3: Pipeline阶段0-16'"
+            ),
         ),
         (
-            "trading_plan",
+            trading_plan_table,
             "stage_entered_at",
-            "ALTER TABLE trading_plan ADD COLUMN stage_entered_at DATETIME NULL COMMENT 'V10.3: 进入当前阶段时间'",
+            _trading_plan_add_column(
+                "stage_entered_at DATETIME NULL COMMENT 'V10.3: 进入当前阶段时间'"
+            ),
         ),
         (
-            "trading_plan",
+            trading_plan_table,
             "stage_history",
-            "ALTER TABLE trading_plan ADD COLUMN stage_history JSON NULL COMMENT 'V10.3: 阶段历史'",
+            _trading_plan_add_column(
+                "stage_history JSON NULL COMMENT 'V10.3: 阶段历史'"
+            ),
         ),
         (
-            "trading_plan",
+            trading_plan_table,
             "provenance_snapshot",
-            "ALTER TABLE trading_plan ADD COLUMN provenance_snapshot JSON NULL COMMENT 'V10.3: 决策溯源快照'",
+            _trading_plan_add_column(
+                "provenance_snapshot JSON NULL COMMENT 'V10.3: 决策溯源快照'"
+            ),
         ),
         (
-            "trading_plan",
+            trading_plan_table,
             "position_fsm_state",
-            "ALTER TABLE trading_plan ADD COLUMN position_fsm_state VARCHAR(20) NULL COMMENT 'V10.3: 持仓FSM状态'",
+            _trading_plan_add_column(
+                "position_fsm_state VARCHAR(20) NULL COMMENT 'V10.3: 持仓FSM状态'"
+            ),
         ),
         # V10.2-M1: 审计日志体制上下文字段（兼容历史库缺列）
         (

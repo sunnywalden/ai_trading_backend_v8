@@ -96,9 +96,11 @@ async def _run_data_warmup(session, account_id: str) -> None:
         logger.warning("[TaskConfig] Data warmup dashboard step failed: %s", exc)
 
     try:
+        from app.models.price_alert import PriceAlert
+
         await session.execute(
             text(
-                "SELECT COUNT(*) FROM price_alerts "
+                f"SELECT COUNT(*) FROM {PriceAlert.__tablename__} "
                 "WHERE alert_status='ACTIVE' LIMIT 1"
             )
         )
@@ -111,9 +113,11 @@ async def _run_data_warmup(session, account_id: str) -> None:
         logger.warning("[TaskConfig] Data warmup ETF pool step failed: %s", exc)
 
     try:
+        from app.models.trading_signal import TradingSignal
+
         await session.execute(
             text(
-                "SELECT COUNT(*) FROM trading_signals "
+                f"SELECT COUNT(*) FROM {TradingSignal.__tablename__} "
                 "WHERE status IN ('GENERATED', 'VALIDATED') LIMIT 1"
             )
         )

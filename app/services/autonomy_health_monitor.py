@@ -77,12 +77,32 @@ class AutonomyHealthMonitor:
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
 
+    @staticmethod
+    def _trading_plan_table_name() -> str:
+        from app.models.trading_plan import TradingPlan
+
+        return TradingPlan.__tablename__
+
+    @staticmethod
+    def _trading_signal_table_name() -> str:
+        from app.models.trading_signal import TradingSignal
+
+        return TradingSignal.__tablename__
+
+    @staticmethod
+    def _technical_indicator_table_name() -> str:
+        from app.models.technical_indicator import TechnicalIndicator
+
+        return TechnicalIndicator.__tablename__
+
     async def _has_operational_plans(self, db) -> bool:
         from sqlalchemy import text
 
+        plan_table = self._trading_plan_table_name()
+
         row = (await db.execute(
             text(
-                "SELECT COUNT(*) FROM trading_plan "
+                f"SELECT COUNT(*) FROM {plan_table} "
                 "WHERE UPPER(plan_status) IN ('AI_GENERATED','AUTO_EXECUTING','PENDING_CONFIRM','ACTIVE','PARTIAL')"
             )
         )).fetchone()
@@ -93,6 +113,8 @@ class AutonomyHealthMonitor:
         name = "fsm_stuck"
         try:
             from sqlalchemy import text
+
+            plan_table = self._trading_plan_table_name()
             threshold_dt = datetime.now(tz=timezone.utc) - timedelta(minutes=10)
             # 状态机停留在非终态超过 10 分钟
             TERMINAL_STATES = ("CLOSED", "CANCELLED", "EXPIRED", "COMPLETED", "DONE")
@@ -106,7 +128,7 @@ class AutonomyHealthMonitor:
                 ") latest "
                 "  ON latest.plan_id = lf.plan_id "
                 " AND latest.last_occurred_at = lf.occurred_at "
-                "JOIN trading_plan tp ON tp.id = lf.plan_id "
+                f"JOIN {plan_table} tp ON tp.id = lf.plan_id "
                 "WHERE UPPER(tp.plan_status) IN ('ACTIVE','PARTIAL') "
                 "AND lf.to_state NOT IN :terminals "
                 "AND lf.occurred_at <= :threshold"
@@ -208,9 +230,11 @@ class AutonomyHealthMonitor:
         name = "plan_fsm_alignment"
         try:
             from sqlalchemy import text
+
+            plan_table = self._trading_plan_table_name()
             threshold_dt = datetime.now(tz=timezone.utc) - timedelta(minutes=15)
             stmt = text(
-                "SELECT COUNT(DISTINCT tp.id) FROM trading_plan tp "
+                f"SELECT COUNT(DISTINCT tp.id) FROM {plan_table} tp "
                 "WHERE UPPER(tp.plan_status) IN ('ACTIVE','PARTIAL') "
                 "AND NOT EXISTS ("
                 "  SELECT 1 FROM fsm_transition_log ftl "
@@ -244,10 +268,13 @@ class AutonomyHealthMonitor:
         try:
             from sqlalchemy import text
 
+            plan_table = self._trading_plan_table_name()
+            technical_indicator_table = self._technical_indicator_table_name()
+
             # 与 signal_freshness 语义保持一致：无活跃计划时不做行情时效硬告警
             active_row = (await db.execute(
                 text(
-                    "SELECT COUNT(*) FROM trading_plan "
+                    f"SELECT COUNT(*) FROM {plan_table} "
                     "WHERE UPPER(plan_status) IN ('ACTIVE','PARTIAL')"
                 )
             )).fetchone()
@@ -260,7 +287,7 @@ class AutonomyHealthMonitor:
                 )
 
             row = (await db.execute(
-                text("SELECT MAX(timestamp) FROM technical_indicators")
+                text(f"SELECT MAX(timestamp) FROM {technical_indicator_table}")
             )).fetchone()
             if not row or row[0] is None:
                 # 可能是表名不同，尝试 technical_indicator
@@ -366,10 +393,13 @@ class AutonomyHealthMonitor:
         try:
             from sqlalchemy import text
 
+            plan_table = self._trading_plan_table_name()
+            trading_signal_table = self._trading_signal_table_name()
+
             # 仅当存在活跃计划时才检查信号新鲜度，避免“空仓/停机期”误报
             active_row = (await db.execute(
                 text(
-                    "SELECT COUNT(*) FROM trading_plan "
+                    f"SELECT COUNT(*) FROM {plan_table} "
                     "WHERE UPPER(plan_status) IN ('ACTIVE','PARTIAL')"
                 )
             )).fetchone()
@@ -379,7 +409,7 @@ class AutonomyHealthMonitor:
                                          message="无活跃计划，跳过信号新鲜度检查")
 
             row = (await db.execute(
-                text("SELECT MAX(created_at) FROM trading_signals")
+                text(f"SELECT MAX(created_at) FROM {trading_signal_table}")
             )).fetchone()
             if not row or row[0] is None:
                 return HealthCheckResult(name=name, status="WARN",
