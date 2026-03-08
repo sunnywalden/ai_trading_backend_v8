@@ -13,11 +13,20 @@ from app.models.db import SessionLocal
 from app.models.strategy import Strategy
 from app.models.task_config import TaskTriggerConfig
 from app.schemas.task_config import TaskType
+from app.services.task_config_service import normalize_trigger_time
 
 logger = logging.getLogger(__name__)
 
 # 用于标记由配置同步生成的任务前缀
 JOB_PREFIX = "dyn_task_"
+
+
+def _parse_daily_time(trigger_time: str | None) -> tuple[int, int] | None:
+    normalized = normalize_trigger_time("DAILY", trigger_time)
+    if not normalized:
+        return None
+    hour_str, minute_str = normalized.split(":", 1)
+    return int(hour_str), int(minute_str)
 
 
 async def _run_opportunity_scan(
@@ -241,13 +250,13 @@ async def sync_task_configs_job():
                 trigger_args = {}
                 
                 if config.trigger_mode == "DAILY":
-                    # trigger_time 格式应为 HH:MM
-                    time_parts = (config.trigger_time or "09:00").split(":")
-                    if len(time_parts) == 2:
+                    parsed_time = _parse_daily_time(config.trigger_time or "09:00")
+                    if parsed_time is not None:
+                        hour, minute = parsed_time
                         trigger = 'cron'
                         trigger_args = {
-                            'hour': int(time_parts[0]),
-                            'minute': int(time_parts[1])
+                            'hour': hour,
+                            'minute': minute
                         }
                     else:
                         logger.warning(f"[TaskConfig] Invalid DAILY time format for config {config.id}: {config.trigger_time}")
@@ -264,13 +273,13 @@ async def sync_task_configs_job():
                         if cron_str and len(cron_str.split()) == 5:
                             trigger = CronTrigger.from_crontab(cron_str, timezone=ZoneInfo('Asia/Shanghai'))
                         else:
-                            # 降级处理为 cron 字符串（如果只是 HH:MM）
-                            time_parts = (config.trigger_time or "09:00").split(":")
-                            if len(time_parts) == 2:
+                            parsed_time = _parse_daily_time(config.trigger_time or "09:00")
+                            if parsed_time is not None:
+                                hour, minute = parsed_time
                                 trigger = 'cron'
                                 trigger_args = {
-                                    'hour': int(time_parts[0]),
-                                    'minute': int(time_parts[1])
+                                    'hour': hour,
+                                    'minute': minute
                                 }
                             else:
                                 continue

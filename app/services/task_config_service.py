@@ -1,14 +1,55 @@
 """统一任务配置服务的业务实现层"""
 import logging
+import re
 from datetime import datetime
-from typing import List, Optional, Any
-from sqlalchemy import select, func, and_
+from typing import Any, List, Optional
+
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.task_config import TaskTriggerConfig
-from app.schemas.task_config import TaskTriggerConfigCreate, TaskTriggerConfigUpdate, TaskType
+from app.schemas.task_config import (TaskTriggerConfigCreate,
+                                     TaskTriggerConfigUpdate, TaskType)
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_trigger_time(
+    trigger_mode: str | None,
+    trigger_time: str | None,
+) -> str | None:
+    """Normalize legacy DAILY/WEEKLY trigger times into HH:MM format."""
+    raw = str(trigger_time or "").strip()
+    mode = str(trigger_mode or "").strip().upper()
+    if not raw:
+        return None
+
+    if mode not in {"DAILY", "WEEKLY"}:
+        return raw
+
+    if re.fullmatch(r"\d{1,2}", raw):
+        hour = int(raw)
+        if 0 <= hour <= 23:
+            return f"{hour:02d}:00"
+        return None
+
+    if re.fullmatch(r"\d{3,4}", raw):
+        padded = raw.zfill(4)
+        hour = int(padded[:2])
+        minute = int(padded[2:])
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return f"{hour:02d}:{minute:02d}"
+        return None
+
+    if re.fullmatch(r"\d{1,2}:\d{1,2}", raw):
+        hour_str, minute_str = raw.split(":", 1)
+        hour = int(hour_str)
+        minute = int(minute_str)
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return f"{hour:02d}:{minute:02d}"
+        return None
+
+    return None
 
 
 class TaskTriggerConfigService:
@@ -82,13 +123,21 @@ class TaskTriggerConfigService:
         self, account_id: str, data: TaskTriggerConfigCreate
     ) -> TaskTriggerConfig:
         """创建新任务配置"""
+        normalized_trigger_time = normalize_trigger_time(
+            data.trigger_mode.value,
+            data.trigger_time,
+        )
         config = TaskTriggerConfig(
             account_id=account_id,
             task_type=data.task_type.value,
             name=data.name,
             description=data.description,
             trigger_mode=data.trigger_mode.value,
-            trigger_time=data.trigger_time,
+            trigger_time=(
+                normalized_trigger_time
+                if data.trigger_mode.value in {"DAILY", "WEEKLY"}
+                else data.trigger_time
+            ),
             params=data.params,
             enabled=data.enabled,
         )
@@ -106,6 +155,21 @@ class TaskTriggerConfigService:
             return None
             
         update_data = data.model_dump(exclude_unset=True)
+        updated_trigger_mode = str(
+            getattr(config, "trigger_mode", None)
+            or update_data.get("trigger_mode")
+            or ""
+        )
+        if "trigger_mode" in update_data and hasattr(update_data["trigger_mode"], "value"):
+            update_data["trigger_mode"] = update_data["trigger_mode"].value
+            updated_trigger_mode = str(update_data["trigger_mode"])
+        if "trigger_time" in update_data:
+            normalized_trigger_time = normalize_trigger_time(
+                updated_trigger_mode,
+                update_data.get("trigger_time"),
+            )
+            if updated_trigger_mode in {"DAILY", "WEEKLY"}:
+                update_data["trigger_time"] = normalized_trigger_time
         for field, value in update_data.items():
             if hasattr(value, "value"):
                 value = value.value
