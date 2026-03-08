@@ -74,3 +74,13 @@ class RegimeOverrideResponse(BaseModel):
     success: bool
     message: str
     regime: RegimeResponse
+
+
+class RegimeClassifyResponse(BaseModel):
+    """V10.5.1: 手动触发体制分类响应"""
+    success: bool
+    message: str
+    candidate: Optional[str] = Field(None, description="分类器候选体制")
+    confirmed: Optional[bool] = Field(None, description="是否确认切换（False=体制不变，仍刷新时间戳）")
+    confidence: Optional[float] = Field(None, description="分类置信度 [0,1]")
+    regime: Optional[RegimeResponse] = Field(None, description="操作后的当前体制记录")
