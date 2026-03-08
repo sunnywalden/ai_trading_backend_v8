@@ -24,14 +24,14 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc
 
 from app.core.config import settings
-from app.core.event_bus import event_bus, Topics
+from app.core.event_bus import Topics, event_bus
 from app.models.market_regime import MarketRegime, RegimeType
 
 logger = logging.getLogger(__name__)
@@ -240,32 +240,32 @@ class RegimeClassifier:
         now_utc = datetime.now(tz=timezone.utc)
 
         if confirmed:
-            # 3a. 封存前一体制（设置 valid_until）
-            if prev_regime and prev_regime != candidate_regime.value:
+            regime_changed = prev_regime and prev_regime != candidate_regime.value
+
+            if regime_changed:
+                # 3a. 封存前一体制（设置 valid_until）
                 await self._close_current_regime(db, now_utc)
 
-            # 3b. 写入新确认体制
-            new_regime = MarketRegime(
-                classification_date=now_utc,
-                valid_from=now_utc,
-                valid_until=None,
-                regime=candidate_regime.value,
-                prev_regime=prev_regime,
-                confidence=confidence,
-                trend_score=scores.trend,
-                vol_score=scores.vol,
-                breadth_score=scores.breadth,
-                macro_score=scores.macro,
-                momentum_score=scores.momentum,
-                reasoning=self._build_reasoning(candidate_regime, scores),
-                is_override=False,
-            )
-            db.add(new_regime)
-            await db.commit()
-            await db.refresh(new_regime)
+                # 3b-new. 体制切换：写入新记录
+                new_regime = MarketRegime(
+                    classification_date=now_utc,
+                    valid_from=now_utc,
+                    valid_until=None,
+                    regime=candidate_regime.value,
+                    prev_regime=prev_regime,
+                    confidence=confidence,
+                    trend_score=scores.trend,
+                    vol_score=scores.vol,
+                    breadth_score=scores.breadth,
+                    macro_score=scores.macro,
+                    momentum_score=scores.momentum,
+                    reasoning=self._build_reasoning(candidate_regime, scores),
+                    is_override=False,
+                )
+                db.add(new_regime)
+                await db.commit()
+                await db.refresh(new_regime)
 
-            # 3c. 发布事件（仅当体制真正切换时）
-            if prev_regime and prev_regime != candidate_regime.value:
                 await event_bus.publish(
                     Topics.REGIME_CHANGED,
                     {
@@ -280,18 +280,55 @@ class RegimeClassifier:
                     f"[RegimeClassifier] Regime changed: {prev_regime} → {candidate_regime.value} "
                     f"(confidence={confidence:.2%})"
                 )
-            elif not prev_regime:
-                # 首次写入，广播初始化事件
-                await event_bus.publish(
-                    Topics.REGIME_CHANGED,
-                    {
-                        "prev": None,
-                        "curr": candidate_regime.value,
-                        "confidence": confidence,
-                        "regime_id": new_regime.id,
-                        "var_multiplier": _parse_var_multipliers().get(candidate_regime.value, 1.0),
-                    },
-                )
+            else:
+                # 3b-existing. 体制未变：UPDATE 现有 active 记录的分类时间与评分，
+                # 避免每天 INSERT 新行（DB 堆积），确保 classification_date 始终新鲜。
+                existing = await self.get_current_regime(db)
+                if existing is None or not prev_regime:
+                    # 首次写入（表为空）：INSERT
+                    new_regime = MarketRegime(
+                        classification_date=now_utc,
+                        valid_from=now_utc,
+                        valid_until=None,
+                        regime=candidate_regime.value,
+                        prev_regime=prev_regime,
+                        confidence=confidence,
+                        trend_score=scores.trend,
+                        vol_score=scores.vol,
+                        breadth_score=scores.breadth,
+                        macro_score=scores.macro,
+                        momentum_score=scores.momentum,
+                        reasoning=self._build_reasoning(candidate_regime, scores),
+                        is_override=False,
+                    )
+                    db.add(new_regime)
+                    await db.commit()
+                    await db.refresh(new_regime)
+                    await event_bus.publish(
+                        Topics.REGIME_CHANGED,
+                        {
+                            "prev": None,
+                            "curr": candidate_regime.value,
+                            "confidence": confidence,
+                            "regime_id": new_regime.id,
+                            "var_multiplier": _parse_var_multipliers().get(candidate_regime.value, 1.0),
+                        },
+                    )
+                else:
+                    # 体制相同，仅刷新 classification_date 与评分
+                    existing.classification_date = now_utc
+                    existing.confidence = confidence
+                    existing.trend_score = scores.trend
+                    existing.vol_score = scores.vol
+                    existing.breadth_score = scores.breadth
+                    existing.macro_score = scores.macro
+                    existing.momentum_score = scores.momentum
+                    existing.reasoning = self._build_reasoning(candidate_regime, scores)
+                    await db.commit()
+                    logger.info(
+                        f"[RegimeClassifier] Regime unchanged ({candidate_regime.value}), "
+                        f"refreshed classification_date to {now_utc.isoformat()}"
+                    )
         else:
             logger.info(
                 f"[RegimeClassifier] Candidate {candidate_regime.value} not yet confirmed "
@@ -357,8 +394,9 @@ class RegimeClassifier:
         - 20日收益率符号
         - 价格 vs 200日 MA（长期趋势）
         """
-        import yfinance as yf
         import asyncio
+
+        import yfinance as yf
 
         spy_data = await asyncio.get_event_loop().run_in_executor(
             None, lambda: yf.download("SPY", period="1y", interval="1d", progress=False, auto_adjust=True)
@@ -404,8 +442,9 @@ class RegimeClassifier:
         - VIX 当前水平（<15 低波动，15-25 正常，25-35 高波动，>35 极端）
         - VIX / VIX 30日均值 比率（contango or backwardation）
         """
-        import yfinance as yf
         import asyncio
+
+        import yfinance as yf
 
         vix_data = await asyncio.get_event_loop().run_in_executor(
             None, lambda: yf.download("^VIX", period="60d", interval="1d", progress=False, auto_adjust=True)
@@ -449,8 +488,9 @@ class RegimeClassifier:
         - 用 SPY vs RSP（等权 S&P500 ETF）相对表现
         - 近 20 日 SPY 成分股上涨比例（代理：用 VTI/SPY 相对走势）
         """
-        import yfinance as yf
         import asyncio
+
+        import yfinance as yf
 
         data = await asyncio.get_event_loop().run_in_executor(
             None,
@@ -496,7 +536,8 @@ class RegimeClassifier:
         如果 macroservice 不可用则 fallback 到 50。
         """
         try:
-            from app.services.macro_risk_scoring_service import MacroRiskScoringService
+            from app.services.macro_risk_scoring_service import \
+                MacroRiskScoringService
             macro_svc = MacroRiskScoringService()
             # 调用新接口计算风险评分
             risk_score = await macro_svc.calculate_macro_risk_score()
@@ -519,8 +560,9 @@ class RegimeClassifier:
         - SPY 近 20 日收益率
         - SPY RSI(14)
         """
-        import yfinance as yf
         import asyncio
+
+        import yfinance as yf
 
         spy_data = await asyncio.get_event_loop().run_in_executor(
             None, lambda: yf.download("SPY", period="60d", interval="1d", progress=False, auto_adjust=True)
