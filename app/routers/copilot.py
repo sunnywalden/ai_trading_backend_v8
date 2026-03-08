@@ -15,6 +15,10 @@ from app.models.trading_plan import TradingPlan
 from app.models.trading_signal import TradingSignal
 from app.services.copilot_service import copilot_service
 
+# 无独立 ORM 模型的辅助表，使用模块级常量集中管理
+_ALERT_RECORDS_TABLE = "alert_records"
+_MARKET_REGIME_SNAPSHOTS_TABLE = "market_regime_snapshots"
+
 router = APIRouter(prefix="/copilot", tags=["V10-Copilot"])
 
 
@@ -203,7 +207,7 @@ async def get_copilot_context(
     try:
         r = await session.execute(
             text(
-                "SELECT COUNT(*) FROM alert_records "
+                f"SELECT COUNT(*) FROM {_ALERT_RECORDS_TABLE} "
                 "WHERE account_id=:aid AND is_read=0"
             ),
             {"aid": current_user},
@@ -216,7 +220,7 @@ async def get_copilot_context(
     try:
         r = await session.execute(
             text(
-                "SELECT regime_label FROM market_regime_snapshots ORDER BY created_at DESC LIMIT 1"
+                f"SELECT regime_label FROM {_MARKET_REGIME_SNAPSHOTS_TABLE} ORDER BY created_at DESC LIMIT 1"
             )
         )
         row = r.fetchone()
