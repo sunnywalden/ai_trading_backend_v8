@@ -21,6 +21,7 @@
   • MEAN_REVERT  : breadth 中等 and trend 30-65 and vol < 55
   • RANGE_BOUND  : 其余情况
 """
+
 from __future__ import annotations
 
 import logging
@@ -38,12 +39,12 @@ logger = logging.getLogger(__name__)
 
 # ── 默认 VaR 倍数映射（可被 REGIME_VAR_MULTIPLIERS 覆盖） ──────────────────────
 _DEFAULT_VAR_MULTIPLIERS: dict[str, float] = {
-    "BULL_TREND":   1.2,
-    "BEAR_TREND":   0.8,
-    "HIGH_VOL":     0.7,
-    "MEAN_REVERT":  1.0,
-    "RANGE_BOUND":  1.0,
-    "CRISIS":       0.5,
+    "BULL_TREND": 1.2,
+    "BEAR_TREND": 0.8,
+    "HIGH_VOL": 0.7,
+    "MEAN_REVERT": 1.0,
+    "RANGE_BOUND": 1.0,
+    "CRISIS": 0.5,
 }
 
 
@@ -57,7 +58,9 @@ def _parse_var_multipliers() -> dict[str, float]:
                 regime, multiplier = item.split(":", 1)
                 result[regime.strip()] = float(multiplier.strip())
     except Exception as exc:
-        logger.warning(f"[RegimeClassifier] Failed to parse REGIME_VAR_MULTIPLIERS: {exc}; using defaults")
+        logger.warning(
+            f"[RegimeClassifier] Failed to parse REGIME_VAR_MULTIPLIERS: {exc}; using defaults"
+        )
     return result
 
 
@@ -67,15 +70,15 @@ class RegimeScores:
     def __init__(
         self,
         trend: float,
-        vol:   float,
+        vol: float,
         breadth: float,
-        macro:   float,
+        macro: float,
         momentum: float,
     ) -> None:
-        self.trend    = max(0.0, min(100.0, trend))
-        self.vol      = max(0.0, min(100.0, vol))
-        self.breadth  = max(0.0, min(100.0, breadth))
-        self.macro    = max(0.0, min(100.0, macro))
+        self.trend = max(0.0, min(100.0, trend))
+        self.vol = max(0.0, min(100.0, vol))
+        self.breadth = max(0.0, min(100.0, breadth))
+        self.macro = max(0.0, min(100.0, macro))
         self.momentum = max(0.0, min(100.0, momentum))
 
     def classify(self) -> tuple[RegimeType, float]:
@@ -86,10 +89,10 @@ class RegimeScores:
         """
         # ── 规则打分（每个体制一个匹配分） ──
         scores: dict[RegimeType, float] = {
-            RegimeType.CRISIS:      self._score_crisis(),
-            RegimeType.BEAR_TREND:  self._score_bear(),
-            RegimeType.HIGH_VOL:    self._score_high_vol(),
-            RegimeType.BULL_TREND:  self._score_bull(),
+            RegimeType.CRISIS: self._score_crisis(),
+            RegimeType.BEAR_TREND: self._score_bear(),
+            RegimeType.HIGH_VOL: self._score_high_vol(),
+            RegimeType.BULL_TREND: self._score_bull(),
             RegimeType.MEAN_REVERT: self._score_mean_revert(),
             RegimeType.RANGE_BOUND: self._score_range_bound(),
         }
@@ -106,11 +109,13 @@ class RegimeScores:
 
         # 选最高分体制
         best_regime = max(priority, key=lambda r: scores[r])
-        best_score  = scores[best_regime]
+        best_score = scores[best_regime]
 
         # 置信度 = 最高分 / (最高分 + 次高分)
         sorted_scores = sorted(scores.values(), reverse=True)
-        first, second = sorted_scores[0], sorted_scores[1] if len(sorted_scores) > 1 else 0.0
+        first, second = sorted_scores[0], (
+            sorted_scores[1] if len(sorted_scores) > 1 else 0.0
+        )
         confidence = first / (first + second) if (first + second) > 0 else 0.5
 
         return best_regime, round(confidence, 4)
@@ -212,7 +217,9 @@ class RegimeClassifier:
         dict 包含本次分类结果摘要。
         """
         if not settings.REGIME_ENABLED:
-            logger.info("[RegimeClassifier] REGIME_ENABLED=False, skipping classification")
+            logger.info(
+                "[RegimeClassifier] REGIME_ENABLED=False, skipping classification"
+            )
             return {"skipped": True, "reason": "REGIME_ENABLED=False"}
 
         logger.info("[RegimeClassifier] Starting daily classification...")
@@ -221,7 +228,9 @@ class RegimeClassifier:
         try:
             scores = await self._compute_scores()
         except Exception as exc:
-            logger.error(f"[RegimeClassifier] Failed to compute scores: {exc}", exc_info=True)
+            logger.error(
+                f"[RegimeClassifier] Failed to compute scores: {exc}", exc_info=True
+            )
             scores = RegimeScores(50, 50, 50, 50, 50)  # 回退到中性分数
 
         candidate_regime, confidence = scores.classify()
@@ -273,7 +282,9 @@ class RegimeClassifier:
                         "curr": candidate_regime.value,
                         "confidence": confidence,
                         "regime_id": new_regime.id,
-                        "var_multiplier": _parse_var_multipliers().get(candidate_regime.value, 1.0),
+                        "var_multiplier": _parse_var_multipliers().get(
+                            candidate_regime.value, 1.0
+                        ),
                     },
                 )
                 logger.info(
@@ -311,7 +322,9 @@ class RegimeClassifier:
                             "curr": candidate_regime.value,
                             "confidence": confidence,
                             "regime_id": new_regime.id,
-                            "var_multiplier": _parse_var_multipliers().get(candidate_regime.value, 1.0),
+                            "var_multiplier": _parse_var_multipliers().get(
+                                candidate_regime.value, 1.0
+                            ),
                         },
                     )
                 else:
@@ -334,6 +347,18 @@ class RegimeClassifier:
                 f"[RegimeClassifier] Candidate {candidate_regime.value} not yet confirmed "
                 f"(need {settings.REGIME_CONFIRM_DAYS} consecutive days)"
             )
+            # 候选体制尚未确认，但分类器今日已成功运行。
+            # 刷新当前 active 记录的 classification_date 以表明系统仍在正常工作，
+            # 防止 data_freshness_guard 将 market_regime 误判为陈旧 CRITICAL。
+            existing = await self.get_current_regime(db)
+            if existing is not None:
+                existing.classification_date = now_utc
+                await db.commit()
+                logger.info(
+                    f"[RegimeClassifier] Active regime {existing.regime} classification_date "
+                    f"refreshed to {now_utc.isoformat()} "
+                    f"(candidate {candidate_regime.value} pending confirmation)"
+                )
 
         return {
             "candidate": candidate_regime.value,
@@ -342,9 +367,9 @@ class RegimeClassifier:
             "prev_regime": prev_regime,
             "scores": {
                 "trend": scores.trend,
-                "vol":   scores.vol,
+                "vol": scores.vol,
                 "breadth": scores.breadth,
-                "macro":  scores.macro,
+                "macro": scores.macro,
                 "momentum": scores.momentum,
             },
         }
@@ -357,14 +382,18 @@ class RegimeClassifier:
         """拉取市场数据并计算五维评分。"""
         import asyncio
 
-        trend_task    = asyncio.create_task(self._score_trend())
-        vol_task      = asyncio.create_task(self._score_volatility())
-        breadth_task  = asyncio.create_task(self._score_breadth())
-        macro_task    = asyncio.create_task(self._score_macro())
+        trend_task = asyncio.create_task(self._score_trend())
+        vol_task = asyncio.create_task(self._score_volatility())
+        breadth_task = asyncio.create_task(self._score_breadth())
+        macro_task = asyncio.create_task(self._score_macro())
         momentum_task = asyncio.create_task(self._score_momentum())
 
         trend, vol, breadth, macro, momentum = await asyncio.gather(
-            trend_task, vol_task, breadth_task, macro_task, momentum_task,
+            trend_task,
+            vol_task,
+            breadth_task,
+            macro_task,
+            momentum_task,
             return_exceptions=True,
         )
 
@@ -399,19 +428,24 @@ class RegimeClassifier:
         import yfinance as yf
 
         spy_data = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: yf.download("SPY", period="1y", interval="1d", progress=False, auto_adjust=True)
+            None,
+            lambda: yf.download(
+                "SPY", period="1y", interval="1d", progress=False, auto_adjust=True
+            ),
         )
 
         # yf.download may return None on failure, protect our checks
         if spy_data is None or spy_data.empty or len(spy_data) < 50:
-            logger.warning("[RegimeClassifier] Insufficient SPY data for trend score; using 50")
+            logger.warning(
+                "[RegimeClassifier] Insufficient SPY data for trend score; using 50"
+            )
             return 50.0
 
         close = spy_data["Close"].dropna()
         price = float(close.iloc[-1])
 
-        ma20  = float(close.rolling(20).mean().iloc[-1])
-        ma50  = float(close.rolling(50).mean().iloc[-1])
+        ma20 = float(close.rolling(20).mean().iloc[-1])
+        ma50 = float(close.rolling(50).mean().iloc[-1])
         ma200 = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else ma50
 
         # 相对位置得分（0~100）
@@ -447,15 +481,22 @@ class RegimeClassifier:
         import yfinance as yf
 
         vix_data = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: yf.download("^VIX", period="60d", interval="1d", progress=False, auto_adjust=True)
+            None,
+            lambda: yf.download(
+                "^VIX", period="60d", interval="1d", progress=False, auto_adjust=True
+            ),
         )
 
         if vix_data is None or vix_data.empty:
             return 50.0
 
         vix_close = vix_data["Close"].dropna()
-        vix_now   = float(vix_close.iloc[-1])
-        vix_ma30  = float(vix_close.rolling(30).mean().iloc[-1]) if len(vix_close) >= 30 else vix_now
+        vix_now = float(vix_close.iloc[-1])
+        vix_ma30 = (
+            float(vix_close.rolling(30).mean().iloc[-1])
+            if len(vix_close) >= 30
+            else vix_now
+        )
 
         # VIX 水平基础分
         if vix_now < 12:
@@ -522,7 +563,7 @@ class RegimeClassifier:
 
         # 近 5 日 SPY 上涨天数比例
         spy_returns = spy_close.pct_change().dropna()
-        recent5     = spy_returns.iloc[-5:]
+        recent5 = spy_returns.iloc[-5:]
         up_days_pct = float((recent5 > 0).sum()) / len(recent5)
         score += (up_days_pct - 0.5) * 20  # ±10
 
@@ -536,8 +577,8 @@ class RegimeClassifier:
         如果 macroservice 不可用则 fallback 到 50。
         """
         try:
-            from app.services.macro_risk_scoring_service import \
-                MacroRiskScoringService
+            from app.services.macro_risk_scoring_service import MacroRiskScoringService
+
             macro_svc = MacroRiskScoringService()
             # 调用新接口计算风险评分
             risk_score = await macro_svc.calculate_macro_risk_score()
@@ -545,7 +586,10 @@ class RegimeClassifier:
             # 因此可直接使用该值作为正向得分
             # ORM model attributes are declared as Column[int], so use cast to satisfy type checker.
             from typing import cast
-            score_val = cast(int, risk_score.overall_score)  # convert Column[int] to int at runtime
+
+            score_val = cast(
+                int, risk_score.overall_score
+            )  # convert Column[int] to int at runtime
             score = float(score_val)
             return max(0.0, min(100.0, score))
         except Exception as exc:
@@ -565,13 +609,20 @@ class RegimeClassifier:
         import yfinance as yf
 
         spy_data = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: yf.download("SPY", period="60d", interval="1d", progress=False, auto_adjust=True)
+            None,
+            lambda: yf.download(
+                "SPY", period="60d", interval="1d", progress=False, auto_adjust=True
+            ),
         )
 
         if spy_data is None or spy_data.empty or len(spy_data) < 20:
             return 50.0
 
-        close = spy_data["Close"]["SPY"].dropna() if "SPY" in spy_data["Close"].columns else spy_data["Close"].dropna()
+        close = (
+            spy_data["Close"]["SPY"].dropna()
+            if "SPY" in spy_data["Close"].columns
+            else spy_data["Close"].dropna()
+        )
 
         if len(close) < 20:
             return 50.0
@@ -594,13 +645,14 @@ class RegimeClassifier:
     def _compute_rsi(prices, window: int = 14) -> float:
         """计算最新 RSI 值。"""
         import pandas as pd
+
         series = pd.Series(prices) if not hasattr(prices, "iloc") else prices
         delta = series.diff()
-        gain  = delta.clip(lower=0).rolling(window=window).mean()
-        loss  = (-delta.clip(upper=0)).rolling(window=window).mean()
-        rs    = gain / loss.replace(0, float("nan"))
-        rsi   = 100 - (100 / (1 + rs))
-        val   = rsi.iloc[-1]
+        gain = delta.clip(lower=0).rolling(window=window).mean()
+        loss = (-delta.clip(upper=0)).rolling(window=window).mean()
+        rs = gain / loss.replace(0, float("nan"))
+        rsi = 100 - (100 / (1 + rs))
+        val = rsi.iloc[-1]
         return float(val) if not (val != val) else 50.0  # nan → 50
 
     # ─────────────────────────────────────────────────
@@ -646,7 +698,11 @@ class RegimeClassifier:
         # 实际上我们在 redis 中缓存候选状态（此处用简化 DB 查询实现）
         # 查近 confirm_days - 1 条（不含今天），检查是否都是 candidate
         past_candidates = recent[: confirm_days - 1]  # 不含最新一条
-        consecutive = all(r.regime == candidate.value for r in past_candidates) if past_candidates else False
+        consecutive = (
+            all(r.regime == candidate.value for r in past_candidates)
+            if past_candidates
+            else False
+        )
 
         # 还需要这些记录是连续日期（每天一条）
         if consecutive and len(past_candidates) >= confirm_days - 1:
@@ -658,7 +714,9 @@ class RegimeClassifier:
     # 工具方法
     # ─────────────────────────────────────────────────
 
-    async def _close_current_regime(self, db: AsyncSession, close_time: datetime) -> None:
+    async def _close_current_regime(
+        self, db: AsyncSession, close_time: datetime
+    ) -> None:
         """将 valid_until=NULL 的最新体制记录设置结束时间。"""
         from sqlalchemy import update as sa_update
 
@@ -671,12 +729,12 @@ class RegimeClassifier:
     def _build_reasoning(self, regime: RegimeType, scores: RegimeScores) -> str:
         """生成人类可读的分类理由摘要。"""
         labels = {
-            RegimeType.BULL_TREND:   "📈 强势牛市趋势",
-            RegimeType.BEAR_TREND:   "📉 熊市下行趋势",
-            RegimeType.HIGH_VOL:     "🌪️ 高波动率环境",
-            RegimeType.MEAN_REVERT:  "↔️ 均值回复环境",
-            RegimeType.RANGE_BOUND:  "📊 区间震荡",
-            RegimeType.CRISIS:       "🚨 危机体制",
+            RegimeType.BULL_TREND: "📈 强势牛市趋势",
+            RegimeType.BEAR_TREND: "📉 熊市下行趋势",
+            RegimeType.HIGH_VOL: "🌪️ 高波动率环境",
+            RegimeType.MEAN_REVERT: "↔️ 均值回复环境",
+            RegimeType.RANGE_BOUND: "📊 区间震荡",
+            RegimeType.CRISIS: "🚨 危机体制",
         }
         return (
             f"{labels.get(regime, regime.value)}. "
