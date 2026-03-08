@@ -13,9 +13,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.logging_config import setup_logging
 from app.i18n import get_translator
-from app.models.db import (SessionLocal, engine, ensure_mysql_indexes,
-                           ensure_mysql_schema_updates, ensure_mysql_tables,
-                           get_session, redis_client)
+from app.models.db import (
+    SessionLocal,
+    engine,
+    ensure_mysql_indexes,
+    ensure_mysql_schema_updates,
+    ensure_mysql_tables,
+    get_session,
+    redis_client,
+)
 
 # 初始化系统日志
 setup_logging()
@@ -30,18 +36,22 @@ from app.core.cache import cache
 from app.core.proxy import ProxyConfig, apply_proxy_env
 from app.engine.auto_hedge_engine import AutoHedgeEngine
 from app.jobs.data_refresh_jobs import register_all_jobs
-from app.jobs.ghost_trade_jobs import \
-    update_ghost_trades_pnl  # V10.4.2: 幽灵交易追踪
-from app.jobs.paper_graduation_job import \
-    register_paper_graduation_job  # V10.1: Paper 毕业检查
+from app.jobs.ghost_trade_jobs import update_ghost_trades_pnl  # V10.4.2: 幽灵交易追踪
+from app.jobs.paper_graduation_job import (
+    register_paper_graduation_job,
+)  # V10.1: Paper 毕业检查
 from app.jobs.quant_loop_jobs import register_quant_loop_jobs  # NEW: 闭环定时任务
 from app.jobs.regime_jobs import register_regime_jobs  # V10.2-M1: 市场体制分类任务
-from app.jobs.scheduler import (add_job, init_scheduler, pause_scheduler,
-                                shutdown_scheduler, start_scheduler)
-from app.jobs.task_config_jobs import \
-    register_task_config_jobs  # V10: 动态配置同步任务
-from app.providers.market_data_provider import (MarketDataProvider,
-                                                market_data_provider)
+from app.jobs.scheduler import (
+    add_job,
+    init_scheduler,
+    pause_scheduler,
+    shutdown_scheduler,
+    start_scheduler,
+)
+from app.jobs.task_config_jobs import register_task_config_jobs  # V10: 动态配置同步任务
+from app.providers.market_data_provider import MarketDataProvider, market_data_provider
+
 # V9 routers
 # V10.3.3 新路由
 # V10.2-M2-M8 新路由
@@ -91,11 +101,19 @@ from app.routers import journal as v9_journal
 from app.routers import orders as v9_orders
 from app.routers import position_macro, strategy, trading_plan
 from app.routers import websocket as v9_websocket
-from app.schemas.ai_advice import (AiAdviceRequest, AiAdviceResponse,
-                                   KlineAnalysisRequest, KlineAnalysisResponse,
-                                   SymbolSearchResponse)
-from app.schemas.ai_state import (AiStateView, ExposureView, LimitsView,
-                                  SymbolBehaviorView)
+from app.schemas.ai_advice import (
+    AiAdviceRequest,
+    AiAdviceResponse,
+    KlineAnalysisRequest,
+    KlineAnalysisResponse,
+    SymbolSearchResponse,
+)
+from app.schemas.ai_state import (
+    AiStateView,
+    ExposureView,
+    LimitsView,
+    SymbolBehaviorView,
+)
 from app.schemas.scheduler import JobScheduleRequest
 from app.services.ai_advice_service import AiAdviceService
 from app.services.behavior_scoring_service import BehaviorScoringService
@@ -201,8 +219,7 @@ def _begin_fast_shutdown(source: str) -> None:
     logger.info("[Shutdown] Fast shutdown triggered by %s", source)
 
     try:
-        from app.routers.websocket import (close_all_websockets,
-                                           mark_shutdown_started)
+        from app.routers.websocket import close_all_websockets, mark_shutdown_started
 
         mark_shutdown_started()
         loop = asyncio.get_running_loop()
@@ -277,8 +294,7 @@ async def _warm_up_caches() -> None:
             _regime_stale = (
                 _current_regime is None
                 or (
-                    datetime.now(UTC).replace(tzinfo=None)
-                    - _current_regime.created_at
+                    datetime.now(UTC).replace(tzinfo=None) - _current_regime.created_at
                 ).total_seconds()
                 / 3600
                 > _REGIME_STALE_H
@@ -300,8 +316,7 @@ async def _warm_up_caches() -> None:
 
     # 2. Dashboard 净值汇总
     try:
-        from app.services.dashboard_v2_service import \
-            DashboardV2Service  # type: ignore
+        from app.services.dashboard_v2_service import DashboardV2Service  # type: ignore
 
         async with SessionLocal() as _db:
             svc = DashboardV2Service(_db)
@@ -502,6 +517,14 @@ async def lifespan(app: FastAPI):
             )  # V10.4: 数据自动同步 (journal关闭/actual_return/归因)
         except ImportError:
             pass
+        try:
+            from app.jobs.post_mortem_jobs import register_post_mortem_jobs
+
+            register_post_mortem_jobs(
+                scheduler
+            )  # V10.5.2: 事后决策剖析自动化（EventBus + 每日兜底）
+        except ImportError:
+            pass
         # V10.4.2: 幽灵交易每日追踪（美东 16:35，盘后）
         try:
             scheduler.add_job(
@@ -547,8 +570,9 @@ async def lifespan(app: FastAPI):
 
     # V10.2-M1: 注册体制感知事件处理器（EventBus）
     try:
-        from app.services.regime_strategy_allocator import \
-            register_handlers as _reg_regime_handlers
+        from app.services.regime_strategy_allocator import (
+            register_handlers as _reg_regime_handlers,
+        )
 
         _reg_regime_handlers()
     except Exception as _e:

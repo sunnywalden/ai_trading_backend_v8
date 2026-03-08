@@ -21,6 +21,7 @@
   WARNING  → 降级至 SEMI
   CRITICAL → 冻结新开仓（仅允许减仓/平仓）
 """
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -35,11 +36,11 @@ _CRITICAL = "CRITICAL"
 
 # 每项数据源配置：(key, warn_hours, crit_hours, action_on_crit)
 _SOURCE_CONFIG: list[tuple[str, float, float, str]] = [
-    ("quote_data",      2.0,  6.0,   "DEGRADE_TO_SEMI"),
-    ("positions",       4.0,  24.0,  "FREEZE_NEW_OPEN"),
-    ("event_calendar",  48.0, 120.0, "DEGRADE_TO_SEMI"),
-    ("factor_snapshot", 24.0, 72.0,  "DEGRADE_TO_SEMI"),
-    ("market_regime",   24.0, 72.0,  "DEGRADE_TO_SEMI"),
+    ("quote_data", 2.0, 6.0, "DEGRADE_TO_SEMI"),
+    ("positions", 4.0, 24.0, "FREEZE_NEW_OPEN"),
+    ("event_calendar", 48.0, 120.0, "DEGRADE_TO_SEMI"),
+    ("factor_snapshot", 24.0, 72.0, "DEGRADE_TO_SEMI"),
+    ("market_regime", 24.0, 72.0, "DEGRADE_TO_SEMI"),
 ]
 
 
@@ -114,11 +115,7 @@ class DataFreshnessGuardService:
             from app.models.position import Position
             from app.models.trading_plan import TradingPlan
 
-            pos_stmt = (
-                select(Position.id)
-                .where(Position.account_id.in_(keys))
-                .limit(1)
-            )
+            pos_stmt = select(Position.id).where(Position.account_id.in_(keys)).limit(1)
             if (await db.execute(pos_stmt)).scalar_one_or_none() is not None:
                 return True
 
@@ -130,9 +127,7 @@ class DataFreshnessGuardService:
                 )
                 .limit(1)
             )
-            return (
-                (await db.execute(plan_stmt)).scalar_one_or_none() is not None
-            )
+            return (await db.execute(plan_stmt)).scalar_one_or_none() is not None
         except Exception:
             return False
 
@@ -175,9 +170,7 @@ class DataFreshnessGuardService:
             # Fallback 1: account-agnostic internal positions,
             # 避免 account_id 口径不一致误判。
             stmt_any = (
-                select(Position.updated_at)
-                .order_by(desc(Position.updated_at))
-                .limit(1)
+                select(Position.updated_at).order_by(desc(Position.updated_at)).limit(1)
             )
             result_any = await db.execute(stmt_any)
             row_any = result_any.scalar_one_or_none()
@@ -201,12 +194,11 @@ class DataFreshnessGuardService:
     async def _latest_event(db: AsyncSession) -> datetime | None:
         try:
             from app.models.event_calendar import EventCalendarEntry
-            from app.services.event_calendar_service import \
-                event_calendar_service
+            from app.services.event_calendar_service import event_calendar_service
 
             stmt = (
-                select(EventCalendarEntry.created_at)
-                .order_by(desc(EventCalendarEntry.created_at))
+                select(EventCalendarEntry.updated_at)
+                .order_by(desc(EventCalendarEntry.updated_at))
                 .limit(1)
             )
             result = await db.execute(stmt)
@@ -218,8 +210,8 @@ class DataFreshnessGuardService:
             await event_calendar_service.ensure_calendar_seeded(db, days=7)
 
             stmt = (
-                select(EventCalendarEntry.created_at)
-                .order_by(desc(EventCalendarEntry.created_at))
+                select(EventCalendarEntry.updated_at)
+                .order_by(desc(EventCalendarEntry.updated_at))
                 .limit(1)
             )
             result = await db.execute(stmt)
@@ -233,8 +225,7 @@ class DataFreshnessGuardService:
         keys: list[str],
     ) -> datetime | None:
         try:
-            from app.models.portfolio_factor_exposure import \
-                PortfolioFactorExposure
+            from app.models.portfolio_factor_exposure import PortfolioFactorExposure
 
             stmt = (
                 select(PortfolioFactorExposure.snapshot_at)
@@ -264,15 +255,14 @@ class DataFreshnessGuardService:
                 return _utc_now_naive()
 
             # 尝试即时补一张快照，解决冷启动窗口内 job 尚未运行的问题。
-            from app.services.risk_observability_service import \
-                risk_observability_service
+            from app.services.risk_observability_service import (
+                risk_observability_service,
+            )
 
             account_id = keys[0] if keys else ""
-            seeded = await (
-                risk_observability_service.seed_snapshot_from_live_data(
-                    db,
-                    account_id,
-                )
+            seeded = await risk_observability_service.seed_snapshot_from_live_data(
+                db,
+                account_id,
             )
             if seeded:
                 retry_stmt = (
@@ -294,8 +284,9 @@ class DataFreshnessGuardService:
         try:
             from app.models.market_regime import MarketRegime
             from app.services.regime_classifier import regime_classifier
-            from app.services.regime_strategy_allocator import \
-                fetch_current_regime_from_redis
+            from app.services.regime_strategy_allocator import (
+                fetch_current_regime_from_redis,
+            )
 
             # 使用 classification_date（体制最后一次被分类的时间），
             # 而非 created_at（DB 行创建时间），以准确反映数据新鲜度。
@@ -367,9 +358,7 @@ class DataFreshnessGuardService:
                 {
                     "source": source_key,
                     "last_seen": last_seen.isoformat() if last_seen else None,
-                    "age_hours": (
-                        round(age_h, 2) if age_h is not None else None
-                    ),
+                    "age_hours": (round(age_h, 2) if age_h is not None else None),
                     "warn_threshold_hours": effective_warn_h,
                     "crit_threshold_hours": effective_crit_h,
                     "status": status,
@@ -389,8 +378,7 @@ class DataFreshnessGuardService:
 
         # 冻结新开仓标志：仓位数据 CRITICAL 时触发
         freeze_new_open = any(
-            m["status"] == _CRITICAL
-            and m["action_on_critical"] == "FREEZE_NEW_OPEN"
+            m["status"] == _CRITICAL and m["action_on_critical"] == "FREEZE_NEW_OPEN"
             for m in matrix
         )
         recommended_action: str
