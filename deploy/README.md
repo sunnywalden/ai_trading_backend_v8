@@ -26,7 +26,7 @@
 
 ```bash
 # 在 ai_trading_backend_v8 目录下执行
-docker build -f deploy/Dockerfile -t sunnywalden/ai-trading-backend:latest .
+docker build -f deploy/Dockerfile --platform linux/arm64 -t sunnywalden/ai-trading-backend:latest .
 docker tag sunnywalden/ai-trading-backend:latest sunnywalden/ai-trading-backend:v1.0.0
 docker push sunnywalden/ai-trading-backend:latest
 docker push sunnywalden/ai-trading-backend:v1.0.0
