@@ -297,9 +297,13 @@ class DataFreshnessGuardService:
             from app.services.regime_strategy_allocator import \
                 fetch_current_regime_from_redis
 
+            # 使用 classification_date（体制最后一次被分类的时间），
+            # 而非 created_at（DB 行创建时间），以准确反映数据新鲜度。
+            # 当体制未切换时，regime_classifier.run() 会 UPDATE classification_date，
+            # 所以此字段始终代表上次成功运行分类器的时间。
             stmt = (
-                select(MarketRegime.created_at)
-                .order_by(desc(MarketRegime.created_at))
+                select(MarketRegime.classification_date)
+                .order_by(desc(MarketRegime.classification_date))
                 .limit(1)
             )
             result = await db.execute(stmt)

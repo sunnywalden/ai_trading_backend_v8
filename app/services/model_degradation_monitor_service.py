@@ -100,18 +100,28 @@ class ModelDegradationMonitorService:
             else:
                 prev_list.append(sig)
 
+        _MIN_EVAL = 5  # 两个窗口各自至少需要 5 条已结算信号才能计算漂移
+
+        def _hit_rate_or_none(sigs: list[Any]) -> float | None:
+            """计算命中率；若已结算样本不足 _MIN_EVAL 则返回 None（数据不足）。"""
+            evaluated = [s for s in sigs if s.actual_return is not None]
+            if len(evaluated) < _MIN_EVAL:
+                return None  # 不足以判断，避免基线为 0 引起虚假漂移报警
+            wins = [s for s in evaluated if _safe_float(s.actual_return) > 0]
+            return len(wins) / len(evaluated)
+
         results: list[dict[str, Any]] = []
         for strategy_id, (recent_sigs, prev_sigs) in by_strategy.items():
-            if len(recent_sigs) < 5 and len(prev_sigs) < 5:
+            # 任一窗口信号量不足，跳过（原代码使用 and，导致 prev 为空时仍计算）
+            if len(recent_sigs) < _MIN_EVAL or len(prev_sigs) < _MIN_EVAL:
                 continue
 
-            def _hit_rate(sigs: list[Any]) -> float:
-                evaluated = [s for s in sigs if s.actual_return is not None]
-                wins = [s for s in evaluated if _safe_float(s.actual_return) > 0]
-                return len(wins) / len(evaluated) if evaluated else 0.0
+            current = _hit_rate_or_none(recent_sigs)
+            baseline = _hit_rate_or_none(prev_sigs)
+            # 若任一窗口已结算样本不足，跳过（避免 baseline=0% 的虚假 CRITICAL）
+            if current is None or baseline is None:
+                continue
 
-            current = _hit_rate(recent_sigs)
-            baseline = _hit_rate(prev_sigs)
             drift = baseline - current  # positive = hit rate fell
             magnitude = abs(drift)
             results.append(
@@ -126,6 +136,8 @@ class ModelDegradationMonitorService:
                     "details": {
                         "recent_sample": len(recent_sigs),
                         "prev_sample": len(prev_sigs),
+                        "recent_evaluated": len([s for s in recent_sigs if s.actual_return is not None]),
+                        "prev_evaluated": len([s for s in prev_sigs if s.actual_return is not None]),
                         "window_days": 30,
                     },
                 }
