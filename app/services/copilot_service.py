@@ -31,6 +31,28 @@ INTENT_PATTERNS = [
 class CopilotService:
     """对话式 AI，支持自然语言查询 + 操作意图识别"""
 
+    @staticmethod
+    def _morning_brief_cache_looks_stale(cached: dict[str, Any]) -> bool:
+        """识别明显过期/错误的早间简报缓存。"""
+        if not isinstance(cached, dict):
+            return False
+
+        snapshot = cached.get("portfolio_snapshot") or {}
+        positions_count = int((snapshot or {}).get("positions_count") or 0)
+        summary = str(cached.get("summary") or "")
+        false_empty_markers = (
+            "空仓",
+            "无历史盈亏记录",
+            "当前无持仓",
+            "持仓 0",
+            "持仓0",
+            "positions_count: 0",
+        )
+        has_top_signals = bool(cached.get("top_signals"))
+        return positions_count == 0 and (
+            has_top_signals or any(marker in summary for marker in false_empty_markers)
+        )
+
     async def _resolve_context_account_id(self, account_id: str) -> str:
         """将登录用户标识解析为真实 broker account_id。"""
         try:
@@ -266,6 +288,16 @@ class CopilotService:
         if not force_refresh:
             cached = await cache.get(cache_key)
             if cached:
+                if not self._morning_brief_cache_looks_stale(cached):
+                    return cached
+
+                context = await self._build_context(account_id)
+                if int(context.get("positions_count") or 0) > 0:
+                    normalized_cached = self._normalize_morning_brief_result(
+                        dict(cached), context
+                    )
+                    await cache.set(cache_key, normalized_cached, expire=3600 * 4)
+                    return normalized_cached
                 return cached
 
         context = await self._build_context(account_id)
