@@ -195,6 +195,13 @@ class PositionQueryService:
 
 
 def _pos_to_dict(p: Position) -> dict[str, Any]:
+    execution_path = getattr(p, "execution_path", None) or getattr(
+        p, "closing_source", None
+    )
+    exemption_detail = getattr(p, "exemption_detail", None) or getattr(
+        p, "exemption_reason", None
+    )
+
     return {
         "id": p.id,
         "account_id": p.account_id,
@@ -212,11 +219,11 @@ def _pos_to_dict(p: Position) -> dict[str, Any]:
         "stop_loss_price": p.stop_loss_price,
         "take_profit_price": p.take_profit_price,
         "max_holding_days": p.max_holding_days,
-        "execution_path": p.execution_path,
+        "execution_path": execution_path,
         "closing_reason": p.closing_reason,
         "closing_source": p.closing_source,
         "exemption_active": p.exemption_active,
-        "exemption_detail": p.exemption_detail,
+        "exemption_detail": exemption_detail,
         "governance_flag": p.governance_flag,
         "initial_signal_id": p.initial_signal_id,
         "initial_signal_uid": p.initial_signal_uid,
