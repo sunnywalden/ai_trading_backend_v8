@@ -294,8 +294,10 @@ class AutonomyHealthMonitor:
         try:
             from sqlalchemy import text
 
+            from app.services.quote_freshness_service import \
+                get_latest_quote_timestamp
+
             plan_table = self._trading_plan_table_name()
-            technical_indicator_table = self._technical_indicator_table_name()
 
             # 与 signal_freshness 语义保持一致：无活跃计划时不做行情时效硬告警
             active_row = (await db.execute(
@@ -312,20 +314,14 @@ class AutonomyHealthMonitor:
                     message="无活跃计划，跳过行情时效检查",
                 )
 
-            row = (await db.execute(
-                text(f"SELECT MAX(timestamp) FROM {technical_indicator_table}")
-            )).fetchone()
-            if not row or row[0] is None:
-                # 可能是表名不同，尝试 technical_indicator
-                row = (await db.execute(
-                    text("SELECT MAX(timestamp) FROM technical_indicator")
-                )).fetchone()
-            if not row or row[0] is None:
+            latest = await get_latest_quote_timestamp(
+                db,
+                allow_self_heal=True,
+            )
+            if latest is None:
                 return HealthCheckResult(name=name, status="WARN",
                                          message="行情指标表为空或无数据")
-            latest = row[0]
-            if hasattr(latest, 'replace'):
-                latest = latest.replace(tzinfo=timezone.utc)
+            latest = latest.replace(tzinfo=timezone.utc)
             age_min = (datetime.now(tz=timezone.utc) - latest).total_seconds() / 60
             # 交易时段判断（美东 09:30-16:00，工作日）
             from zoneinfo import ZoneInfo

@@ -3,7 +3,7 @@
 数据陈旧度矩阵（Data Freshness Kill Matrix）。
 
 检测以下数据源的时效性：
-  1. quote_data      — 行情数据（通过 TechnicalIndicator 创建时间代理）
+    1. quote_data      — 行情数据（TechnicalIndicator + freshness heartbeat 自愈）
   2. positions       — 仓位数据（PortfolioSnapshot 更新时间）
   3. event_calendar  — 事件日历（EventCalendar 最新事件时间）
   4. factor_snapshot — 因子快照（PortfolioFactorExposure 更新时间）
@@ -132,18 +132,27 @@ class DataFreshnessGuardService:
             return False
 
     @staticmethod
-    async def _latest_quote(db: AsyncSession) -> datetime | None:
+    async def _latest_quote(
+        db: AsyncSession,
+        keys: list[str],
+    ) -> datetime | None:
         try:
-            from app.models.technical_indicator import TechnicalIndicator
+            from app.services.quote_freshness_service import \
+                get_latest_quote_timestamp
 
-            stmt = (
-                select(TechnicalIndicator.timestamp)
-                .order_by(desc(TechnicalIndicator.timestamp))
-                .limit(1)
+            latest = await get_latest_quote_timestamp(
+                db,
+                account_id=keys[0] if keys else None,
+                allow_self_heal=True,
             )
-            result = await db.execute(stmt)
-            row = result.scalar_one_or_none()
-            return row
+            if latest is not None:
+                return latest
+
+            if not await DataFreshnessGuardService._has_portfolio_risk_context(
+                db, keys
+            ):
+                return _utc_now_naive()
+            return None
         except Exception:
             return None
 
@@ -194,7 +203,8 @@ class DataFreshnessGuardService:
     async def _latest_event(db: AsyncSession) -> datetime | None:
         try:
             from app.models.event_calendar import EventCalendarEntry
-            from app.services.event_calendar_service import event_calendar_service
+            from app.services.event_calendar_service import \
+                event_calendar_service
 
             stmt = (
                 select(EventCalendarEntry.updated_at)
@@ -225,7 +235,8 @@ class DataFreshnessGuardService:
         keys: list[str],
     ) -> datetime | None:
         try:
-            from app.models.portfolio_factor_exposure import PortfolioFactorExposure
+            from app.models.portfolio_factor_exposure import \
+                PortfolioFactorExposure
 
             stmt = (
                 select(PortfolioFactorExposure.snapshot_at)
@@ -255,9 +266,8 @@ class DataFreshnessGuardService:
                 return _utc_now_naive()
 
             # 尝试即时补一张快照，解决冷启动窗口内 job 尚未运行的问题。
-            from app.services.risk_observability_service import (
-                risk_observability_service,
-            )
+            from app.services.risk_observability_service import \
+                risk_observability_service
 
             account_id = keys[0] if keys else ""
             seeded = await risk_observability_service.seed_snapshot_from_live_data(
@@ -284,9 +294,8 @@ class DataFreshnessGuardService:
         try:
             from app.models.market_regime import MarketRegime
             from app.services.regime_classifier import regime_classifier
-            from app.services.regime_strategy_allocator import (
-                fetch_current_regime_from_redis,
-            )
+            from app.services.regime_strategy_allocator import \
+                fetch_current_regime_from_redis
 
             # 使用 classification_date（体制最后一次被分类的时间），
             # 而非 created_at（DB 行创建时间），以准确反映数据新鲜度。
@@ -336,7 +345,7 @@ class DataFreshnessGuardService:
         now = _utc_now_naive()
 
         latest_times: dict[str, datetime | None] = {
-            "quote_data": await self._latest_quote(db),
+            "quote_data": await self._latest_quote(db, keys),
             "positions": await self._latest_position(db, keys),
             "event_calendar": await self._latest_event(db),
             "factor_snapshot": await self._latest_factor(db, keys),
