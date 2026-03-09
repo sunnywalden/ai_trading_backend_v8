@@ -216,6 +216,30 @@ class SignalEngine:
             signal_dims.get('risk_score', 50.0)
         )
         
+        signal_extra_metadata = {
+            "strategy_name": (
+                strategy_run.strategy.name if strategy_run.strategy else None
+            ),
+            "strategy_version": strategy_run.strategy_version,
+            "run_universe": strategy_run.target_universe,
+            "watchtower_stage": "SIGNAL_GENERATION",
+            "watchtower_result": "PENDING",
+            "watchtower_reason_category": "GENERATION",
+        }
+        for key in (
+            "dimensions",
+            "aligned_count",
+            "aligned_dims",
+            "opposing_dims",
+            "neutral_dims",
+            "adv_usd",
+            "market_cap",
+            "historical_ic",
+            "timing_quality",
+        ):
+            if signal_dims.get(key) is not None:
+                signal_extra_metadata[key] = signal_dims.get(key)
+
         # ✨ 创建新信号
         signal = TradingSignal(
             signal_id=str(uuid4()),
@@ -249,11 +273,7 @@ class SignalEngine:
             account_id=strategy_run.account_id,
             user_id=strategy_run.user_id,
             
-            extra_metadata={
-                "strategy_name": strategy_run.strategy.name if strategy_run.strategy else None,
-                "strategy_version": strategy_run.strategy_version,
-                "run_universe": strategy_run.target_universe,
-            },
+            extra_metadata=signal_extra_metadata,
             
             priority=int(new_signal_strength),
             expired_at=datetime.utcnow() + timedelta(hours=24),  # 信号24小时有效
@@ -282,6 +302,100 @@ class SignalEngine:
         
         position_size = base_size * risk_adjustment
         return max(0.05, min(0.30, position_size))  # 限制在5%-30%
+
+    @staticmethod
+    def _safe_dict(value: Any) -> Dict[str, Any]:
+        return value if isinstance(value, dict) else {}
+
+    async def _build_quality_watchtower_context(
+        self,
+        signal: TradingSignal,
+    ) -> Dict[str, Any]:
+        from app.services.regime_classifier import RegimeClassifier
+        from app.services.signal_quality_funnel import (SignalFunnelInput,
+                                                        signal_quality_funnel)
+
+        extra = self._safe_dict(signal.extra_metadata)
+        factor_scores = self._safe_dict(signal.factor_scores)
+        current_regime = await RegimeClassifier.get_current_regime(self.session)
+        regime = (
+            getattr(current_regime, "regime", None)
+            or extra.get("watchtower_regime")
+            or "SIDEWAYS"
+        )
+        confidence = float(signal.confidence or 0.0)
+        composite_ratio = confidence / 100.0 if confidence > 1.0 else confidence
+        aligned_dims = extra.get("aligned_dims") or factor_scores.get("aligned_dims") or []
+        opposing_dims = extra.get("opposing_dims") or factor_scores.get("opposing_dims") or []
+        neutral_dims = extra.get("neutral_dims") or factor_scores.get("neutral_dims") or []
+
+        funnel_input = SignalFunnelInput(
+            signal_id=getattr(signal, "id", None),
+            symbol=str(signal.symbol or ""),
+            direction=str(signal.direction or "LONG").upper(),
+            regime=regime,
+            signal_type=(
+                signal.signal_type.value
+                if getattr(signal, "signal_type", None)
+                else "ENTRY"
+            ),
+            signal_strength=float(signal.signal_strength or 0.0),
+            composite_score=composite_ratio,
+            aligned_count=int(
+                extra.get("aligned_count")
+                or factor_scores.get("aligned_count")
+                or 0
+            ),
+            aligned_dims=list(aligned_dims or []),
+            opposing_dims=list(opposing_dims or []),
+            neutral_dims=list(neutral_dims or []),
+            adv_usd=extra.get("adv_usd") or factor_scores.get("adv_usd"),
+            market_cap=extra.get("market_cap") or factor_scores.get("market_cap"),
+            historical_ic=(
+                extra.get("historical_ic")
+                or factor_scores.get("historical_ic")
+            ),
+            timing_quality=(
+                extra.get("timing_quality")
+                or factor_scores.get("timing_quality")
+            ),
+        )
+        profile = signal_quality_funnel.preview_quality(funnel_input)
+        return {
+            "regime": regime,
+            "signal_quality_score": round(profile.score, 2),
+            "signal_quality_tier": profile.tier,
+            "signal_quality_quota_exempt": profile.quota_exempt,
+            "anti_resonance_triggered": bool(
+                profile.conviction and profile.conviction.anti_resonance_killed
+            ),
+        }
+
+    async def _stamp_watchtower_metadata(
+        self,
+        signal: TradingSignal,
+        *,
+        stage: str,
+        result: str,
+        reason_code: str | None = None,
+        reason_detail: str | None = None,
+        rejected_at_layer: int | None = None,
+        reason_category: str = "VALIDATION",
+    ) -> None:
+        meta = self._safe_dict(signal.extra_metadata).copy()
+        meta.update(await self._build_quality_watchtower_context(signal))
+        meta.update(
+            {
+                "watchtower_stage": stage,
+                "watchtower_result": result,
+                "watchtower_reason_code": reason_code,
+                "watchtower_reason_detail": reason_detail,
+                "watchtower_reason_category": reason_category,
+                "watchtower_rejected_at_layer": rejected_at_layer,
+                "watchtower_updated_at": datetime.utcnow().isoformat(),
+            }
+        )
+        signal.extra_metadata = meta
     
     async def validate_signal(self, signal_id: str) -> bool:
         """
@@ -297,6 +411,13 @@ class SignalEngine:
         # 检查信号是否过期
         if signal.expired_at and signal.expired_at < datetime.utcnow():
             signal.status = SignalStatus.EXPIRED
+            await self._stamp_watchtower_metadata(
+                signal,
+                stage="SIGNAL_VALIDATION",
+                result="REJECTED",
+                reason_code="SIGNAL_EXPIRED",
+                reason_detail="Signal expired before validation",
+            )
             await self.session.commit()
             return False
         
@@ -307,6 +428,13 @@ class SignalEngine:
             signal.status = SignalStatus.REJECTED
             signal.risk_check_passed = "NO"
             signal.risk_check_details = {"reason": "Trading mode is OFF"}
+            await self._stamp_watchtower_metadata(
+                signal,
+                stage="SIGNAL_VALIDATION",
+                result="REJECTED",
+                reason_code="TRADING_MODE_OFF",
+                reason_detail="Trading mode is OFF",
+            )
             await self.session.commit()
             return False
         
@@ -324,6 +452,13 @@ class SignalEngine:
                 "triggers": getattr(check, "triggers", [])
             }
             signal.validation_errors = [check.reason]
+            await self._stamp_watchtower_metadata(
+                signal,
+                stage="SIGNAL_VALIDATION",
+                result="REJECTED",
+                reason_code="SIGNAL_VALIDATION_BLOCKED",
+                reason_detail=str(check.reason or "SafetyGuard blocked order"),
+            )
             await self.session.commit()
             return False
         
@@ -331,6 +466,11 @@ class SignalEngine:
         signal.status = SignalStatus.VALIDATED
         signal.risk_check_passed = "YES"
         signal.validated_at = datetime.utcnow()
+        await self._stamp_watchtower_metadata(
+            signal,
+            stage="SIGNAL_VALIDATION",
+            result="PASSED",
+        )
         await self.session.commit()
         
         return True

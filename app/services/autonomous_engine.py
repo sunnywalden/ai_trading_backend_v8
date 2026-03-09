@@ -350,6 +350,77 @@ class AutonomousEngine:
         if bypass_reason:
             details["bypass_reason"] = bypass_reason
 
+    async def _update_signal_watchtower_metadata(
+        self,
+        db: AsyncSession,
+        signal_db_id: Optional[int],
+        *,
+        stage: str,
+        result: str,
+        reason_code: Optional[str] = None,
+        reason_detail: Optional[str] = None,
+        rejected_at_layer: Optional[int] = None,
+        reason_category: Optional[str] = None,
+        regime: Optional[str] = None,
+        signal_quality_tier: Optional[str] = None,
+        signal_quality_score: Optional[float] = None,
+        signal_quality_quota_exempt: Optional[bool] = None,
+    ) -> None:
+        if not signal_db_id:
+            return
+
+        from sqlalchemy import select
+
+        from app.models.trading_signal import TradingSignal
+
+        try:
+            record = await db.execute(
+                select(TradingSignal).where(TradingSignal.id == signal_db_id)
+            )
+            signal = record.scalars().first()
+            if signal is None:
+                return
+
+            meta = signal.extra_metadata if isinstance(signal.extra_metadata, dict) else {}
+            meta = dict(meta)
+            meta.update(
+                {
+                    "watchtower_stage": stage,
+                    "watchtower_result": result,
+                    "watchtower_reason_code": reason_code,
+                    "watchtower_reason_detail": reason_detail,
+                    "watchtower_reason_category": reason_category or stage,
+                    "watchtower_rejected_at_layer": rejected_at_layer,
+                    "watchtower_updated_at": datetime.utcnow().isoformat(),
+                }
+            )
+            if regime is not None:
+                meta["watchtower_regime"] = regime
+            if signal_quality_tier is not None:
+                meta["signal_quality_tier"] = signal_quality_tier
+            if signal_quality_score is not None:
+                meta["signal_quality_score"] = signal_quality_score
+            if signal_quality_quota_exempt is not None:
+                meta["signal_quality_quota_exempt"] = signal_quality_quota_exempt
+
+            if stage == "QUALITY_FUNNEL":
+                meta["funnel_rejected_at_layer"] = rejected_at_layer
+                meta["funnel_rejection_reason"] = reason_code
+                meta["funnel_rejection_detail"] = reason_detail
+
+            signal.extra_metadata = meta
+            await db.commit()
+        except Exception as exc:
+            logger.warning(
+                "[AutonomousEngine] Failed to update watchtower metadata for signal %s: %s",
+                signal_db_id,
+                exc,
+            )
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+
     async def restore_state(self) -> None:
         """应用启动时从 Redis 恢复暂停状态，防止重启丢失互斥状态。"""
         try:
@@ -377,9 +448,8 @@ class AutonomousEngine:
         regime_at_decision: Optional[str] = None
         regime_confidence: Optional[float] = None
         try:
-            from app.services.regime_strategy_allocator import (
-                fetch_current_regime_from_redis,
-            )
+            from app.services.regime_strategy_allocator import \
+                fetch_current_regime_from_redis
 
             regime_info = await fetch_current_regime_from_redis()
             if regime_info.get("regime") not in (None, "UNKNOWN"):
@@ -444,9 +514,8 @@ class AutonomousEngine:
         _arbiter_approved_ids: set = set()  # 通过仲裁的信号 id 集合
         _arbiter_rejected_ids: set = set()  # 仲裁拒绝信号 id 集合
         try:
-            from app.services.signal_quality_config import (
-                get_signal_quality_config as _sq_cfg,
-            )
+            from app.services.signal_quality_config import \
+                get_signal_quality_config as _sq_cfg
 
             _sq = _sq_cfg()
             _entry_signals = [
@@ -459,10 +528,10 @@ class AutonomousEngine:
                 and len(current_positions) >= _sq.MAX_CONCURRENT_POSITIONS
                 and _entry_signals
             ):
-                from app.services.capacity_arbiter import capacity_arbiter_service
-                from app.services.signal_quality_config import (
-                    get_regime_adjusted_config as _regime_cfg,
-                )
+                from app.services.capacity_arbiter import \
+                    capacity_arbiter_service
+                from app.services.signal_quality_config import \
+                    get_regime_adjusted_config as _regime_cfg
 
                 _r_cfg = _regime_cfg(regime_at_decision or "SIDEWAYS")
                 _max_pos = _r_cfg.get(
@@ -507,6 +576,22 @@ class AutonomousEngine:
                     _sig_id,
                 )
                 await self._update_signal_status(db, _sig_id, _SS.REJECTED)
+                await self._update_signal_watchtower_metadata(
+                    db,
+                    _sig_id,
+                    stage="QUALITY_FUNNEL",
+                    result="REJECTED",
+                    reason_code="SEAT_COMPETITION_ELIMINATED",
+                    reason_detail="Signal eliminated by CapacityArbiter seat competition",
+                    rejected_at_layer=2,
+                    reason_category="QUALITY_FUNNEL",
+                    regime=regime_at_decision,
+                    signal_quality_tier=signal.get("signal_quality_tier"),
+                    signal_quality_score=signal.get("signal_quality_score"),
+                    signal_quality_quota_exempt=bool(
+                        signal.get("signal_quality_quota_exempt")
+                    ),
+                )
                 results.append(
                     {
                         "signal_id": _sig_id,
@@ -554,9 +639,7 @@ class AutonomousEngine:
                     )
                 else:
                     from app.services.signal_quality_funnel import (
-                        SignalFunnelInput,
-                        signal_quality_funnel,
-                    )
+                        SignalFunnelInput, signal_quality_funnel)
 
                     _funnel_input = self._build_signal_funnel_input(
                         signal, regime_at_decision
@@ -587,6 +670,20 @@ class AutonomousEngine:
                             f"{_reject_reason}"
                         )
                         await self._update_signal_status(db, signal["id"], _SS.REJECTED)
+                        await self._update_signal_watchtower_metadata(
+                            db,
+                            signal["id"],
+                            stage="QUALITY_FUNNEL",
+                            result="REJECTED",
+                            reason_code=str(_funnel_decision.rejection_reason),
+                            reason_detail=_funnel_decision.rejection_detail,
+                            rejected_at_layer=_funnel_decision.rejected_at_layer,
+                            reason_category="QUALITY_FUNNEL",
+                            regime=regime_at_decision,
+                            signal_quality_tier=_funnel_decision.signal_quality_tier,
+                            signal_quality_score=_funnel_decision.signal_quality_score,
+                            signal_quality_quota_exempt=_funnel_decision.quota_exempt,
+                        )
                         results.append(
                             {
                                 "signal_id": signal["id"],
@@ -608,6 +705,23 @@ class AutonomousEngine:
 
             if not _funnel_passed:
                 continue
+
+            await self._update_signal_watchtower_metadata(
+                db,
+                signal.get("id"),
+                stage="QUALITY_FUNNEL",
+                result="PASSED",
+                reason_code=None,
+                reason_detail=None,
+                rejected_at_layer=None,
+                reason_category="QUALITY_FUNNEL",
+                regime=regime_at_decision,
+                signal_quality_tier=decision.get("signal_quality_tier"),
+                signal_quality_score=decision.get("signal_quality_score"),
+                signal_quality_quota_exempt=bool(
+                    decision.get("signal_quality_quota_exempt")
+                ),
+            )
             # ─── 品质漏斗通过 → 继续 RiskGate ──────────────────────────────────
 
             gate = await risk_gate_service.check(
@@ -658,6 +772,21 @@ class AutonomousEngine:
                 )
                 # 将信号回退为 VALIDATED，等待炴断器解除后重试
                 await self._update_signal_status(db, signal["id"], _SS.VALIDATED)
+                await self._update_signal_watchtower_metadata(
+                    db,
+                    signal["id"],
+                    stage="RISK_GATE",
+                    result="REJECTED",
+                    reason_code="CIRCUIT_BREAKER_TRIGGERED",
+                    reason_detail=str(gate.reason or "Circuit breaker triggered"),
+                    reason_category="RISK_GATE",
+                    regime=regime_at_decision,
+                    signal_quality_tier=signal.get("signal_quality_tier"),
+                    signal_quality_score=signal.get("signal_quality_score"),
+                    signal_quality_quota_exempt=bool(
+                        signal.get("signal_quality_quota_exempt")
+                    ),
+                )
 
             elif not gate.passed:
                 execution_intent_id = await self._create_execution_intent(
@@ -669,11 +798,41 @@ class AutonomousEngine:
                     reason=f"risk-gate({gate.reason})",
                 )
                 await self._update_signal_status(db, signal["id"], _SS.REJECTED)
+                await self._update_signal_watchtower_metadata(
+                    db,
+                    signal["id"],
+                    stage="RISK_GATE",
+                    result="REJECTED",
+                    reason_code="RISK_GATE_REJECTED",
+                    reason_detail=str(gate.reason or "Risk gate rejected signal"),
+                    reason_category="RISK_GATE",
+                    regime=regime_at_decision,
+                    signal_quality_tier=signal.get("signal_quality_tier"),
+                    signal_quality_score=signal.get("signal_quality_score"),
+                    signal_quality_quota_exempt=bool(
+                        signal.get("signal_quality_quota_exempt")
+                    ),
+                )
                 logger.info(
                     f"[AutonomousEngine] Signal {signal['id']} rejected by RiskGate: {gate.reason}"
                 )
 
             elif gate.passed:
+                await self._update_signal_watchtower_metadata(
+                    db,
+                    signal["id"],
+                    stage="RISK_GATE",
+                    result="PASSED",
+                    reason_code=None,
+                    reason_detail=None,
+                    reason_category="RISK_GATE",
+                    regime=regime_at_decision,
+                    signal_quality_tier=signal.get("signal_quality_tier"),
+                    signal_quality_score=signal.get("signal_quality_score"),
+                    signal_quality_quota_exempt=bool(
+                        signal.get("signal_quality_quota_exempt")
+                    ),
+                )
                 # 检查交易数量，如果为 0 则视为 HOLD 决策，更新为 SKIPPED（语义化区分“已执行”）
                 if decision["action"] == "HOLD" or float(decision.get("qty", 0)) <= 0:
                     noop_code = self._classify_noop_reason(decision)
@@ -1426,12 +1585,8 @@ class AutonomousEngine:
         """
         import asyncio
 
-        from openai import (
-            APIConnectionError,
-            APIStatusError,
-            APITimeoutError,
-            AsyncOpenAI,
-        )
+        from openai import (APIConnectionError, APIStatusError,
+                            APITimeoutError, AsyncOpenAI)
 
         model = (
             settings.AI_COMPLEX_MODEL
@@ -1973,7 +2128,8 @@ class AutonomousEngine:
         try:
             from app.models.execution_slice import SliceAction
             from app.models.position import ClosingReason
-            from app.services.position_lifecycle_manager import PositionLifecycleManager
+            from app.services.position_lifecycle_manager import \
+                PositionLifecycleManager
 
             plm = PositionLifecycleManager(db)
             sig_type = str(signal.get("signal_type") or "").upper()
@@ -2069,7 +2225,8 @@ class AutonomousEngine:
                 try:
                     from sqlalchemy import update as _sa_upd
 
-                    from app.models.execution_intent import AutonomousExecutionIntent
+                    from app.models.execution_intent import \
+                        AutonomousExecutionIntent
 
                     await db.execute(
                         _sa_upd(AutonomousExecutionIntent)
@@ -2474,7 +2631,6 @@ class AutonomousEngine:
         遇到锁超时自动重试一次（等待 1s）。
         """
         import asyncio
-
         # 如果状态变为 EXECUTED，同步写入 executed_at
         from datetime import datetime as _dt
 
