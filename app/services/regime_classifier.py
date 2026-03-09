@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -414,6 +414,53 @@ class RegimeClassifier:
             momentum=safe(momentum),
         )
 
+    @staticmethod
+    def _extract_close_series(data: Any, ticker: str | None = None):
+        """从 yfinance 返回值中稳定提取一维 Close 序列。"""
+        import pandas as pd
+
+        if data is None or getattr(data, "empty", True):
+            return None
+
+        close = None
+        columns = getattr(data, "columns", None)
+
+        if isinstance(columns, pd.MultiIndex):
+            if "Close" not in columns.get_level_values(0):
+                return None
+            close = data["Close"]
+            if getattr(close, "ndim", 1) != 1:
+                if ticker and ticker in close.columns:
+                    close = close[ticker]
+                else:
+                    close = close.iloc[:, 0]
+        elif columns is not None:
+            if "Close" not in columns:
+                return None
+            close = data["Close"]
+        else:
+            close = data
+
+        if close is None:
+            return None
+
+        if getattr(close, "ndim", 1) != 1:
+            close = close.iloc[:, 0]
+
+        close = close.dropna()
+        return None if close.empty else close
+
+    @staticmethod
+    def _series_float(series: Any, index: int) -> float:
+        """安全读取 Series 单值并转为 float。"""
+        value = series.iloc[index]
+        if hasattr(value, "item"):
+            try:
+                value = value.item()
+            except Exception:
+                pass
+        return float(value)
+
     async def _score_trend(self) -> float:
         """
         趋势强度评分（0~100）。
@@ -441,12 +488,21 @@ class RegimeClassifier:
             )
             return 50.0
 
-        close = spy_data["Close"].dropna()
-        price = float(close.iloc[-1])
+        close = self._extract_close_series(spy_data, "SPY")
+        if close is None or len(close) < 50:
+            logger.warning(
+                "[RegimeClassifier] Insufficient SPY close series for trend score; using 50"
+            )
+            return 50.0
 
-        ma20 = float(close.rolling(20).mean().iloc[-1])
-        ma50 = float(close.rolling(50).mean().iloc[-1])
-        ma200 = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else ma50
+        price = self._series_float(close, -1)
+        ma20 = self._series_float(close.rolling(20).mean().dropna(), -1)
+        ma50 = self._series_float(close.rolling(50).mean().dropna(), -1)
+        ma200 = (
+            self._series_float(close.rolling(200).mean().dropna(), -1)
+            if len(close) >= 200
+            else ma50
+        )
 
         # 相对位置得分（0~100）
         score = 50.0
@@ -462,7 +518,12 @@ class RegimeClassifier:
 
         # 近 20 日涨幅
         if len(close) >= 21:
-            ret_20d = (price - float(close.iloc[-21])) / float(close.iloc[-21])
+            price_20d_ago = self._series_float(close, -21)
+            ret_20d = (
+                (price - price_20d_ago) / price_20d_ago
+                if price_20d_ago
+                else 0.0
+            )
             # 每 1% 涨幅 +1.5 分，上限 ±20
             score += max(-20, min(20, ret_20d * 150))
 
@@ -490,10 +551,13 @@ class RegimeClassifier:
         if vix_data is None or vix_data.empty:
             return 50.0
 
-        vix_close = vix_data["Close"].dropna()
-        vix_now = float(vix_close.iloc[-1])
+        vix_close = self._extract_close_series(vix_data, "^VIX")
+        if vix_close is None:
+            return 50.0
+
+        vix_now = self._series_float(vix_close, -1)
         vix_ma30 = (
-            float(vix_close.rolling(30).mean().iloc[-1])
+            self._series_float(vix_close.rolling(30).mean().dropna(), -1)
             if len(vix_close) >= 30
             else vix_now
         )
@@ -543,19 +607,19 @@ class RegimeClassifier:
         if data is None or data.empty or "Close" not in data.columns:
             return 55.0  # 中性偏高
 
-        try:
-            spy_close = data["Close"]["SPY"].dropna()
-            rsp_close = data["Close"]["RSP"].dropna()
-        except (KeyError, TypeError):
+        spy_close = self._extract_close_series(data, "SPY")
+        rsp_close = self._extract_close_series(data, "RSP")
+
+        if spy_close is None or rsp_close is None:
             return 55.0
 
         if len(spy_close) < 20 or len(rsp_close) < 20:
             return 55.0
 
         # RSP/SPY 比率：>1 表示等权更强（广度健康），<1 表示大盘被巨头拉升（广度弱）
-        ratio = float(rsp_close.iloc[-1] / spy_close.iloc[-1]) / float(
-            rsp_close.iloc[-20] / spy_close.iloc[-20]
-        )
+        ratio_now = self._series_float(rsp_close, -1) / self._series_float(spy_close, -1)
+        ratio_then = self._series_float(rsp_close, -20) / self._series_float(spy_close, -20)
+        ratio = ratio_now / ratio_then if ratio_then else 1.0
 
         score = 50.0
         # ratio 每高于 1% → +5 分，每低于 1% → -5 分，上限 ±30
@@ -577,7 +641,8 @@ class RegimeClassifier:
         如果 macroservice 不可用则 fallback 到 50。
         """
         try:
-            from app.services.macro_risk_scoring_service import MacroRiskScoringService
+            from app.services.macro_risk_scoring_service import \
+                MacroRiskScoringService
 
             macro_svc = MacroRiskScoringService()
             # 调用新接口计算风险评分
@@ -618,17 +683,15 @@ class RegimeClassifier:
         if spy_data is None or spy_data.empty or len(spy_data) < 20:
             return 50.0
 
-        close = (
-            spy_data["Close"]["SPY"].dropna()
-            if "SPY" in spy_data["Close"].columns
-            else spy_data["Close"].dropna()
-        )
+        close = self._extract_close_series(spy_data, "SPY")
 
-        if len(close) < 20:
+        if close is None or len(close) < 20:
             return 50.0
 
         # 20 日动量
-        ret_20d = float((close.iloc[-1] - close.iloc[-20]) / close.iloc[-20])
+        latest_close = self._series_float(close, -1)
+        base_close = self._series_float(close, -20)
+        ret_20d = (latest_close - base_close) / base_close if base_close else 0.0
 
         # RSI(14)
         rsi = self._compute_rsi(close, window=14)

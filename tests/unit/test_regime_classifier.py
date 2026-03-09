@@ -11,15 +11,15 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT_DIR))
 
+from app.models.market_regime import RegimeType
 # ── 被测模块 ──────────────────────────────────────────────────────────────────
 from app.services.regime_classifier import RegimeScores
-from app.models.market_regime import RegimeType
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tests: RegimeScores.classify()
@@ -218,3 +218,60 @@ class TestEventBus:
 
         # good_handler 必须收到消息
         assert len(good_received) == 1
+
+
+class TestRegimeClassifierMarketDataHandling:
+    """覆盖 yfinance 单 ticker MultiIndex 返回格式。"""
+
+    @staticmethod
+    def _single_ticker_close_frame(ticker: str, values: list[float]) -> pd.DataFrame:
+        index = pd.date_range("2025-01-01", periods=len(values), freq="D")
+        columns = pd.MultiIndex.from_tuples([("Close", ticker)])
+        return pd.DataFrame(values, index=index, columns=columns)
+
+    @pytest.mark.asyncio
+    async def test_score_trend_handles_multiindex_close_frame(self, monkeypatch):
+        import yfinance as yf
+
+        from app.services.regime_classifier import RegimeClassifier
+
+        frame = self._single_ticker_close_frame(
+            "SPY", [float(100 + i) for i in range(260)]
+        )
+        monkeypatch.setattr(yf, "download", lambda *args, **kwargs: frame)
+
+        score = await RegimeClassifier()._score_trend()
+
+        assert isinstance(score, float)
+        assert 0.0 <= score <= 100.0
+
+    @pytest.mark.asyncio
+    async def test_score_volatility_handles_multiindex_close_frame(self, monkeypatch):
+        import yfinance as yf
+
+        from app.services.regime_classifier import RegimeClassifier
+
+        values = [18.0 + (i % 5) for i in range(60)]
+        frame = self._single_ticker_close_frame("^VIX", values)
+        monkeypatch.setattr(yf, "download", lambda *args, **kwargs: frame)
+
+        score = await RegimeClassifier()._score_volatility()
+
+        assert isinstance(score, float)
+        assert 0.0 <= score <= 100.0
+
+    @pytest.mark.asyncio
+    async def test_score_momentum_handles_multiindex_close_frame(self, monkeypatch):
+        import yfinance as yf
+
+        from app.services.regime_classifier import RegimeClassifier
+
+        frame = self._single_ticker_close_frame(
+            "SPY", [float(200 + i * 0.8) for i in range(80)]
+        )
+        monkeypatch.setattr(yf, "download", lambda *args, **kwargs: frame)
+
+        score = await RegimeClassifier()._score_momentum()
+
+        assert isinstance(score, float)
+        assert 0.0 <= score <= 100.0
