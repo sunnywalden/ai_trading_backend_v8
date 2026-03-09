@@ -276,7 +276,28 @@ class TigerOptionClient(OptionBrokerClient):
             except Exception as hk_error:
                 logger.error(f" Error fetching HK positions: {hk_error}")
 
-            # 3. 结果存回缓存
+            # 3. 防御性保护：若 Tiger API 静默返回 0 港股持仓（无异常），
+            #    检查旧缓存中是否存在港股持仓。若存在，说明 API 可能抖动
+            #    （例如连接池满导致 HK 请求被丢弃），保留旧缓存的港股持仓
+            #    以避免误认为持仓已清空，进而错误关闭容量守卫逻辑。
+            hk_in_results = [p for p in results if p.market == "HK"]
+            if not hk_in_results:
+                try:
+                    prev_cached = await self._get_cached_data(f"underlying:{account_id}")
+                    if prev_cached:
+                        prev_hk = [UnderlyingPosition(**p) for p in prev_cached if p.get("market") == "HK"]
+                        if prev_hk:
+                            logger.warning(
+                                f" HK positions returned 0 from Tiger API (no error thrown) but "
+                                f"previous cache has {len(prev_hk)} HK position(s). "
+                                f"Possible Tiger API instability or connection pool drop — "
+                                f"retaining cached HK positions to prevent false capacity shrink."
+                            )
+                            results.extend(prev_hk)
+                except Exception as _ce:
+                    logger.warning(f" Failed to read previous HK positions from cache: {_ce}")
+
+            # 4. 结果存回缓存
             logger.info(f" Caching {len(results)} positions for account: {account_id}")
             # 处理 dataclass 序列化 (date -> isoformat 在 asdict 后处理，但 UnderlyingPosition 没有 date)
             await self._set_cached_data(
