@@ -30,9 +30,13 @@ from typing import Any
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.cache import cache
+
 _OK = "OK"
 _WARNING = "WARNING"
 _CRITICAL = "CRITICAL"
+_POSITIONS_FRESHNESS_HEARTBEAT_KEY = "live_safety:positions_freshness:last_seen"
+_POSITIONS_SELF_HEAL_MINUTES = 210.0
 
 # 每项数据源配置：(key, warn_hours, crit_hours, action_on_crit)
 _SOURCE_CONFIG: list[tuple[str, float, float, str]] = [
@@ -74,6 +78,31 @@ def _classify_missing_source(source_key: str, now: datetime) -> str:
 
 def _utc_now_naive() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
+
+
+def _normalize_ts(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is not None:
+        return value.astimezone(UTC).replace(tzinfo=None)
+    return value
+
+
+async def _read_cached_timestamp(key: str) -> datetime | None:
+    try:
+        raw = await cache.get(key, is_json=False)
+        if not raw:
+            return None
+        return _normalize_ts(datetime.fromisoformat(str(raw)))
+    except Exception:
+        return None
+
+
+async def _write_cached_timestamp(key: str, ts: datetime) -> None:
+    try:
+        await cache.set(key, _normalize_ts(ts).isoformat(), expire=3600, is_json=False)
+    except Exception:
+        pass
 
 
 def _effective_thresholds(
@@ -165,6 +194,11 @@ class DataFreshnessGuardService:
             from app.broker.factory import make_option_broker_client
             from app.models.position import Position
 
+            now = _utc_now_naive()
+            live_cached = await _read_cached_timestamp(
+                _POSITIONS_FRESHNESS_HEARTBEAT_KEY
+            )
+
             stmt = (
                 select(Position.updated_at)
                 .where(Position.account_id.in_(keys))
@@ -172,9 +206,13 @@ class DataFreshnessGuardService:
                 .limit(1)
             )
             result = await db.execute(stmt)
-            row = result.scalar_one_or_none()
+            row = _normalize_ts(result.scalar_one_or_none())
+            if live_cached is not None and (row is None or live_cached > row):
+                row = live_cached
             if row is not None:
-                return row
+                age_h = _age_hours(row, now)
+                if age_h is not None and age_h < (_POSITIONS_SELF_HEAL_MINUTES / 60.0):
+                    return row
 
             # Fallback 1: account-agnostic internal positions,
             # 避免 account_id 口径不一致误判。
@@ -182,11 +220,17 @@ class DataFreshnessGuardService:
                 select(Position.updated_at).order_by(desc(Position.updated_at)).limit(1)
             )
             result_any = await db.execute(stmt_any)
-            row_any = result_any.scalar_one_or_none()
+            row_any = _normalize_ts(result_any.scalar_one_or_none())
+            if live_cached is not None and (row_any is None or live_cached > row_any):
+                row_any = live_cached
             if row_any is not None:
-                return row_any
+                age_h_any = _age_hours(row_any, now)
+                if age_h_any is not None and age_h_any < (
+                    _POSITIONS_SELF_HEAL_MINUTES / 60.0
+                ):
+                    return row_any
 
-            # Fallback 2: 若本地无仓位记录，但 broker API 可正常返回（哪怕为空仓），
+            # Fallback 2: 若本地仓位记录陈旧，但 broker API 可正常返回（哪怕为空仓），
             # 说明仓位通道是新鲜的，不应冻结新开仓。
             broker = make_option_broker_client()
             account_id = keys[0] if keys else ""
@@ -195,7 +239,8 @@ class DataFreshnessGuardService:
                 force_refresh=True,
             )
             await broker.list_option_positions(account_id, force_refresh=True)
-            return _utc_now_naive()
+            await _write_cached_timestamp(_POSITIONS_FRESHNESS_HEARTBEAT_KEY, now)
+            return now
         except Exception:
             return None
 
