@@ -118,16 +118,19 @@ class SignalAuditLogService:
         if status == "REJECTED" and getattr(signal, "risk_check_passed", None) == "YES":
             return {
                 "result": "REJECTED",
-                "stage": "AUTONOMOUS_DECISION",
+                "stage": "QUALITY_FUNNEL",
                 "reason_code": (
                     extra.get("watchtower_reason_code")
                     or extra.get("funnel_rejection_reason")
-                    or "POST_VALIDATION_REJECTED"
+                    or "QUALITY_FUNNEL_PRE_INTENT_REJECTED"
                 ),
                 "reason_detail": (
                     extra.get("watchtower_reason_detail")
                     or extra.get("funnel_rejection_detail")
-                    or "Signal rejected after validation in autonomous decision chain"
+                    or (
+                        "Legacy signal was rejected after validation "
+                        "before execution intent was created"
+                    )
                 ),
                 "rejected_at_layer": (
                     extra.get("watchtower_rejected_at_layer")
@@ -136,7 +139,7 @@ class SignalAuditLogService:
                 ),
                 "reason_category": (
                     extra.get("watchtower_reason_category")
-                    or "AUTONOMOUS_DECISION"
+                    or "QUALITY_FUNNEL"
                 ),
                 "regime": extra.get("watchtower_regime") or extra.get("regime"),
             }
