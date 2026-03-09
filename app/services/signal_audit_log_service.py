@@ -57,6 +57,100 @@ class SignalAuditLogService:
             return datetime.fromisoformat(value)
         return None
 
+    @staticmethod
+    def _derive_watchtower_state(signal: Any) -> dict[str, Any]:
+        extra = signal.extra_metadata if isinstance(signal.extra_metadata, dict) else {}
+        risk_details = (
+            signal.risk_check_details
+            if isinstance(getattr(signal, "risk_check_details", None), dict)
+            else {}
+        )
+        status = str(getattr(getattr(signal, "status", None), "value", getattr(signal, "status", "")))
+        watchtower_result = extra.get("watchtower_result")
+        if watchtower_result in {"PASSED", "REJECTED"}:
+            return {
+                "result": watchtower_result,
+                "stage": extra.get("watchtower_stage"),
+                "reason_code": (
+                    extra.get("watchtower_reason_code")
+                    or extra.get("funnel_rejection_reason")
+                ),
+                "reason_detail": (
+                    extra.get("watchtower_reason_detail")
+                    or extra.get("funnel_rejection_detail")
+                ),
+                "rejected_at_layer": (
+                    extra.get("watchtower_rejected_at_layer")
+                    if extra.get("watchtower_rejected_at_layer") is not None
+                    else extra.get("funnel_rejected_at_layer")
+                ),
+                "reason_category": extra.get("watchtower_reason_category"),
+                "regime": extra.get("watchtower_regime") or extra.get("regime"),
+            }
+
+        if status == "VALIDATED" and getattr(signal, "risk_check_passed", None) == "YES":
+            return {
+                "result": "PASSED",
+                "stage": "SIGNAL_VALIDATION",
+                "reason_code": None,
+                "reason_detail": None,
+                "rejected_at_layer": None,
+                "reason_category": "VALIDATION",
+                "regime": extra.get("watchtower_regime") or extra.get("regime"),
+            }
+
+        if status == "REJECTED" and getattr(signal, "risk_check_passed", None) == "NO":
+            detail = str(risk_details.get("reason") or "Signal validation blocked")
+            return {
+                "result": "REJECTED",
+                "stage": "SIGNAL_VALIDATION",
+                "reason_code": (
+                    "TRADING_MODE_OFF"
+                    if detail == "Trading mode is OFF"
+                    else "SIGNAL_VALIDATION_BLOCKED"
+                ),
+                "reason_detail": detail,
+                "rejected_at_layer": None,
+                "reason_category": "VALIDATION",
+                "regime": extra.get("watchtower_regime") or extra.get("regime"),
+            }
+
+        if status == "REJECTED" and getattr(signal, "risk_check_passed", None) == "YES":
+            return {
+                "result": "REJECTED",
+                "stage": "AUTONOMOUS_DECISION",
+                "reason_code": (
+                    extra.get("watchtower_reason_code")
+                    or extra.get("funnel_rejection_reason")
+                    or "POST_VALIDATION_REJECTED"
+                ),
+                "reason_detail": (
+                    extra.get("watchtower_reason_detail")
+                    or extra.get("funnel_rejection_detail")
+                    or "Signal rejected after validation in autonomous decision chain"
+                ),
+                "rejected_at_layer": (
+                    extra.get("watchtower_rejected_at_layer")
+                    if extra.get("watchtower_rejected_at_layer") is not None
+                    else extra.get("funnel_rejected_at_layer")
+                ),
+                "reason_category": (
+                    extra.get("watchtower_reason_category")
+                    or "AUTONOMOUS_DECISION"
+                ),
+                "regime": extra.get("watchtower_regime") or extra.get("regime"),
+            }
+
+        return {
+            "result": "REJECTED" if status == "REJECTED" else "PASSED",
+            "stage": None,
+            "reason_code": None,
+            "reason_detail": None,
+            "rejected_at_layer": None,
+            "reason_category": None,
+            "regime": extra.get("watchtower_regime") or extra.get("regime"),
+        }
+
     async def _count_fallback_candidates(
         self,
         db: AsyncSession,
@@ -167,31 +261,30 @@ class SignalAuditLogService:
     ) -> dict[str, Any]:
         extra = signal.extra_metadata if isinstance(signal.extra_metadata, dict) else {}
         factor = signal.factor_scores if isinstance(signal.factor_scores, dict) else {}
+        watchtower = self._derive_watchtower_state(signal)
         lists = self._normalize_signal_lists({
             "aligned_dims": extra.get("aligned_dims") or factor.get("aligned_dims"),
             "opposing_dims": extra.get("opposing_dims") or factor.get("opposing_dims"),
             "neutral_dims": extra.get("neutral_dims") or factor.get("neutral_dims"),
         })
-        conviction_score, composite_score, quality_tier, anti_kill = (
+        conviction_score, composite_score, _, anti_kill = (
             self._fallback_quality_snapshot(signal, regime=regime)
-        )
-        raw_status = getattr(signal.status, "value", signal.status)
-        status = str(raw_status or "")
-        funnel_result = (
-            FunnelResult.REJECTED
-            if status == "REJECTED"
-            else FunnelResult.PASSED
         )
         return {
             "id": getattr(signal, "id", None),
             "signal_id": getattr(signal, "id", None),
             "symbol": getattr(signal, "symbol", None),
-            "funnel_result": funnel_result.value,
-            "rejected_at_layer": extra.get("funnel_rejected_at_layer"),
-            "rejection_reason": extra.get("funnel_rejection_reason"),
-            "rejection_detail": extra.get("funnel_rejection_detail") or getattr(signal, "notes", None),
+            "funnel_result": watchtower["result"],
+            "decision_stage": watchtower["stage"],
+            "reason_category": watchtower["reason_category"],
+            "result_source": "TRADING_SIGNAL_METADATA",
+            "rejected_at_layer": watchtower["rejected_at_layer"],
+            "rejection_reason": watchtower["reason_code"],
+            "rejection_detail": (
+                watchtower["reason_detail"] or getattr(signal, "notes", None)
+            ),
             "conviction_score": conviction_score,
-            "composite_score": composite_score,
+            "composite_score": extra.get("signal_quality_score") or composite_score,
             "resonance_bonus": None,
             "regime_alignment": None,
             "calibrated_lower_bound": None,
@@ -201,7 +294,7 @@ class SignalAuditLogService:
             "neutral_dims": lists["neutral_dims"],
             "anti_resonance_triggered": anti_kill,
             "signal_direction": getattr(signal, "direction", None),
-            "regime": extra.get("regime") or regime,
+            "regime": watchtower["regime"] or regime,
             "concurrent_positions": extra.get("concurrent_positions"),
             "daily_signals_used": extra.get("daily_signals_used"),
             "generated_at": (
@@ -296,22 +389,38 @@ class SignalAuditLogService:
             }
 
         total = len(rows)
+        layer_stats = {
+            "layer_0_rejected": 0,
+            "layer_1_rejected": 0,
+            "layer_2_rejected": 0,
+            "layer_3_rejected": 0,
+            "layer_4_rejected": 0,
+        }
+        rejection_breakdown: dict[str, int] = {}
         passed = sum(
             1
             for row in rows
-            if str(getattr(getattr(row, "status", None), "value", getattr(row, "status", "")))
-            in self._FALLBACK_PASS_STATUSES
+            if str(self._derive_watchtower_state(row)["result"])
+            in self._FALLBACK_PASS_STATUSES.union({"PASSED"})
         )
         daily_map: dict[str, dict[str, int]] = {}
         for row in rows:
             if not getattr(row, "created_at", None):
                 continue
+            watchtower = self._derive_watchtower_state(row)
             day_key = str(row.created_at.date())
             bucket = daily_map.setdefault(day_key, {"passed": 0, "total": 0})
             bucket["total"] += 1
-            status = str(getattr(getattr(row, "status", None), "value", getattr(row, "status", "")))
-            if status in self._FALLBACK_PASS_STATUSES:
+            status = str(watchtower["result"])
+            if status in self._FALLBACK_PASS_STATUSES or status == "PASSED":
                 bucket["passed"] += 1
+            else:
+                reason = watchtower["reason_code"]
+                if reason:
+                    rejection_breakdown[reason] = rejection_breakdown.get(reason, 0) + 1
+                layer = watchtower["rejected_at_layer"]
+                if isinstance(layer, int) and 0 <= layer <= 4:
+                    layer_stats[f"layer_{layer}_rejected"] += 1
 
         daily_trend = [
             {
@@ -329,14 +438,8 @@ class SignalAuditLogService:
             "total_passed": passed,
             "total_rejected": total - passed,
             "elite_rate_pct": round(passed / max(1, total) * 100, 1),
-            "layer_stats": {
-                "layer_0_rejected": 0,
-                "layer_1_rejected": 0,
-                "layer_2_rejected": 0,
-                "layer_3_rejected": 0,
-                "layer_4_rejected": 0,
-            },
-            "rejection_breakdown": {},
+            "layer_stats": layer_stats,
+            "rejection_breakdown": rejection_breakdown,
             "daily_trend": daily_trend,
             "fallback_mode": True,
         }
@@ -534,6 +637,9 @@ class SignalAuditLogService:
             "signal_id":               r.signal_id,
             "symbol":                  r.symbol,
             "funnel_result":           r.funnel_result,
+            "decision_stage":          "QUALITY_FUNNEL",
+            "reason_category":         "QUALITY_FUNNEL",
+            "result_source":           "SIGNAL_QUALITY_AUDIT_LOG",
             "rejected_at_layer":       r.rejected_at_layer,
             "rejection_reason":        r.rejection_reason,
             "rejection_detail":        r.rejection_detail,
