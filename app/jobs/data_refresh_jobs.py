@@ -19,6 +19,7 @@ from typing import List
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.broker.factory import make_option_broker_client
 from app.core.config import settings
 from app.models.fsm_transition_log import FsmTransitionLog
 from app.models.symbol_behavior_stats import SymbolBehaviorStats
@@ -49,8 +50,7 @@ async def refresh_technical_indicators_job():
         logger.info("Starting technical indicators refresh job")
         start_time = datetime.now()
 
-        from app.services.quote_freshness_service import \
-            refresh_quote_freshness
+        from app.services.quote_freshness_service import refresh_quote_freshness
 
         async with _get_session() as session:
             refresh_result = await refresh_quote_freshness(
@@ -99,8 +99,7 @@ async def refresh_fundamental_data_job():
         error_count = 0
 
         # 调用FundamentalAnalysisService刷新基本面数据
-        from app.services.fundamental_analysis_service import \
-            FundamentalAnalysisService
+        from app.services.fundamental_analysis_service import FundamentalAnalysisService
 
         fundamental_service = FundamentalAnalysisService()
 
@@ -218,19 +217,12 @@ async def cleanup_old_data_job():
         # 保留期限（天）
         BEHAVIOR_STATS_RETENTION_DAYS = 90  # 行为统计保留90天
         RISK_PROFILE_RETENTION_DAYS = 90  # 风险档案保留90天
-        GEO_EVENTS_RETENTION_DAYS = 60  # 地缘事件保留60天
-        MACRO_INDICATORS_RETENTION_DAYS = 365  # 宏观指标保留1年
-
         cutoff_behavior = datetime.now() - timedelta(days=BEHAVIOR_STATS_RETENTION_DAYS)
         cutoff_risk = datetime.now() - timedelta(days=RISK_PROFILE_RETENTION_DAYS)
-        cutoff_geo = datetime.now() - timedelta(days=GEO_EVENTS_RETENTION_DAYS)
-        cutoff_macro = datetime.now() - timedelta(days=MACRO_INDICATORS_RETENTION_DAYS)
 
         deleted_counts = {
             "behavior_stats": 0,
             "risk_profiles": 0,
-            "geo_events": 0,
-            "macro_indicators": 0,
         }
 
         async with _get_session() as session:
@@ -250,14 +242,6 @@ async def cleanup_old_data_job():
                     )
                 )
                 deleted_counts["risk_profiles"] = result.rowcount  # type: ignore[attr-defined]
-
-                # 清理地缘政治事件（需要先添加对应的model）
-                # 由于GeopoliticalEvent model在service中定义，这里暂时跳过
-                # 实际应该将model定义移到models目录
-
-                # 清理宏观指标数据（如果有单独的表存储）
-                # 同样需要model定义
-
                 await session.commit()
 
                 elapsed = (datetime.now() - start_time).total_seconds()
@@ -358,11 +342,11 @@ async def refresh_market_universe_weekly_job():
         )
 
 
-def register_all_jobs(scheduler):
+def register_all_jobs(_scheduler):
     """注册所有定时任务到调度器
 
     Args:
-        scheduler: APScheduler实例
+        _scheduler: APScheduler实例（保留参数以兼容调用方）
     """
     from app.jobs.scheduler import add_job
 

@@ -16,12 +16,15 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.broker.factory import make_option_broker_client
-from app.core.cache import cache
 from app.core.config import settings
 from app.models.position import Position, PositionStatus
 from app.models.technical_indicator import TechnicalIndicator
 from app.models.trading_plan import TradingPlan
 from app.providers.market_data_provider import market_data_provider
+from app.services.freshness_heartbeat import (max_available_timestamp,
+                                              normalize_timestamp,
+                                              read_heartbeat_timestamp,
+                                              write_heartbeat_timestamp)
 from app.services.technical_analysis_service import TechnicalAnalysisService
 
 logger = logging.getLogger(__name__)
@@ -45,20 +48,9 @@ def _utc_now_naive() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
 
 
-def _normalize_dt(value: datetime | None) -> datetime | None:
-    if value is None:
-        return None
-    if value.tzinfo is not None:
-        return value.astimezone(UTC).replace(tzinfo=None)
-    return value
-
-
 async def _get_heartbeat_timestamp() -> datetime | None:
     try:
-        raw = await cache.get(_QUOTE_FRESHNESS_HEARTBEAT_KEY, is_json=False)
-        if not raw:
-            return None
-        return _normalize_dt(datetime.fromisoformat(str(raw)))
+        return await read_heartbeat_timestamp(_QUOTE_FRESHNESS_HEARTBEAT_KEY)
     except Exception as exc:
         logger.debug("[QuoteFreshness] heartbeat read failed: %s", exc)
         return None
@@ -66,11 +58,10 @@ async def _get_heartbeat_timestamp() -> datetime | None:
 
 async def _set_heartbeat_timestamp(ts: datetime) -> None:
     try:
-        await cache.set(
+        await write_heartbeat_timestamp(
             _QUOTE_FRESHNESS_HEARTBEAT_KEY,
-            _normalize_dt(ts).isoformat(),
-            expire=60 * 60,
-            is_json=False,
+            ts,
+            ttl_seconds=60 * 60,
         )
     except Exception as exc:
         logger.debug("[QuoteFreshness] heartbeat write failed: %s", exc)
@@ -83,7 +74,7 @@ async def _latest_indicator_timestamp(db: AsyncSession) -> datetime | None:
         .limit(1)
     )
     result = await db.execute(stmt)
-    return _normalize_dt(result.scalar_one_or_none())
+    return normalize_timestamp(result.scalar_one_or_none())
 
 
 def _candidate_account_keys(account_id: str | None) -> list[str]:
@@ -258,7 +249,7 @@ async def get_latest_quote_timestamp(
     """统一返回 quote freshness 时间戳；必要时做一次自愈刷新。"""
     latest_db = await _latest_indicator_timestamp(db)
     latest_heartbeat = await _get_heartbeat_timestamp()
-    latest = max([dt for dt in [latest_db, latest_heartbeat] if dt is not None], default=None)
+    latest = max_available_timestamp(latest_db, latest_heartbeat)
 
     if not allow_self_heal:
         return latest
@@ -277,5 +268,5 @@ async def get_latest_quote_timestamp(
     )
     latest_seen = refresh_result.get("latest_seen")
     if latest_seen:
-        return _normalize_dt(datetime.fromisoformat(str(latest_seen)))
+        return normalize_timestamp(datetime.fromisoformat(str(latest_seen)))
     return latest
