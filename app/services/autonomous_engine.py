@@ -762,7 +762,7 @@ class AutonomousEngine:
                         )
                         # 执行成功后，自动写入 TradingPlan 供生命周期中心观测
                         await self._create_plan_for_executed_signal(
-                            db, account_id, signal, decision, order_id
+                            db, account_id, signal, decision, order_id, execution_intent_id
                         )
                         # 执行成功后，同步写入 TradeJournal（避免“活跃计划有、交易日志无”）
                         await self._create_journal_for_executed_signal(
@@ -1730,6 +1730,7 @@ class AutonomousEngine:
         signal: dict,
         decision: dict,
         order_id: str,
+        execution_intent_id: Optional[str] = None,
     ) -> None:
         """执行成功后自动创建 TradingPlan，使生命周期中心可见该自主决策活动。"""
         try:
