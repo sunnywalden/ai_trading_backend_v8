@@ -9,10 +9,11 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from sqlalchemy import func, select, and_
+from sqlalchemy import and_, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.signal_quality_audit_log import SignalQualityAuditLog, FunnelResult
+from app.models.signal_quality_audit_log import (FunnelResult,
+                                                 SignalQualityAuditLog)
 from app.services.signal_conviction_scorer import ConvictionComponents
 
 logger = logging.getLogger(__name__)
@@ -20,6 +21,325 @@ logger = logging.getLogger(__name__)
 
 class SignalAuditLogService:
     """信号漏斗审计日志的 CRUD 及统计服务。"""
+
+    _FALLBACK_PASS_STATUSES = {
+        "VALIDATED",
+        "QUEUED",
+        "EXECUTING",
+        "EXECUTED",
+        "FAILED",
+        "SKIPPED",
+        "CANCELLED",
+        "EXPIRED",
+    }
+
+    @staticmethod
+    def _normalize_signal_lists(payload: dict[str, Any]) -> dict[str, list[str]]:
+        def _as_list(key: str) -> list[str]:
+            value = payload.get(key)
+            if not isinstance(value, list):
+                return []
+            return [str(item) for item in value if item is not None]
+
+        return {
+            "aligned_dims": _as_list("aligned_dims"),
+            "opposing_dims": _as_list("opposing_dims"),
+            "neutral_dims": _as_list("neutral_dims"),
+        }
+
+    @staticmethod
+    def _normalize_generated_at(value: Any) -> datetime | None:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, str) and value:
+            return datetime.fromisoformat(value)
+        return None
+
+    async def _count_fallback_candidates(
+        self,
+        db: AsyncSession,
+        *,
+        cutoff: datetime,
+    ) -> int:
+        from app.models.trading_signal import (SignalSource, SignalType,
+                                               TradingSignal)
+
+        stmt = select(func.count()).select_from(TradingSignal).where(
+            and_(
+                TradingSignal.created_at >= cutoff,
+                TradingSignal.signal_source == SignalSource.STRATEGY,
+                TradingSignal.signal_type.in_([SignalType.ENTRY, SignalType.ADD]),
+                TradingSignal.status != "GENERATED",
+            )
+        )
+        return (await db.execute(stmt)).scalar_one_or_none() or 0
+
+    async def _should_use_signal_fallback(
+        self,
+        db: AsyncSession,
+        *,
+        cutoff: datetime,
+    ) -> bool:
+        audit_count = (
+            await db.execute(
+                select(func.count())
+                .select_from(SignalQualityAuditLog)
+                .where(SignalQualityAuditLog.created_at >= cutoff)
+            )
+        ).scalar_one_or_none() or 0
+        signal_count = await self._count_fallback_candidates(db, cutoff=cutoff)
+        if signal_count == 0:
+            return False
+        if audit_count == 0:
+            return True
+        return audit_count * 3 < signal_count
+
+    async def _current_regime_name(self, db: AsyncSession) -> str:
+        try:
+            from app.services.regime_classifier import RegimeClassifier
+
+            current = await RegimeClassifier.get_current_regime(db)
+            if current and getattr(current, "regime", None):
+                return str(current.regime)
+        except Exception:
+            pass
+        return "SIDEWAYS"
+
+    def _fallback_quality_snapshot(
+        self,
+        signal: Any,
+        *,
+        regime: str,
+    ) -> tuple[float | None, float | None, str | None, bool]:
+        try:
+            from app.services.signal_quality_funnel import (
+                SignalFunnelInput, signal_quality_funnel)
+
+            extra = signal.extra_metadata if isinstance(signal.extra_metadata, dict) else {}
+            factor = signal.factor_scores if isinstance(signal.factor_scores, dict) else {}
+            lists = self._normalize_signal_lists({
+                "aligned_dims": extra.get("aligned_dims") or factor.get("aligned_dims"),
+                "opposing_dims": extra.get("opposing_dims") or factor.get("opposing_dims"),
+                "neutral_dims": extra.get("neutral_dims") or factor.get("neutral_dims"),
+            })
+
+            confidence = float(getattr(signal, "confidence", 0.0) or 0.0)
+            composite_ratio = confidence / 100.0 if confidence > 1.0 else confidence
+            funnel_input = SignalFunnelInput(
+                signal_id=getattr(signal, "id", None),
+                symbol=str(getattr(signal, "symbol", "") or ""),
+                direction=str(getattr(signal, "direction", "LONG") or "LONG").upper(),
+                regime=regime,
+                signal_type=str(getattr(signal, "signal_type", "ENTRY") or "ENTRY").upper(),
+                signal_strength=float(getattr(signal, "signal_strength", 0.0) or 0.0),
+                composite_score=composite_ratio,
+                aligned_count=int(
+                    (extra.get("aligned_count") or factor.get("aligned_count") or 0)
+                ),
+                aligned_dims=lists["aligned_dims"],
+                opposing_dims=lists["opposing_dims"],
+                neutral_dims=lists["neutral_dims"],
+                historical_ic=extra.get("historical_ic") or factor.get("historical_ic"),
+                timing_quality=extra.get("timing_quality") or factor.get("timing_quality"),
+                adv_usd=extra.get("adv_usd") or factor.get("adv_usd"),
+                market_cap=extra.get("market_cap") or factor.get("market_cap"),
+            )
+            profile = signal_quality_funnel.preview_quality(funnel_input)
+            composite_score = round(composite_ratio * 100.0, 2)
+            return (
+                round(profile.score, 2),
+                composite_score,
+                profile.tier,
+                bool(profile.conviction and profile.conviction.anti_resonance_killed),
+            )
+        except Exception:
+            confidence = float(getattr(signal, "confidence", 0.0) or 0.0)
+            composite_score = confidence / 100.0 if confidence > 1.0 else confidence
+            return (None, round(composite_score * 100.0, 2), None, False)
+
+    def _fallback_signal_to_dict(
+        self,
+        signal: Any,
+        *,
+        regime: str,
+    ) -> dict[str, Any]:
+        extra = signal.extra_metadata if isinstance(signal.extra_metadata, dict) else {}
+        factor = signal.factor_scores if isinstance(signal.factor_scores, dict) else {}
+        lists = self._normalize_signal_lists({
+            "aligned_dims": extra.get("aligned_dims") or factor.get("aligned_dims"),
+            "opposing_dims": extra.get("opposing_dims") or factor.get("opposing_dims"),
+            "neutral_dims": extra.get("neutral_dims") or factor.get("neutral_dims"),
+        })
+        conviction_score, composite_score, quality_tier, anti_kill = (
+            self._fallback_quality_snapshot(signal, regime=regime)
+        )
+        raw_status = getattr(signal.status, "value", signal.status)
+        status = str(raw_status or "")
+        funnel_result = (
+            FunnelResult.REJECTED
+            if status == "REJECTED"
+            else FunnelResult.PASSED
+        )
+        return {
+            "id": getattr(signal, "id", None),
+            "signal_id": getattr(signal, "id", None),
+            "symbol": getattr(signal, "symbol", None),
+            "funnel_result": funnel_result.value,
+            "rejected_at_layer": extra.get("funnel_rejected_at_layer"),
+            "rejection_reason": extra.get("funnel_rejection_reason"),
+            "rejection_detail": extra.get("funnel_rejection_detail") or getattr(signal, "notes", None),
+            "conviction_score": conviction_score,
+            "composite_score": composite_score,
+            "resonance_bonus": None,
+            "regime_alignment": None,
+            "calibrated_lower_bound": None,
+            "aligned_count": int(extra.get("aligned_count") or factor.get("aligned_count") or 0),
+            "aligned_dims": lists["aligned_dims"],
+            "opposing_dims": lists["opposing_dims"],
+            "neutral_dims": lists["neutral_dims"],
+            "anti_resonance_triggered": anti_kill,
+            "signal_direction": getattr(signal, "direction", None),
+            "regime": extra.get("regime") or regime,
+            "concurrent_positions": extra.get("concurrent_positions"),
+            "daily_signals_used": extra.get("daily_signals_used"),
+            "generated_at": (
+                signal.generated_at.isoformat() if getattr(signal, "generated_at", None) else None
+            ),
+            "evaluated_at": (
+                signal.updated_at.isoformat() if getattr(signal, "updated_at", None) else None
+            ),
+            "created_at": (
+                signal.created_at.isoformat() if getattr(signal, "created_at", None) else None
+            ),
+        }
+
+    async def _get_recent_signal_fallback(
+        self,
+        db: AsyncSession,
+        *,
+        limit: int,
+        offset: int,
+        funnel_result: Optional[str],
+        symbol: Optional[str],
+        since_days: int,
+    ) -> list[dict[str, Any]]:
+        from app.models.trading_signal import (SignalSource, SignalType,
+                                               TradingSignal)
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
+        conditions = [
+            TradingSignal.created_at >= cutoff,
+            TradingSignal.signal_source == SignalSource.STRATEGY,
+            TradingSignal.signal_type.in_([SignalType.ENTRY, SignalType.ADD]),
+            TradingSignal.status != "GENERATED",
+        ]
+        if funnel_result == FunnelResult.PASSED:
+            conditions.append(TradingSignal.status.in_(list(self._FALLBACK_PASS_STATUSES)))
+        elif funnel_result == FunnelResult.REJECTED:
+            conditions.append(TradingSignal.status == "REJECTED")
+        if symbol:
+            conditions.append(TradingSignal.symbol == symbol)
+
+        stmt = (
+            select(TradingSignal)
+            .where(and_(*conditions))
+            .order_by(desc(TradingSignal.created_at), desc(TradingSignal.id))
+            .offset(offset)
+            .limit(limit)
+        )
+        regime = await self._current_regime_name(db)
+        rows = (await db.execute(stmt)).scalars().all()
+        return [self._fallback_signal_to_dict(row, regime=regime) for row in rows]
+
+    async def _get_funnel_stats_signal_fallback(
+        self,
+        db: AsyncSession,
+        *,
+        since_days: int,
+    ) -> dict[str, Any]:
+        from app.models.trading_signal import (SignalSource, SignalType,
+                                               TradingSignal)
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
+        conditions = [
+            TradingSignal.created_at >= cutoff,
+            TradingSignal.signal_source == SignalSource.STRATEGY,
+            TradingSignal.signal_type.in_([SignalType.ENTRY, SignalType.ADD]),
+            TradingSignal.status != "GENERATED",
+        ]
+
+        stmt = (
+            select(TradingSignal)
+            .where(and_(*conditions))
+            .order_by(TradingSignal.created_at.asc())
+        )
+        rows = (await db.execute(stmt)).scalars().all()
+        if not rows:
+            return {
+                "since_days": since_days,
+                "total_evaluated": 0,
+                "total_passed": 0,
+                "total_rejected": 0,
+                "elite_rate_pct": 0.0,
+                "layer_stats": {
+                    "layer_0_rejected": 0,
+                    "layer_1_rejected": 0,
+                    "layer_2_rejected": 0,
+                    "layer_3_rejected": 0,
+                    "layer_4_rejected": 0,
+                },
+                "rejection_breakdown": {},
+                "daily_trend": [],
+                "fallback_mode": True,
+            }
+
+        total = len(rows)
+        passed = sum(
+            1
+            for row in rows
+            if str(getattr(getattr(row, "status", None), "value", getattr(row, "status", "")))
+            in self._FALLBACK_PASS_STATUSES
+        )
+        daily_map: dict[str, dict[str, int]] = {}
+        for row in rows:
+            if not getattr(row, "created_at", None):
+                continue
+            day_key = str(row.created_at.date())
+            bucket = daily_map.setdefault(day_key, {"passed": 0, "total": 0})
+            bucket["total"] += 1
+            status = str(getattr(getattr(row, "status", None), "value", getattr(row, "status", "")))
+            if status in self._FALLBACK_PASS_STATUSES:
+                bucket["passed"] += 1
+
+        daily_trend = [
+            {
+                "date": day,
+                "passed": values["passed"],
+                "total": values["total"],
+                "elite_rate": round(values["passed"] / max(1, values["total"]) * 100, 1),
+            }
+            for day, values in sorted(daily_map.items())
+        ]
+
+        return {
+            "since_days": since_days,
+            "total_evaluated": total,
+            "total_passed": passed,
+            "total_rejected": total - passed,
+            "elite_rate_pct": round(passed / max(1, total) * 100, 1),
+            "layer_stats": {
+                "layer_0_rejected": 0,
+                "layer_1_rejected": 0,
+                "layer_2_rejected": 0,
+                "layer_3_rejected": 0,
+                "layer_4_rejected": 0,
+            },
+            "rejection_breakdown": {},
+            "daily_trend": daily_trend,
+            "fallback_mode": True,
+        }
 
     async def create(
         self,
@@ -66,10 +386,7 @@ class SignalAuditLogService:
             regime               = regime,
             concurrent_positions = concurrent_positions,
             daily_signals_used   = daily_signals_used,
-            generated_at         = (
-                datetime.fromisoformat(generated_at)
-                if generated_at else None
-            ),
+            generated_at         = self._normalize_generated_at(generated_at),
             evaluated_at         = datetime.now(timezone.utc),
         )
         db.add(entry)
@@ -88,6 +405,16 @@ class SignalAuditLogService:
     ) -> list[dict]:
         """获取近期审计日志列表。"""
         cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
+        if await self._should_use_signal_fallback(db, cutoff=cutoff):
+            return await self._get_recent_signal_fallback(
+                db,
+                limit=limit,
+                offset=offset,
+                funnel_result=funnel_result,
+                symbol=symbol,
+                since_days=since_days,
+            )
+
         conditions = [SignalQualityAuditLog.created_at >= cutoff]
         if funnel_result:
             conditions.append(SignalQualityAuditLog.funnel_result == funnel_result)
@@ -113,6 +440,11 @@ class SignalAuditLogService:
     ) -> dict:
         """计算漏斗各层通过/拒绝统计，用于 Signal Watchtower 漏斗流向图。"""
         cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
+        if await self._should_use_signal_fallback(db, cutoff=cutoff):
+            return await self._get_funnel_stats_signal_fallback(
+                db,
+                since_days=since_days,
+            )
 
         # 总数统计
         total_stmt = select(func.count()).select_from(SignalQualityAuditLog).where(
