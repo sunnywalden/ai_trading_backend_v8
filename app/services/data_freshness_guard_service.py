@@ -30,7 +30,10 @@ from typing import Any
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.cache import cache
+from app.services.freshness_heartbeat import (max_available_timestamp,
+                                              normalize_timestamp,
+                                              read_heartbeat_timestamp,
+                                              write_heartbeat_timestamp)
 
 _OK = "OK"
 _WARNING = "WARNING"
@@ -78,31 +81,6 @@ def _classify_missing_source(source_key: str, now: datetime) -> str:
 
 def _utc_now_naive() -> datetime:
     return datetime.now(UTC).replace(tzinfo=None)
-
-
-def _normalize_ts(value: datetime | None) -> datetime | None:
-    if value is None:
-        return None
-    if value.tzinfo is not None:
-        return value.astimezone(UTC).replace(tzinfo=None)
-    return value
-
-
-async def _read_cached_timestamp(key: str) -> datetime | None:
-    try:
-        raw = await cache.get(key, is_json=False)
-        if not raw:
-            return None
-        return _normalize_ts(datetime.fromisoformat(str(raw)))
-    except Exception:
-        return None
-
-
-async def _write_cached_timestamp(key: str, ts: datetime) -> None:
-    try:
-        await cache.set(key, _normalize_ts(ts).isoformat(), expire=3600, is_json=False)
-    except Exception:
-        pass
 
 
 def _effective_thresholds(
@@ -195,7 +173,7 @@ class DataFreshnessGuardService:
             from app.models.position import Position
 
             now = _utc_now_naive()
-            live_cached = await _read_cached_timestamp(
+            live_cached = await read_heartbeat_timestamp(
                 _POSITIONS_FRESHNESS_HEARTBEAT_KEY
             )
 
@@ -206,9 +184,10 @@ class DataFreshnessGuardService:
                 .limit(1)
             )
             result = await db.execute(stmt)
-            row = _normalize_ts(result.scalar_one_or_none())
-            if live_cached is not None and (row is None or live_cached > row):
-                row = live_cached
+            row = max_available_timestamp(
+                result.scalar_one_or_none(),
+                live_cached,
+            )
             if row is not None:
                 age_h = _age_hours(row, now)
                 if age_h is not None and age_h < (_POSITIONS_SELF_HEAL_MINUTES / 60.0):
@@ -220,9 +199,10 @@ class DataFreshnessGuardService:
                 select(Position.updated_at).order_by(desc(Position.updated_at)).limit(1)
             )
             result_any = await db.execute(stmt_any)
-            row_any = _normalize_ts(result_any.scalar_one_or_none())
-            if live_cached is not None and (row_any is None or live_cached > row_any):
-                row_any = live_cached
+            row_any = max_available_timestamp(
+                result_any.scalar_one_or_none(),
+                live_cached,
+            )
             if row_any is not None:
                 age_h_any = _age_hours(row_any, now)
                 if age_h_any is not None and age_h_any < (
@@ -239,7 +219,10 @@ class DataFreshnessGuardService:
                 force_refresh=True,
             )
             await broker.list_option_positions(account_id, force_refresh=True)
-            await _write_cached_timestamp(_POSITIONS_FRESHNESS_HEARTBEAT_KEY, now)
+            await write_heartbeat_timestamp(
+                _POSITIONS_FRESHNESS_HEARTBEAT_KEY,
+                now,
+            )
             return now
         except Exception:
             return None
