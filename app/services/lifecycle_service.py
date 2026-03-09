@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from sqlalchemy import and_, desc, func, select, true, update
@@ -272,13 +272,32 @@ class LifecycleService:
     # Position FSM
     # ─────────────────────────────────────────────────────────────────────────
     async def get_position_board(self, db: AsyncSession) -> PositionBoard:
-        """Return position-lifecycle kanban grouped by position status."""
+        """Return position-lifecycle kanban grouped by position status.
+
+        Active states (PENDING … EXCEPTION) show all records.
+        CLOSED / LIQUIDATED show only records closed in the past 90 days so
+        recently-closed positions (e.g. capacity-guard exits) remain visible
+        without polluting the board with ancient history.
+        """
         now = datetime.now(timezone.utc)
 
         # Import Position model
         from app.models.position import Position
 
-        stmt = select(Position).where(Position.symbol.isnot(None))
+        # For terminal states we only load the last 90 days to keep the board tidy.
+        _90d_ago = now - timedelta(days=90)
+
+        stmt = select(Position).where(
+            and_(
+                Position.symbol.isnot(None),
+                # Include every non-terminal record + terminal records within 90d
+                (
+                    Position.status.notin_(("CLOSED", "LIQUIDATED"))
+                    | (Position.closed_at >= _90d_ago)
+                    | (Position.updated_at >= _90d_ago)
+                ),
+            )
+        )
         result = await db.execute(stmt)
         rows = result.scalars().all()
 
@@ -320,16 +339,18 @@ class LifecycleService:
                 )
             )
 
-        # Build columns for active states only (exclude fully CLOSED and LIQUIDATED if desired, but we can include them or filter as needed. For kanban, usually we exclude CLOSED)
-        active_states = [
-            s for s in POSITION_FSM_STATES if s not in ("CLOSED", "LIQUIDATED")
-        ]
+        # Build columns: all states including CLOSED / LIQUIDATED
         columns: list[PositionBoardColumn] = []
         total_active = 0
-        for state in active_states:
+        for state in POSITION_FSM_STATES:
             meta = POSITION_FSM_META.get(state, {"label": state, "color": "#9ca3af"})
             cards = state_map.get(state, [])
-            total_active += len(cards)
+            is_terminal = state in ("CLOSED", "LIQUIDATED")
+            if not is_terminal:
+                total_active += len(cards)
+            # Skip empty terminal columns to avoid clutter when there's no history
+            if is_terminal and not cards:
+                continue
             columns.append(
                 PositionBoardColumn(
                     state=state,
