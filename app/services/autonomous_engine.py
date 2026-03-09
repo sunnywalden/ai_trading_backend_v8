@@ -731,7 +731,10 @@ class AutonomousEngine:
                     try:
                         order_id = await self._execute_order(account_id, decision, db)
                     except Exception as _exec_err:
-                        logger.error(f"[AutonomousEngine] _execute_order threw: {_exec_err}")
+                        logger.error(
+                            f"[AutonomousEngine] _execute_order threw for {decision.get('symbol')} "
+                            f"{decision.get('action')} qty={decision.get('qty')}: {_exec_err}"
+                        )
                         order_id = None
                     daily_trades += 1
                     if order_id:

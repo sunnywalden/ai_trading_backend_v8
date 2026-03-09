@@ -647,14 +647,21 @@ class TigerOptionClient(OptionBrokerClient):
             # 1. 创建订单对象
             # 注意: tigeropen API 创建订单通常使用 TradeClient.create_order
             # 获取合约信息可能需要, 但对于简单股票可以直接创建
+            from app.broker.factory import is_hk_stock as _place_is_hk
+            _contract_market = Market.HK if _place_is_hk(symbol) else Market.US
             contract = await self._run_in_executor(
                 self.trade_client.get_contracts,
                 symbol,
-                SecurityType.STK
+                SecurityType.STK,
+                _contract_market,
             )
             
             if not contract:
-                return {"success": False, "message": f"Could not find contract for {symbol}"}
+                logger.error(
+                    f" No contract found for {symbol} (market={_contract_market}). "
+                    f"Symbol may not be supported in this Tiger environment."
+                )
+                return {"success": False, "message": f"Could not find contract for {symbol} in market {_contract_market}"}
             
             # 2. 构造订单
             # tigeropen SDK 示例通常是:
@@ -728,9 +735,7 @@ class TigerOptionClient(OptionBrokerClient):
                 }
                 
         except Exception as e:
-            logger.info(f" Place order failed: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f" Place order failed for {symbol} ({action} {quantity}): {e}", exc_info=True)
             return {
                 "success": False,
                 "message": f"Tiger API error: {str(e)}"
