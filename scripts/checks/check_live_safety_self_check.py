@@ -137,7 +137,9 @@ async def run_self_check(args: argparse.Namespace) -> dict[str, Any]:
 
             summary_statuses = [freshness.get("overall_status", "OK")]
             summary_statuses.extend(item.get("status", "OK") for item in health_results)
-            worst_status = max(summary_statuses, key=_severity) if summary_statuses else "OK"
+            worst_status = (
+                max(summary_statuses, key=_severity) if summary_statuses else "OK"
+            )
 
             refresh_result = {
                 "executed": not args.skip_refresh_job,
