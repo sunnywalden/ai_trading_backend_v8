@@ -8,6 +8,7 @@ Endpoints:
   GET  /api/v1/signals/ghost-trades            → 幽灵交易列表
   GET  /api/v1/signals/ghost-trades/analysis   → 幽灵胜率 vs 实际胜率分析
 """
+
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -19,17 +20,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
 from app.models.db import get_session
-from app.models.trading_signal import SignalSource, SignalStatus, SignalType, TradingSignal
+from app.models.position import Position, PositionStatus
 from app.models.trading_plan import TradingPlan
+from app.models.trading_signal import (
+    SignalSource,
+    SignalStatus,
+    SignalType,
+    TradingSignal,
+)
+from app.services.ghost_trade_service import ghost_trade_service
 from app.services.regime_classifier import RegimeClassifier
+from app.services.signal_audit_log_service import signal_audit_log_service
 from app.services.signal_quality_config import (
     apply_runtime_override,
     get_regime_adjusted_config,
     get_signal_quality_config,
     reset_runtime_overrides,
 )
-from app.services.signal_audit_log_service import signal_audit_log_service
-from app.services.ghost_trade_service import ghost_trade_service
 
 router = APIRouter(prefix="/api/v1/signals", tags=["Signal Quality (V10.4.2)"])
 
@@ -38,6 +45,7 @@ router = APIRouter(prefix="/api/v1/signals", tags=["Signal Quality (V10.4.2)"])
 # 漏斗配置
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @router.get("/quality-config", summary="查看信号精英化漏斗参数")
 async def get_quality_config(
     _user: str = Depends(get_current_user),
@@ -45,21 +53,21 @@ async def get_quality_config(
     """返回当前信号品质漏斗的所有可配置参数（含运行时覆盖值）。"""
     cfg = get_signal_quality_config()
     return {
-        "elite_signal_score":           cfg.ELITE_SIGNAL_SCORE,
-        "elite_signal_floor":           cfg.ELITE_SIGNAL_FLOOR,
-        "elite_min_aligned_dims":       cfg.ELITE_MIN_ALIGNED_DIMS,
-        "high_quality_signal_score":    cfg.HIGH_QUALITY_SIGNAL_SCORE,
-        "medium_quality_signal_score":  cfg.MEDIUM_QUALITY_SIGNAL_SCORE,
+        "elite_signal_score": cfg.ELITE_SIGNAL_SCORE,
+        "elite_signal_floor": cfg.ELITE_SIGNAL_FLOOR,
+        "elite_min_aligned_dims": cfg.ELITE_MIN_ALIGNED_DIMS,
+        "high_quality_signal_score": cfg.HIGH_QUALITY_SIGNAL_SCORE,
+        "medium_quality_signal_score": cfg.MEDIUM_QUALITY_SIGNAL_SCORE,
         "signal_confidence_threshold": cfg.SIGNAL_CONFIDENCE_THRESHOLD,
-        "signal_resonance_min_dims":   cfg.SIGNAL_RESONANCE_MIN_DIMS,
-        "max_concurrent_positions":    cfg.MAX_CONCURRENT_POSITIONS,
-        "max_daily_signals":           cfg.MAX_DAILY_SIGNALS,
-        "max_position_correlation":    cfg.MAX_POSITION_CORRELATION,
-        "min_adv_threshold":           cfg.MIN_ADV_THRESHOLD,
-        "min_market_cap":              cfg.MIN_MARKET_CAP,
-        "ghost_trade_max_days":        cfg.GHOST_TRADE_MAX_DAYS,
-        "min_calibrated_floor":        cfg.SIGNAL_CONFIDENCE_FLOOR,
-        "min_expected_sharpe":         cfg.MIN_EXPECTED_SHARPE,
+        "signal_resonance_min_dims": cfg.SIGNAL_RESONANCE_MIN_DIMS,
+        "max_concurrent_positions": cfg.MAX_CONCURRENT_POSITIONS,
+        "max_daily_signals": cfg.MAX_DAILY_SIGNALS,
+        "max_position_correlation": cfg.MAX_POSITION_CORRELATION,
+        "min_adv_threshold": cfg.MIN_ADV_THRESHOLD,
+        "min_market_cap": cfg.MIN_MARKET_CAP,
+        "ghost_trade_max_days": cfg.GHOST_TRADE_MAX_DAYS,
+        "min_calibrated_floor": cfg.SIGNAL_CONFIDENCE_FLOOR,
+        "min_expected_sharpe": cfg.MIN_EXPECTED_SHARPE,
     }
 
 
@@ -80,16 +88,16 @@ async def patch_quality_config(
     """
     # key 映射：前端小写下划线 → 内部大写常量
     _KEY_MAP = {
-        "elite_signal_score":           "ELITE_SIGNAL_SCORE",
-        "elite_signal_floor":           "ELITE_SIGNAL_FLOOR",
-        "elite_min_aligned_dims":       "ELITE_MIN_ALIGNED_DIMS",
-        "high_quality_signal_score":    "HIGH_QUALITY_SIGNAL_SCORE",
-        "medium_quality_signal_score":  "MEDIUM_QUALITY_SIGNAL_SCORE",
+        "elite_signal_score": "ELITE_SIGNAL_SCORE",
+        "elite_signal_floor": "ELITE_SIGNAL_FLOOR",
+        "elite_min_aligned_dims": "ELITE_MIN_ALIGNED_DIMS",
+        "high_quality_signal_score": "HIGH_QUALITY_SIGNAL_SCORE",
+        "medium_quality_signal_score": "MEDIUM_QUALITY_SIGNAL_SCORE",
         "signal_confidence_threshold": "SIGNAL_CONFIDENCE_THRESHOLD",
-        "signal_resonance_min_dims":   "SIGNAL_RESONANCE_MIN_DIMS",
-        "max_concurrent_positions":    "MAX_CONCURRENT_POSITIONS",
-        "max_daily_signals":           "MAX_DAILY_SIGNALS",
-        "max_position_correlation":    "MAX_POSITION_CORRELATION",
+        "signal_resonance_min_dims": "SIGNAL_RESONANCE_MIN_DIMS",
+        "max_concurrent_positions": "MAX_CONCURRENT_POSITIONS",
+        "max_daily_signals": "MAX_DAILY_SIGNALS",
+        "max_position_correlation": "MAX_POSITION_CORRELATION",
     }
     overrides: dict = {}
     for k, v in body.items():
@@ -106,16 +114,16 @@ async def patch_quality_config(
         "updated": True,
         "applied": overrides,
         "current": {
-            "elite_signal_score":           cfg.ELITE_SIGNAL_SCORE,
-            "elite_signal_floor":           cfg.ELITE_SIGNAL_FLOOR,
-            "elite_min_aligned_dims":       cfg.ELITE_MIN_ALIGNED_DIMS,
-            "high_quality_signal_score":    cfg.HIGH_QUALITY_SIGNAL_SCORE,
-            "medium_quality_signal_score":  cfg.MEDIUM_QUALITY_SIGNAL_SCORE,
+            "elite_signal_score": cfg.ELITE_SIGNAL_SCORE,
+            "elite_signal_floor": cfg.ELITE_SIGNAL_FLOOR,
+            "elite_min_aligned_dims": cfg.ELITE_MIN_ALIGNED_DIMS,
+            "high_quality_signal_score": cfg.HIGH_QUALITY_SIGNAL_SCORE,
+            "medium_quality_signal_score": cfg.MEDIUM_QUALITY_SIGNAL_SCORE,
             "signal_confidence_threshold": cfg.SIGNAL_CONFIDENCE_THRESHOLD,
-            "signal_resonance_min_dims":   cfg.SIGNAL_RESONANCE_MIN_DIMS,
-            "max_concurrent_positions":    cfg.MAX_CONCURRENT_POSITIONS,
-            "max_daily_signals":           cfg.MAX_DAILY_SIGNALS,
-            "max_position_correlation":    cfg.MAX_POSITION_CORRELATION,
+            "signal_resonance_min_dims": cfg.SIGNAL_RESONANCE_MIN_DIMS,
+            "max_concurrent_positions": cfg.MAX_CONCURRENT_POSITIONS,
+            "max_daily_signals": cfg.MAX_DAILY_SIGNALS,
+            "max_position_correlation": cfg.MAX_POSITION_CORRELATION,
         },
     }
 
@@ -133,12 +141,13 @@ async def reset_quality_config(
 # 审计日志
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @router.get("/audit-log", summary="信号品质审计日志列表")
 async def get_audit_log(
-    limit: int      = Query(50,   ge=1, le=200, description="每页条数"),
-    offset: int     = Query(0,    ge=0),
+    limit: int = Query(50, ge=1, le=200, description="每页条数"),
+    offset: int = Query(0, ge=0),
     funnel_result: Optional[str] = Query(None, description="PASSED / REJECTED"),
-    symbol: Optional[str]        = Query(None),
+    symbol: Optional[str] = Query(None),
     since_days: int = Query(30, ge=1, le=365),
     db: AsyncSession = Depends(get_session),
     _user: str = Depends(get_current_user),
@@ -161,6 +170,7 @@ async def get_audit_log(
 # ─────────────────────────────────────────────────────────────────────────────
 # 漏斗统计
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 @router.get("/funnel-stats", summary="漏斗统计数据（精英率、逐层拒绝量、趋势）")
 async def get_funnel_stats(
@@ -186,13 +196,21 @@ async def get_funnel_stats(
     stats = await signal_audit_log_service.get_funnel_stats(db, since_days=since_days)
 
     # 实时注入当前持仓数与配置上限，帮助解释 L2 (MAX_POSITIONS_REACHED) 拦截原因
-    held_count_stmt = select(func.count()).select_from(TradingPlan).where(
-        and_(
-            TradingPlan.plan_status == "EXECUTED",
-            TradingPlan.position_fsm_state == "HELD",
-        )
+    # V10.4.4+: 查 positions 表（ACTIVE/SCALING_IN/SCALING_OUT/PARTIALLY_CLOSED 均为实际持仓）
+    _held_statuses = [
+        PositionStatus.ACTIVE.value,
+        PositionStatus.SCALING_IN.value,
+        PositionStatus.SCALING_OUT.value,
+        PositionStatus.PARTIALLY_CLOSED.value,
+    ]
+    held_count_stmt = (
+        select(func.count())
+        .select_from(Position)
+        .where(Position.status.in_(_held_statuses))
     )
-    current_positions_count = (await db.execute(held_count_stmt)).scalar_one_or_none() or 0
+    current_positions_count = (
+        await db.execute(held_count_stmt)
+    ).scalar_one_or_none() or 0
 
     cfg = get_signal_quality_config()
     current_regime = await RegimeClassifier.get_current_regime(db)
@@ -227,22 +245,28 @@ async def get_funnel_stats(
         meta = row.extra_metadata or {}
         if not isinstance(meta, dict) or not meta.get("capacity_guard"):
             continue
-        capacity_actions.append({
-            "signal_id": row.signal_id,
-            "symbol": row.symbol,
-            "status": row.status.value if hasattr(row.status, "value") else str(row.status),
-            "quantity": row.suggested_quantity,
-            "priority": row.priority,
-            "recommendation": meta.get("recommendation"),
-            "risk_level": meta.get("risk_level"),
-            "target_position": meta.get("target_position"),
-            "overflow": meta.get("capacity_guard_overflow"),
-            "target_max": meta.get("capacity_guard_target_max"),
-            "rank": meta.get("capacity_guard_rank"),
-            "created_at": row.created_at.isoformat() if row.created_at else None,
-            "executed_at": row.executed_at.isoformat() if row.executed_at else None,
-            "notes": row.notes,
-        })
+        capacity_actions.append(
+            {
+                "signal_id": row.signal_id,
+                "symbol": row.symbol,
+                "status": (
+                    row.status.value
+                    if hasattr(row.status, "value")
+                    else str(row.status)
+                ),
+                "quantity": row.suggested_quantity,
+                "priority": row.priority,
+                "recommendation": meta.get("recommendation"),
+                "risk_level": meta.get("risk_level"),
+                "target_position": meta.get("target_position"),
+                "overflow": meta.get("capacity_guard_overflow"),
+                "target_max": meta.get("capacity_guard_target_max"),
+                "rank": meta.get("capacity_guard_rank"),
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+                "executed_at": row.executed_at.isoformat() if row.executed_at else None,
+                "notes": row.notes,
+            }
+        )
 
     open_statuses = {
         SignalStatus.GENERATED.value,
@@ -252,8 +276,12 @@ async def get_funnel_stats(
     }
     stats["capacity_guard"] = {
         "recent_generated_count": len(capacity_actions),
-        "open_signal_count": sum(1 for item in capacity_actions if item["status"] in open_statuses),
-        "last_action_at": capacity_actions[0]["created_at"] if capacity_actions else None,
+        "open_signal_count": sum(
+            1 for item in capacity_actions if item["status"] in open_statuses
+        ),
+        "last_action_at": (
+            capacity_actions[0]["created_at"] if capacity_actions else None
+        ),
         "recent_actions": capacity_actions[:8],
     }
 
@@ -264,12 +292,15 @@ async def get_funnel_stats(
 # 幽灵交易
 # ─────────────────────────────────────────────────────────────────────────────
 
+
 @router.get("/ghost-trades", summary="幽灵交易列表（被拒信号的虚拟跟踪）")
 async def get_ghost_trades(
-    limit: int      = Query(50, ge=1, le=200),
-    offset: int     = Query(0,  ge=0),
-    ghost_result: Optional[str] = Query(None, description="WIN / LOSS / OPEN / EXPIRED"),
-    symbol: Optional[str]       = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    ghost_result: Optional[str] = Query(
+        None, description="WIN / LOSS / OPEN / EXPIRED"
+    ),
+    symbol: Optional[str] = Query(None),
     since_days: int = Query(30, ge=1, le=365),
     db: AsyncSession = Depends(get_session),
     _user: str = Depends(get_current_user),

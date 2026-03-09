@@ -1,4 +1,5 @@
 """V10: AutonomousEngine — AI 三级自主决策引擎"""
+
 from __future__ import annotations
 
 import asyncio
@@ -39,6 +40,7 @@ class AutonomousEngine:
             import asyncio
 
             from app.core.cache import cache
+
             asyncio.get_event_loop().create_task(
                 cache.set(
                     AUTONOMOUS_ENGINE_PAUSED_KEY,
@@ -56,6 +58,7 @@ class AutonomousEngine:
             import asyncio
 
             from app.core.cache import cache
+
             asyncio.get_event_loop().create_task(
                 cache.delete(AUTONOMOUS_ENGINE_PAUSED_KEY)
             )
@@ -93,7 +96,9 @@ class AutonomousEngine:
         meta = self._signal_extra_metadata(signal)
         return bool(meta.get("force_exit"))
 
-    def _is_closing_intent(self, signal: dict, decision: dict, force_exit: bool = False) -> bool:
+    def _is_closing_intent(
+        self, signal: dict, decision: dict, force_exit: bool = False
+    ) -> bool:
         if force_exit:
             return True
         signal_type = str(signal.get("signal_type") or "").upper()
@@ -101,9 +106,11 @@ class AutonomousEngine:
         meta = self._signal_extra_metadata(signal)
         meta_intent = str(meta.get("closing_intent") or "").upper()
         return (
-            signal_type in {"EXIT", "REDUCE", "STOP_LOSS_EXIT", "TAKE_PROFIT_EXIT", "FORCE_EXIT"}
+            signal_type
+            in {"EXIT", "REDUCE", "STOP_LOSS_EXIT", "TAKE_PROFIT_EXIT", "FORCE_EXIT"}
             or action in {"SELL", "REDUCE", "EXIT", "BUY_TO_COVER"}
-            or meta_intent in {"EXIT", "REDUCE", "STOP_LOSS_EXIT", "TAKE_PROFIT_EXIT", "FORCE_EXIT"}
+            or meta_intent
+            in {"EXIT", "REDUCE", "STOP_LOSS_EXIT", "TAKE_PROFIT_EXIT", "FORCE_EXIT"}
         )
 
     def _resolve_execution_path(self, is_closing: bool, is_force_exit: bool) -> str:
@@ -169,8 +176,18 @@ class AutonomousEngine:
         signal_type = str(signal.get("signal_type") or "").upper()
         meta = self._signal_extra_metadata(signal)
         meta_intent = str(meta.get("closing_intent") or "").upper()
-        return signal_type in {"EXIT", "REDUCE", "STOP_LOSS_EXIT", "TAKE_PROFIT_EXIT", "FORCE_EXIT"} or meta_intent in {
-            "EXIT", "REDUCE", "STOP_LOSS_EXIT", "TAKE_PROFIT_EXIT", "FORCE_EXIT"
+        return signal_type in {
+            "EXIT",
+            "REDUCE",
+            "STOP_LOSS_EXIT",
+            "TAKE_PROFIT_EXIT",
+            "FORCE_EXIT",
+        } or meta_intent in {
+            "EXIT",
+            "REDUCE",
+            "STOP_LOSS_EXIT",
+            "TAKE_PROFIT_EXIT",
+            "FORCE_EXIT",
         }
 
     @staticmethod
@@ -178,7 +195,9 @@ class AutonomousEngine:
         return value if isinstance(value, dict) else {}
 
     @classmethod
-    def _extract_dimension_payload(cls, signal: dict) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    def _extract_dimension_payload(
+        cls, signal: dict
+    ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
         factor_scores = cls._safe_dict(signal.get("factor_scores"))
         extra_meta = cls._safe_dict(signal.get("extra_metadata"))
         dimensions = signal.get("dimensions")
@@ -233,35 +252,41 @@ class AutonomousEngine:
                 return 0.5
             return value / 100.0 if value > 1.0 else value
 
-        confidence = float(signal.get("confidence") or signal.get("fused_confidence") or 0.0)
+        confidence = float(
+            signal.get("confidence") or signal.get("fused_confidence") or 0.0
+        )
         if confidence > 1.0:
             confidence = confidence / 100.0
 
         return SignalFunnelInput(
-            signal_id                     = signal.get("id"),
-            signal_type                   = str(signal.get("signal_type") or "ENTRY").upper(),
-            signal_strength               = float(signal.get("signal_strength") or 0.0),
-            symbol                        = str(signal.get("symbol") or ""),
-            direction                     = str(signal.get("direction") or "LONG").upper(),
-            regime                        = regime or "SIDEWAYS",
-            composite_score               = confidence,
-            aligned_count                 = int(_from_sources("aligned_count", 0) or 0),
-            aligned_dims                  = list(_from_sources("aligned_dims", []) or []),
-            opposing_dims                 = list(_from_sources("opposing_dims", []) or []),
-            neutral_dims                  = list(_from_sources("neutral_dims", []) or []),
-            tech_direction                = _dim_dir("technical"),
-            fundamental_direction         = _dim_dir("fundamental"),
-            macro_score                   = _dim_score("macro"),
-            options_score                 = _dim_score("options"),
-            adv_usd                       = _from_sources("adv_usd", None),
-            market_cap                    = _from_sources("market_cap", None),
-            max_correlation_with_existing = _from_sources("max_correlation_with_existing", 0.0),
-            historical_ic                 = _from_sources("historical_ic", None),
-            timing_quality                = _from_sources("timing_quality", None),
-            generated_at                  = signal.get("created_at") or signal.get("generated_at"),
+            signal_id=signal.get("id"),
+            signal_type=str(signal.get("signal_type") or "ENTRY").upper(),
+            signal_strength=float(signal.get("signal_strength") or 0.0),
+            symbol=str(signal.get("symbol") or ""),
+            direction=str(signal.get("direction") or "LONG").upper(),
+            regime=regime or "SIDEWAYS",
+            composite_score=confidence,
+            aligned_count=int(_from_sources("aligned_count", 0) or 0),
+            aligned_dims=list(_from_sources("aligned_dims", []) or []),
+            opposing_dims=list(_from_sources("opposing_dims", []) or []),
+            neutral_dims=list(_from_sources("neutral_dims", []) or []),
+            tech_direction=_dim_dir("technical"),
+            fundamental_direction=_dim_dir("fundamental"),
+            macro_score=_dim_score("macro"),
+            options_score=_dim_score("options"),
+            adv_usd=_from_sources("adv_usd", None),
+            market_cap=_from_sources("market_cap", None),
+            max_correlation_with_existing=_from_sources(
+                "max_correlation_with_existing", 0.0
+            ),
+            historical_ic=_from_sources("historical_ic", None),
+            timing_quality=_from_sources("timing_quality", None),
+            generated_at=signal.get("created_at") or signal.get("generated_at"),
         )
 
-    def _rank_signals_for_processing(self, signals: list[dict], regime: Optional[str]) -> list[dict]:
+    def _rank_signals_for_processing(
+        self, signals: list[dict], regime: Optional[str]
+    ) -> list[dict]:
         from app.services.signal_quality_funnel import signal_quality_funnel
 
         ranked: list[dict] = []
@@ -280,11 +305,13 @@ class AutonomousEngine:
             if not is_closing:
                 funnel_input = self._build_signal_funnel_input(signal, regime)
                 quality_profile = signal_quality_funnel.preview_quality(funnel_input)
-                queue_meta.update({
-                    "signal_quality_tier": quality_profile.tier,
-                    "signal_quality_score": quality_profile.score,
-                    "signal_quality_quota_exempt": quality_profile.quota_exempt,
-                })
+                queue_meta.update(
+                    {
+                        "signal_quality_tier": quality_profile.tier,
+                        "signal_quality_score": quality_profile.score,
+                        "signal_quality_quota_exempt": quality_profile.quota_exempt,
+                    }
+                )
             signal.update(queue_meta)
             ranked.append(signal)
 
@@ -327,6 +354,7 @@ class AutonomousEngine:
         """应用启动时从 Redis 恢复暂停状态，防止重启丢失互斥状态。"""
         try:
             from app.core.cache import cache
+
             val = await cache.get(AUTONOMOUS_ENGINE_PAUSED_KEY)
             if val:
                 self.is_running = False
@@ -341,6 +369,7 @@ class AutonomousEngine:
             return []
 
         from app.core.runtime_config import get_autonomy_level as _get_level
+
         level = await _get_level()
         logger.info(f"Starting decision cycle for {account_id}, Level={level}")
 
@@ -348,12 +377,14 @@ class AutonomousEngine:
         regime_at_decision: Optional[str] = None
         regime_confidence: Optional[float] = None
         try:
-            from app.services.regime_strategy_allocator import \
-                fetch_current_regime_from_redis
+            from app.services.regime_strategy_allocator import (
+                fetch_current_regime_from_redis,
+            )
+
             regime_info = await fetch_current_regime_from_redis()
             if regime_info.get("regime") not in (None, "UNKNOWN"):
                 regime_at_decision = regime_info["regime"]
-                regime_confidence   = regime_info.get("confidence")
+                regime_confidence = regime_info.get("confidence")
                 logger.debug(
                     f"[AutonomousEngine] Regime context: {regime_at_decision} "
                     f"(confidence={regime_confidence:.2%})"
@@ -380,7 +411,9 @@ class AutonomousEngine:
         # 获取待处理信号
         signals = await self._fetch_pending_signals(account_id, db)
         if not signals:
-            logger.info(f"[AutonomousEngine] No pending signals (GENERATED/VALIDATED) for {account_id} — cycle skipped")
+            logger.info(
+                f"[AutonomousEngine] No pending signals (GENERATED/VALIDATED) for {account_id} — cycle skipped"
+            )
             return []
 
         signals = self._rank_signals_for_processing(signals, regime_at_decision)[:10]
@@ -391,6 +424,7 @@ class AutonomousEngine:
 
         from app.models.trading_signal import SignalStatus as _SS
         from app.models.trading_signal import TradingSignal as _TSModel
+
         signal_ids = [s["id"] for s in signals]
         try:
             await db.execute(
@@ -403,8 +437,96 @@ class AutonomousEngine:
         except Exception as _e:
             logger.warning(f"[AutonomousEngine] Failed to lock signals to QUEUED: {_e}")
 
+        # ─────────────────────────────────────────────────────────────────────
+        # V10.5.2: 席位竞争仲裁 — 在逐信号评估前，先对整批 ENTRY 信号做统一容量排序
+        # 当持仓数达到上限时，将"当前持仓 + 新信号"统一排序，淘汰末位 N 个对象。
+        # ─────────────────────────────────────────────────────────────────────
+        _arbiter_approved_ids: set = set()  # 通过仲裁的信号 id 集合
+        _arbiter_rejected_ids: set = set()  # 仲裁拒绝信号 id 集合
+        try:
+            from app.services.signal_quality_config import (
+                get_signal_quality_config as _sq_cfg,
+            )
+
+            _sq = _sq_cfg()
+            _entry_signals = [
+                s
+                for s in signals
+                if not self._is_closing_signal_preview(s) and not self._is_force_exit(s)
+            ]
+            if (
+                _sq.CAPACITY_REPLACEMENT_ENABLED
+                and len(current_positions) >= _sq.MAX_CONCURRENT_POSITIONS
+                and _entry_signals
+            ):
+                from app.services.capacity_arbiter import capacity_arbiter_service
+                from app.services.signal_quality_config import (
+                    get_regime_adjusted_config as _regime_cfg,
+                )
+
+                _r_cfg = _regime_cfg(regime_at_decision or "SIDEWAYS")
+                _max_pos = _r_cfg.get(
+                    "MAX_CONCURRENT_POSITIONS", _sq.MAX_CONCURRENT_POSITIONS
+                )
+                _arbiter_decision = await capacity_arbiter_service.evaluate(
+                    account_id=account_id,
+                    current_positions=current_positions,
+                    entry_signals=_entry_signals,
+                    max_positions=_max_pos,
+                    regime=regime_at_decision or "SIDEWAYS",
+                    db=db,
+                    cycle_id=str(regime_at_decision or "") + "-" + account_id,
+                )
+                _arbiter_approved_ids = {
+                    s["id"] for s in _arbiter_decision.approved_signals if s.get("id")
+                }
+                _arbiter_rejected_ids = {
+                    s["id"] for s in _arbiter_decision.rejected_signals if s.get("id")
+                }
+                if _arbiter_rejected_ids:
+                    logger.info(
+                        "[AutonomousEngine] V10.5.2 CapacityArbiter rejected %d signal(s): %s",
+                        len(_arbiter_rejected_ids),
+                        _arbiter_rejected_ids,
+                    )
+        except Exception as _arb_err:
+            logger.warning(
+                "[AutonomousEngine] CapacityArbiter evaluation failed (non-fatal, falling back "
+                "to Layer2 hard-reject): %s",
+                _arb_err,
+            )
+
         daily_signals_executed = 0  # V10.4.2: 当日已通过漏斗并成功执行的信号数
         for signal in signals:
+            # ─── V10.5.2: 席位竞争仲裁拒绝路径 ───────────────────────────────────
+            _sig_id = signal.get("id")
+            if _sig_id in _arbiter_rejected_ids:
+                _arb_reject_reason = "quality-funnel(L2,SEAT_COMPETITION_ELIMINATED)"
+                logger.info(
+                    "[AutonomousEngine] Signal %s rejected by CapacityArbiter (seat competition)",
+                    _sig_id,
+                )
+                await self._update_signal_status(db, _sig_id, _SS.REJECTED)
+                results.append(
+                    {
+                        "signal_id": _sig_id,
+                        "decision": {
+                            "symbol": signal.get("symbol"),
+                            "action": "REJECT",
+                        },
+                        "gate_passed": False,
+                        "order_id": None,
+                        "execution_intent_id": None,
+                        "execution_path": "STANDARD",
+                        "signal_quality_tier": signal.get("signal_quality_tier"),
+                        "signal_quality_score": signal.get("signal_quality_score"),
+                        "signal_quality_quota_exempt": bool(
+                            signal.get("signal_quality_quota_exempt")
+                        ),
+                        "reason": _arb_reject_reason,
+                    }
+                )
+                continue
             decision = await self._ai_decide(signal, current_positions, current_equity)
             signal_meta = self._signal_extra_metadata(signal)
             is_force_exit = self._is_force_exit(signal)
@@ -413,7 +535,9 @@ class AutonomousEngine:
             decision["execution_path"] = execution_path
             decision["signal_quality_tier"] = signal.get("signal_quality_tier")
             decision["signal_quality_score"] = signal.get("signal_quality_score")
-            decision["signal_quality_quota_exempt"] = bool(signal.get("signal_quality_quota_exempt"))
+            decision["signal_quality_quota_exempt"] = bool(
+                signal.get("signal_quality_quota_exempt")
+            )
             decision["signal_queue_rank"] = signal.get("signal_queue_rank")
 
             # ─────────────────────────────────────────────────────────────────
@@ -430,19 +554,27 @@ class AutonomousEngine:
                     )
                 else:
                     from app.services.signal_quality_funnel import (
-                        SignalFunnelInput, signal_quality_funnel)
-                    _funnel_input = self._build_signal_funnel_input(signal, regime_at_decision)
+                        SignalFunnelInput,
+                        signal_quality_funnel,
+                    )
+
+                    _funnel_input = self._build_signal_funnel_input(
+                        signal, regime_at_decision
+                    )
                     _action = str(decision.get("action", "HOLD")).upper()
                     _funnel_input.direction = self._resolve_action_direction(
                         _action,
                         _funnel_input.direction,
                     )
-                    _funnel_input.symbol = str(decision.get("symbol") or _funnel_input.symbol)
+                    _funnel_input.symbol = str(
+                        decision.get("symbol") or _funnel_input.symbol
+                    )
                     _funnel_decision = await signal_quality_funnel.evaluate(
-                        signal                  = _funnel_input,
-                        db                      = db,
-                        current_positions_count = len(current_positions),
-                        daily_signals_executed  = daily_signals_executed,
+                        signal=_funnel_input,
+                        db=db,
+                        current_positions_count=len(current_positions),
+                        daily_signals_executed=daily_signals_executed,
+                        arbiter_approved=signal.get("id") in _arbiter_approved_ids,
                     )
                     if not _funnel_decision.passed:
                         _funnel_passed = False
@@ -455,18 +587,20 @@ class AutonomousEngine:
                             f"{_reject_reason}"
                         )
                         await self._update_signal_status(db, signal["id"], _SS.REJECTED)
-                        results.append({
-                            "signal_id":           signal["id"],
-                            "decision":            decision,
-                            "gate_passed":         False,
-                            "order_id":            None,
-                            "execution_intent_id": None,
-                            "execution_path":      execution_path,
-                            "signal_quality_tier": _funnel_decision.signal_quality_tier,
-                            "signal_quality_score": _funnel_decision.signal_quality_score,
-                            "signal_quality_quota_exempt": _funnel_decision.quota_exempt,
-                            "reason":              _reject_reason,
-                        })
+                        results.append(
+                            {
+                                "signal_id": signal["id"],
+                                "decision": decision,
+                                "gate_passed": False,
+                                "order_id": None,
+                                "execution_intent_id": None,
+                                "execution_path": execution_path,
+                                "signal_quality_tier": _funnel_decision.signal_quality_tier,
+                                "signal_quality_score": _funnel_decision.signal_quality_score,
+                                "signal_quality_quota_exempt": _funnel_decision.quota_exempt,
+                                "reason": _reject_reason,
+                            }
+                        )
             except Exception as _sq_err:
                 logger.warning(
                     f"[AutonomousEngine] Signal quality funnel error (non-fatal, will proceed): {_sq_err}"
@@ -485,7 +619,11 @@ class AutonomousEngine:
                 current_positions=current_positions,
                 daily_trades_today=daily_trades,
                 daily_realized_pnl=daily_pnl,
-                signal_intent=(signal_meta.get("closing_intent") or signal.get("signal_type") or ("EXIT" if is_closing else "OPEN")),
+                signal_intent=(
+                    signal_meta.get("closing_intent")
+                    or signal.get("signal_type")
+                    or ("EXIT" if is_closing else "OPEN")
+                ),
             )
             self._annotate_gate_details(
                 gate,
@@ -504,7 +642,9 @@ class AutonomousEngine:
             circuit_breaker = gate.circuit_breaker
 
             if gate.circuit_breaker and not gate.passed:
-                logger.critical(f"[AutonomousEngine] Circuit breaker triggered for {account_id}!")
+                logger.critical(
+                    f"[AutonomousEngine] Circuit breaker triggered for {account_id}!"
+                )
                 execution_intent_id = await self._create_execution_intent(
                     db=db,
                     account_id=account_id,
@@ -513,7 +653,9 @@ class AutonomousEngine:
                     status="REJECTED",
                     reason=f"circuit-breaker({gate.reason})",
                 )
-                await self._notify_circuit_breaker(account_id, daily_pnl, current_equity)
+                await self._notify_circuit_breaker(
+                    account_id, daily_pnl, current_equity
+                )
                 # 将信号回退为 VALIDATED，等待炴断器解除后重试
                 await self._update_signal_status(db, signal["id"], _SS.VALIDATED)
 
@@ -527,14 +669,18 @@ class AutonomousEngine:
                     reason=f"risk-gate({gate.reason})",
                 )
                 await self._update_signal_status(db, signal["id"], _SS.REJECTED)
-                logger.info(f"[AutonomousEngine] Signal {signal['id']} rejected by RiskGate: {gate.reason}")
+                logger.info(
+                    f"[AutonomousEngine] Signal {signal['id']} rejected by RiskGate: {gate.reason}"
+                )
 
             elif gate.passed:
                 # 检查交易数量，如果为 0 则视为 HOLD 决策，更新为 SKIPPED（语义化区分“已执行”）
                 if decision["action"] == "HOLD" or float(decision.get("qty", 0)) <= 0:
                     noop_code = self._classify_noop_reason(decision)
                     skip_reason = f"no-op({noop_code})"
-                    logger.info(f"[AutonomousEngine] Decision for {decision['symbol']} is HOLD or qty=0, skipping execution.")
+                    logger.info(
+                        f"[AutonomousEngine] Decision for {decision['symbol']} is HOLD or qty=0, skipping execution."
+                    )
                     execution_intent_id = await self._create_execution_intent(
                         db=db,
                         account_id=account_id,
@@ -554,7 +700,9 @@ class AutonomousEngine:
                             "execution_path": execution_path,
                             "signal_quality_tier": signal.get("signal_quality_tier"),
                             "signal_quality_score": signal.get("signal_quality_score"),
-                            "signal_quality_quota_exempt": bool(signal.get("signal_quality_quota_exempt")),
+                            "signal_quality_quota_exempt": bool(
+                                signal.get("signal_quality_quota_exempt")
+                            ),
                             "reason": skip_reason,
                         }
                     )
@@ -583,7 +731,9 @@ class AutonomousEngine:
                             "execution_path": execution_path,
                             "signal_quality_tier": signal.get("signal_quality_tier"),
                             "signal_quality_score": signal.get("signal_quality_score"),
-                            "signal_quality_quota_exempt": bool(signal.get("signal_quality_quota_exempt")),
+                            "signal_quality_quota_exempt": bool(
+                                signal.get("signal_quality_quota_exempt")
+                            ),
                             "reason": "duplicate-execution-intent",
                         }
                     )
@@ -595,7 +745,11 @@ class AutonomousEngine:
                     cooldown_min = int(
                         getattr(
                             settings,
-                            "EXIT_ORDER_COOLDOWN_MINUTES" if is_closing else "AUTONOMOUS_ORDER_COOLDOWN_MINUTES",
+                            (
+                                "EXIT_ORDER_COOLDOWN_MINUTES"
+                                if is_closing
+                                else "AUTONOMOUS_ORDER_COOLDOWN_MINUTES"
+                            ),
                             5 if is_closing else 120,
                         )
                         or (5 if is_closing else 120)
@@ -625,7 +779,13 @@ class AutonomousEngine:
                     )
                     try:
                         await self._write_audit_log(
-                            db, account_id, level, _cd_decision, gate, None, False,
+                            db,
+                            account_id,
+                            level,
+                            _cd_decision,
+                            gate,
+                            None,
+                            False,
                             regime_at_decision=regime_at_decision,
                             regime_confidence=regime_confidence,
                         )
@@ -641,7 +801,9 @@ class AutonomousEngine:
                             "execution_path": execution_path,
                             "signal_quality_tier": signal.get("signal_quality_tier"),
                             "signal_quality_score": signal.get("signal_quality_score"),
-                            "signal_quality_quota_exempt": bool(signal.get("signal_quality_quota_exempt")),
+                            "signal_quality_quota_exempt": bool(
+                                signal.get("signal_quality_quota_exempt")
+                            ),
                             "reason": f"duplicate-order cooldown({cooldown_min}m)",
                         }
                     )
@@ -654,7 +816,11 @@ class AutonomousEngine:
                     lock_seconds = int(
                         getattr(
                             settings,
-                            "EXIT_ORDER_LOCK_SECONDS" if is_closing else "AUTONOMOUS_ORDER_LOCK_SECONDS",
+                            (
+                                "EXIT_ORDER_LOCK_SECONDS"
+                                if is_closing
+                                else "AUTONOMOUS_ORDER_LOCK_SECONDS"
+                            ),
                             30 if is_closing else 180,
                         )
                         or (30 if is_closing else 180)
@@ -687,10 +853,19 @@ class AutonomousEngine:
                             f"{decision.get('symbol')} {str(decision.get('action') or '').upper()} "
                             f"within {lock_seconds}s, signal={signal['id']}"
                         )
-                        _lock_decision = dict(decision, reasoning=f"[并发锁] {lock_seconds}秒内已有相同标的同方向任务正在处理，跳过并发下单")
+                        _lock_decision = dict(
+                            decision,
+                            reasoning=f"[并发锁] {lock_seconds}秒内已有相同标的同方向任务正在处理，跳过并发下单",
+                        )
                         try:
                             await self._write_audit_log(
-                                db, account_id, level, _lock_decision, gate, None, False,
+                                db,
+                                account_id,
+                                level,
+                                _lock_decision,
+                                gate,
+                                None,
+                                False,
                                 regime_at_decision=regime_at_decision,
                                 regime_confidence=regime_confidence,
                             )
@@ -704,9 +879,15 @@ class AutonomousEngine:
                                 "order_id": None,
                                 "execution_intent_id": execution_intent_id,
                                 "execution_path": execution_path,
-                                "signal_quality_tier": signal.get("signal_quality_tier"),
-                                "signal_quality_score": signal.get("signal_quality_score"),
-                                "signal_quality_quota_exempt": bool(signal.get("signal_quality_quota_exempt")),
+                                "signal_quality_tier": signal.get(
+                                    "signal_quality_tier"
+                                ),
+                                "signal_quality_score": signal.get(
+                                    "signal_quality_score"
+                                ),
+                                "signal_quality_quota_exempt": bool(
+                                    signal.get("signal_quality_quota_exempt")
+                                ),
                                 "reason": f"redis-order-lock({lock_seconds}s)",
                             }
                         )
@@ -714,7 +895,9 @@ class AutonomousEngine:
 
                 if level == "ADVISORY":
                     await self._notify_suggestion(account_id, decision)
-                    await self._update_signal_status(db, signal["id"], _SS.VALIDATED)  # 保持待人工确认
+                    await self._update_signal_status(
+                        db, signal["id"], _SS.VALIDATED
+                    )  # 保持待人工确认
                     await self._update_execution_intent(
                         db,
                         execution_intent_id,
@@ -765,7 +948,12 @@ class AutonomousEngine:
                         )
                         # 执行成功后，自动写入 TradingPlan 供生命周期中心观测
                         await self._create_plan_for_executed_signal(
-                            db, account_id, signal, decision, order_id, execution_intent_id
+                            db,
+                            account_id,
+                            signal,
+                            decision,
+                            order_id,
+                            execution_intent_id,
                         )
                         # 执行成功后，同步写入 TradeJournal（避免“活跃计划有、交易日志无”）
                         await self._create_journal_for_executed_signal(
@@ -785,30 +973,42 @@ class AutonomousEngine:
             # 写审计日志（若库表未升级，不影响主交易流程）
             try:
                 await self._write_audit_log(
-                    db, account_id, level, decision, gate, order_id, circuit_breaker,
+                    db,
+                    account_id,
+                    level,
+                    decision,
+                    gate,
+                    order_id,
+                    circuit_breaker,
                     regime_at_decision=regime_at_decision,  # V10.2-M1
-                    regime_confidence=regime_confidence,      # V10.2-M1
+                    regime_confidence=regime_confidence,  # V10.2-M1
                 )
             except Exception as _audit_e:
-                logger.warning(f"[AutonomousEngine] Audit write skipped due to DB schema mismatch: {_audit_e}")
+                logger.warning(
+                    f"[AutonomousEngine] Audit write skipped due to DB schema mismatch: {_audit_e}"
+                )
                 try:
                     await db.rollback()
                 except Exception:
                     pass
 
-            results.append({
-                "symbol": decision["symbol"],
-                "action": decision["action"],
-                "gate_passed": gate.passed,
-                "order_id": order_id,
-                "execution_intent_id": execution_intent_id,
-                "execution_path": execution_path,
-                "signal_quality_tier": signal.get("signal_quality_tier"),
-                "signal_quality_score": signal.get("signal_quality_score"),
-                "signal_quality_quota_exempt": bool(signal.get("signal_quality_quota_exempt")),
-                "circuit_breaker": circuit_breaker,
-                "reason": gate.reason,
-            })
+            results.append(
+                {
+                    "symbol": decision["symbol"],
+                    "action": decision["action"],
+                    "gate_passed": gate.passed,
+                    "order_id": order_id,
+                    "execution_intent_id": execution_intent_id,
+                    "execution_path": execution_path,
+                    "signal_quality_tier": signal.get("signal_quality_tier"),
+                    "signal_quality_score": signal.get("signal_quality_score"),
+                    "signal_quality_quota_exempt": bool(
+                        signal.get("signal_quality_quota_exempt")
+                    ),
+                    "circuit_breaker": circuit_breaker,
+                    "reason": gate.reason,
+                }
+            )
 
         await db.commit()
         return results
@@ -838,7 +1038,9 @@ class AutonomousEngine:
         # - ABS_SHARES: quantity_value 是股数
         # -------------------------------
         quantity_mode = str(signal.get("quantity_mode") or "PCT_EQUITY").upper()
-        quantity_value = float(signal.get("quantity_value") or signal.get("quantity") or 0.10)
+        quantity_value = float(
+            signal.get("quantity_value") or signal.get("quantity") or 0.10
+        )
 
         target_abs_qty: Optional[float] = None
         qty_pct: float = 0.10
@@ -870,38 +1072,66 @@ class AutonomousEngine:
         if current_price <= 0:
             try:
                 from app.data.hub import DataHub
+
                 hub = DataHub()
                 quote = await hub.get_quote(symbol)
-                current_price = float(quote.get("price") or quote.get("last_price") or 0)
+                current_price = float(
+                    quote.get("price") or quote.get("last_price") or 0
+                )
                 if current_price > 0:
                     logger.info(
                         f"[AutonomousEngine._ai_decide] Got fallback price for {symbol} "
                         f"from DataHub: ${current_price}"
                     )
             except Exception as _qe:
-                logger.warning(f"[AutonomousEngine._ai_decide] DataHub quote failed for {symbol}: {_qe}")
+                logger.warning(
+                    f"[AutonomousEngine._ai_decide] DataHub quote failed for {symbol}: {_qe}"
+                )
 
         # 参考股数
         # - PCT_EQUITY: 账户净值 × 仓位比例 / 当前价格
         # - ABS_SHARES: 直接使用目标股数
         # 港股取整，美股保留小数
         from app.broker.factory import is_hk_stock as _is_hk_ref
+
         if target_abs_qty is not None:
-            ref_qty: float = float(int(round(target_abs_qty))) if _is_hk_ref(symbol) else round(float(target_abs_qty), 4)
+            ref_qty: float = (
+                float(int(round(target_abs_qty)))
+                if _is_hk_ref(symbol)
+                else round(float(target_abs_qty), 4)
+            )
             if current_price > 0 and equity > 0:
                 qty_pct = max(0.0, min((ref_qty * current_price) / equity, 1.0))
         elif current_price > 0:
             _raw_ref = equity * qty_pct / current_price
-            ref_qty = float(int(round(_raw_ref))) if _is_hk_ref(symbol) else round(_raw_ref, 4)
+            ref_qty = (
+                float(int(round(_raw_ref)))
+                if _is_hk_ref(symbol)
+                else round(_raw_ref, 4)
+            )
         else:
             ref_qty = 0.0
 
-        price_label = f"${current_price:.2f}（最新可用价，含盘后）" if current_price > 0 else "未知"
+        price_label = (
+            f"${current_price:.2f}（最新可用价，含盘后）"
+            if current_price > 0
+            else "未知"
+        )
         from app.broker.factory import is_hk_stock as _is_hk_prompt
-        _qty_rule = "港股必须为正整数（手数取整）" if _is_hk_prompt(symbol) else "美股支持小数股（fractional shares），可保留最多2位小数"
+
+        _qty_rule = (
+            "港股必须为正整数（手数取整）"
+            if _is_hk_prompt(symbol)
+            else "美股支持小数股（fractional shares），可保留最多2位小数"
+        )
         from app.core.market_hours import is_symbol_market_active
+
         _market_active = is_symbol_market_active(symbol)
-        _algo_rule = "当前为正常交易时段，可选 TWAP/VWAP/MKT" if _market_active else "当前为非交易时段（盘前/盘后/休市），必须选 LMT 或 MKT，禁止选 TWAP/VWAP"
+        _algo_rule = (
+            "当前为正常交易时段，可选 TWAP/VWAP/MKT"
+            if _market_active
+            else "当前为非交易时段（盘前/盘后/休市），必须选 LMT 或 MKT，禁止选 TWAP/VWAP"
+        )
 
         # 对于 REDUCE/EXIT，不走 AI 自由裁量，直接按持仓与信号数量执行（防止被误判为 HOLD）
         def _build_reduce_exit_decision(reason: str) -> dict:
@@ -934,7 +1164,12 @@ class AutonomousEngine:
             action = "BUY" if sig_dir in ("SHORT", "SELL") else "SELL"
 
             from app.broker.factory import is_hk_stock as _is_hk_reduce
-            qty_final = int(round(qty_abs)) if _is_hk_reduce(symbol) else round(float(qty_abs), 4)
+
+            qty_final = (
+                int(round(qty_abs))
+                if _is_hk_reduce(symbol)
+                else round(float(qty_abs), 4)
+            )
             algo = "MKT"
             if not _market_active and current_price > 0:
                 algo = "LMT"
@@ -952,7 +1187,9 @@ class AutonomousEngine:
             return payload
 
         if sig_type in ("REDUCE", "EXIT"):
-            return _build_reduce_exit_decision("rebalance signal deterministic execution")
+            return _build_reduce_exit_decision(
+                "rebalance signal deterministic execution"
+            )
 
         # 构造提示词
         prompt = f"""你是顶级量化交易 AI。基于以下信号做出交易决策。
@@ -992,15 +1229,11 @@ class AutonomousEngine:
             #   1) confidence >= 0.80
             #   2) signal_strength >= 80
             #   3) 信号显式给出了 ABS_SHARES 数量
-            has_explicit_abs_qty = (target_abs_qty is not None and target_abs_qty > 0)
+            has_explicit_abs_qty = target_abs_qty is not None and target_abs_qty > 0
             should_fallback_entry_add = (
                 sig_type in ("ENTRY", "ADD")
                 and ref_qty > 0
-                and (
-                    sig_conf >= 0.80
-                    or sig_strength >= 80
-                    or has_explicit_abs_qty
-                )
+                and (sig_conf >= 0.80 or sig_strength >= 80 or has_explicit_abs_qty)
             )
 
             if should_fallback_entry_add:
@@ -1050,10 +1283,10 @@ class AutonomousEngine:
             # 1.1) 常见“伪 JSON”修复：中文引号 / 全角冒号
             relaxed = (
                 text.replace("“", '"')
-                    .replace("”", '"')
-                    .replace("‘", "'")
-                    .replace("’", "'")
-                    .replace("：", ":")
+                .replace("”", '"')
+                .replace("‘", "'")
+                .replace("’", "'")
+                .replace("：", ":")
             )
             try:
                 obj = _json.loads(relaxed)
@@ -1098,9 +1331,9 @@ class AutonomousEngine:
                 else:
                     if ch == '"':
                         in_str = True
-                    elif ch == '{':
+                    elif ch == "{":
                         depth += 1
-                    elif ch == '}':
+                    elif ch == "}":
                         depth -= 1
                         if depth == 0:
                             candidate = text[start : i + 1]
@@ -1124,7 +1357,9 @@ class AutonomousEngine:
                     decision = parsed
 
             if not isinstance(decision, dict):
-                return _rule_based_fallback("Parse failed", hold_reason="ai-parse-failed")
+                return _rule_based_fallback(
+                    "Parse failed", hold_reason="ai-parse-failed"
+                )
 
             action = str(decision.get("action", "HOLD")).upper()
             raw_qty = float(decision.get("qty") or 0)
@@ -1141,6 +1376,7 @@ class AutonomousEngine:
 
             # 判断是否为港股（必须整数）；美股支持小数股（fractional shares）
             from app.broker.factory import is_hk_stock as _is_hk
+
             _hk = _is_hk(symbol)
 
             # 后置兜底：若 BUY/SELL 但 qty 过小，换算为实际股数
@@ -1151,7 +1387,11 @@ class AutonomousEngine:
                     # AI 返回的可能是仓位比例（如 0.15 = 15%），用净值换算
                     price_hint = current_price if current_price > 0 else 100.0
                     derived = equity * raw_qty / price_hint
-                    raw_qty = max(1.0, round(derived)) if _hk else max(0.001, round(derived, 4))
+                    raw_qty = (
+                        max(1.0, round(derived))
+                        if _hk
+                        else max(0.001, round(derived, 4))
+                    )
                     logger.info(
                         f"[AutonomousEngine._ai_decide] qty<{_qty_min_threshold} detected for {symbol}, "
                         f"derived qty={raw_qty} from equity={equity:.0f}×pct/{price_hint} (hk={_hk})"
@@ -1160,8 +1400,12 @@ class AutonomousEngine:
                     raw_qty = float(ref_qty)
                 else:
                     # 完全无法推算，回退 HOLD
-                    logger.warning(f"[AutonomousEngine._ai_decide] Cannot derive qty for {symbol}, fallback HOLD")
-                    return _rule_based_fallback("qty derivation failed", hold_reason="qty-derive-failed")
+                    logger.warning(
+                        f"[AutonomousEngine._ai_decide] Cannot derive qty for {symbol}, fallback HOLD"
+                    )
+                    return _rule_based_fallback(
+                        "qty derivation failed", hold_reason="qty-derive-failed"
+                    )
 
             # 港股取整；美股保留最多 4 位小数（fractional shares）
             decision["qty"] = int(round(raw_qty)) if _hk else round(raw_qty, 4)
@@ -1182,10 +1426,18 @@ class AutonomousEngine:
         """
         import asyncio
 
-        from openai import (APIConnectionError, APIStatusError,
-                            APITimeoutError, AsyncOpenAI)
+        from openai import (
+            APIConnectionError,
+            APIStatusError,
+            APITimeoutError,
+            AsyncOpenAI,
+        )
 
-        model = settings.AI_COMPLEX_MODEL if model_type == "complex" else settings.AI_LIGHTWEIGHT_MODEL
+        model = (
+            settings.AI_COMPLEX_MODEL
+            if model_type == "complex"
+            else settings.AI_LIGHTWEIGHT_MODEL
+        )
 
         # 优先使用 DeepSeek（若配置）
         if settings.DEEPSEEK_API_KEY and ("deepseek" in model):
@@ -1250,7 +1502,9 @@ class AutonomousEngine:
                         )
                         return resp.choices[0].message.content
                     except Exception as e2:
-                        logger.error(f"[AutonomousEngine._call_ai] fallback call failed: {e2}")
+                        logger.error(
+                            f"[AutonomousEngine._call_ai] fallback call failed: {e2}"
+                        )
                 # 其他 4xx/5xx — 通常重试无意义，直接返回 None
                 logger.error(
                     f"[AutonomousEngine._call_ai] APIStatusError {e.status_code}: {e.message}"
@@ -1263,7 +1517,7 @@ class AutonomousEngine:
                 return None
 
             if attempt < max_attempts:
-                wait_sec = 2 ** attempt  # 2s, 4s
+                wait_sec = 2**attempt  # 2s, 4s
                 logger.info(f"[AutonomousEngine._call_ai] Retrying in {wait_sec}s...")
                 await asyncio.sleep(wait_sec)
 
@@ -1386,7 +1640,11 @@ class AutonomousEngine:
         if not symbol or cooldown_minutes <= 0:
             return False
 
-        norm_dir = "BUY" if direction in ("BUY", "LONG") else "SELL" if direction in ("SELL", "SHORT") else ""
+        norm_dir = (
+            "BUY"
+            if direction in ("BUY", "LONG")
+            else "SELL" if direction in ("SELL", "SHORT") else ""
+        )
         if not norm_dir:
             return False
 
@@ -1435,17 +1693,24 @@ class AutonomousEngine:
         if not symbol or lock_seconds <= 0:
             return None
 
-        norm_dir = "BUY" if direction in ("BUY", "LONG") else "SELL" if direction in ("SELL", "SHORT") else ""
+        norm_dir = (
+            "BUY"
+            if direction in ("BUY", "LONG")
+            else "SELL" if direction in ("SELL", "SHORT") else ""
+        )
         if not norm_dir:
             return None
 
         try:
             from app.models.db import redis_client
+
             if redis_client is None:
                 # Redis 不可用：降级为“放行”，依赖 DB 冷却防重
                 return "NO_REDIS"
 
-            lock_key = f"ai_trading:autonomous:order_lock:{account_id}:{symbol}:{norm_dir}"
+            lock_key = (
+                f"ai_trading:autonomous:order_lock:{account_id}:{symbol}:{norm_dir}"
+            )
             locked = await redis_client.set(lock_key, "1", ex=lock_seconds, nx=True)
             return lock_key if locked else None
         except Exception as e:
@@ -1458,12 +1723,15 @@ class AutonomousEngine:
             return
         try:
             from app.models.db import redis_client
+
             if redis_client is not None:
                 await redis_client.delete(lock_key)
         except Exception:
             pass
 
-    async def _fetch_pending_signals(self, account_id: str, db: AsyncSession) -> list[dict]:
+    async def _fetch_pending_signals(
+        self, account_id: str, db: AsyncSession
+    ) -> list[dict]:
         """
         从 trading_signals 获取待处理信号。
         - 状态: GENERATED 或 VALIDATED（PENDING 在枚举中不存在，是历史错误）
@@ -1511,10 +1779,12 @@ class AutonomousEngine:
                 .where(
                     and_(
                         TradingSignal.account_id == account_id,
-                        TradingSignal.status.in_([
-                            SignalStatus.GENERATED,
-                            SignalStatus.VALIDATED,
-                        ]),
+                        TradingSignal.status.in_(
+                            [
+                                SignalStatus.GENERATED,
+                                SignalStatus.VALIDATED,
+                            ]
+                        ),
                         # TTL 过滤：跳过 24h 前的信号
                         or_(
                             TradingSignal.created_at >= cutoff,
@@ -1522,7 +1792,9 @@ class AutonomousEngine:
                         ),
                     )
                 )
-                .order_by(sa_desc(TradingSignal.priority), sa_desc(TradingSignal.confidence))
+                .order_by(
+                    sa_desc(TradingSignal.priority), sa_desc(TradingSignal.confidence)
+                )
                 .limit(30)
             )
             result = await db.execute(stmt)
@@ -1536,64 +1808,149 @@ class AutonomousEngine:
                     "signal_strength": float(r.signal_strength or 0),
                     "confidence": float(r.confidence or 0.5),
                     "direction": r.direction or "LONG",
-                    "quantity_mode": str(getattr(r, "quantity_mode", None) or "PCT_EQUITY").upper(),
-                    "quantity_value": float(getattr(r, "quantity_value", None) or r.suggested_quantity or 0),
+                    "quantity_mode": str(
+                        getattr(r, "quantity_mode", None) or "PCT_EQUITY"
+                    ).upper(),
+                    "quantity_value": float(
+                        getattr(r, "quantity_value", None) or r.suggested_quantity or 0
+                    ),
                     "quantity": float(r.suggested_quantity or 0),
-                    "suggested_price": float(r.suggested_price or 0) if r.suggested_price is not None else None,
-                    "strategy": str(r.signal_source.value) if r.signal_source else "STRATEGY",
+                    "suggested_price": (
+                        float(r.suggested_price or 0)
+                        if r.suggested_price is not None
+                        else None
+                    ),
+                    "strategy": (
+                        str(r.signal_source.value) if r.signal_source else "STRATEGY"
+                    ),
                     "status": r.status.value,
                     "notes": r.notes,
                     "priority": int(r.priority or 0),
-                    "factor_scores": r.factor_scores if isinstance(r.factor_scores, dict) else {},
+                    "factor_scores": (
+                        r.factor_scores if isinstance(r.factor_scores, dict) else {}
+                    ),
                     "dimensions": (
-                        ((r.extra_metadata or {}).get("dimensions") if isinstance(r.extra_metadata, dict) else None)
-                        or ((r.factor_scores or {}).get("dimensions") if isinstance(r.factor_scores, dict) else None)
+                        (
+                            (r.extra_metadata or {}).get("dimensions")
+                            if isinstance(r.extra_metadata, dict)
+                            else None
+                        )
+                        or (
+                            (r.factor_scores or {}).get("dimensions")
+                            if isinstance(r.factor_scores, dict)
+                            else None
+                        )
                         or []
                     ),
                     "aligned_count": (
-                        ((r.extra_metadata or {}).get("aligned_count") if isinstance(r.extra_metadata, dict) else None)
-                        or ((r.factor_scores or {}).get("aligned_count") if isinstance(r.factor_scores, dict) else None)
+                        (
+                            (r.extra_metadata or {}).get("aligned_count")
+                            if isinstance(r.extra_metadata, dict)
+                            else None
+                        )
+                        or (
+                            (r.factor_scores or {}).get("aligned_count")
+                            if isinstance(r.factor_scores, dict)
+                            else None
+                        )
                         or 0
                     ),
                     "aligned_dims": (
-                        ((r.extra_metadata or {}).get("aligned_dims") if isinstance(r.extra_metadata, dict) else None)
-                        or ((r.factor_scores or {}).get("aligned_dims") if isinstance(r.factor_scores, dict) else None)
+                        (
+                            (r.extra_metadata or {}).get("aligned_dims")
+                            if isinstance(r.extra_metadata, dict)
+                            else None
+                        )
+                        or (
+                            (r.factor_scores or {}).get("aligned_dims")
+                            if isinstance(r.factor_scores, dict)
+                            else None
+                        )
                         or []
                     ),
                     "opposing_dims": (
-                        ((r.extra_metadata or {}).get("opposing_dims") if isinstance(r.extra_metadata, dict) else None)
-                        or ((r.factor_scores or {}).get("opposing_dims") if isinstance(r.factor_scores, dict) else None)
+                        (
+                            (r.extra_metadata or {}).get("opposing_dims")
+                            if isinstance(r.extra_metadata, dict)
+                            else None
+                        )
+                        or (
+                            (r.factor_scores or {}).get("opposing_dims")
+                            if isinstance(r.factor_scores, dict)
+                            else None
+                        )
                         or []
                     ),
                     "neutral_dims": (
-                        ((r.extra_metadata or {}).get("neutral_dims") if isinstance(r.extra_metadata, dict) else None)
-                        or ((r.factor_scores or {}).get("neutral_dims") if isinstance(r.factor_scores, dict) else None)
+                        (
+                            (r.extra_metadata or {}).get("neutral_dims")
+                            if isinstance(r.extra_metadata, dict)
+                            else None
+                        )
+                        or (
+                            (r.factor_scores or {}).get("neutral_dims")
+                            if isinstance(r.factor_scores, dict)
+                            else None
+                        )
                         or []
                     ),
                     "adv_usd": (
-                        ((r.extra_metadata or {}).get("adv_usd") if isinstance(r.extra_metadata, dict) else None)
-                        or ((r.factor_scores or {}).get("adv_usd") if isinstance(r.factor_scores, dict) else None)
+                        (
+                            (r.extra_metadata or {}).get("adv_usd")
+                            if isinstance(r.extra_metadata, dict)
+                            else None
+                        )
+                        or (
+                            (r.factor_scores or {}).get("adv_usd")
+                            if isinstance(r.factor_scores, dict)
+                            else None
+                        )
                     ),
                     "market_cap": (
-                        ((r.extra_metadata or {}).get("market_cap") if isinstance(r.extra_metadata, dict) else None)
-                        or ((r.factor_scores or {}).get("market_cap") if isinstance(r.factor_scores, dict) else None)
+                        (
+                            (r.extra_metadata or {}).get("market_cap")
+                            if isinstance(r.extra_metadata, dict)
+                            else None
+                        )
+                        or (
+                            (r.factor_scores or {}).get("market_cap")
+                            if isinstance(r.factor_scores, dict)
+                            else None
+                        )
                     ),
                     "historical_ic": (
-                        ((r.extra_metadata or {}).get("historical_ic") if isinstance(r.extra_metadata, dict) else None)
-                        or ((r.factor_scores or {}).get("historical_ic") if isinstance(r.factor_scores, dict) else None)
+                        (
+                            (r.extra_metadata or {}).get("historical_ic")
+                            if isinstance(r.extra_metadata, dict)
+                            else None
+                        )
+                        or (
+                            (r.factor_scores or {}).get("historical_ic")
+                            if isinstance(r.factor_scores, dict)
+                            else None
+                        )
                     ),
                     "timing_quality": (
-                        ((r.extra_metadata or {}).get("timing_quality") if isinstance(r.extra_metadata, dict) else None)
-                        or ((r.factor_scores or {}).get("timing_quality") if isinstance(r.factor_scores, dict) else None)
+                        (
+                            (r.extra_metadata or {}).get("timing_quality")
+                            if isinstance(r.extra_metadata, dict)
+                            else None
+                        )
+                        or (
+                            (r.factor_scores or {}).get("timing_quality")
+                            if isinstance(r.factor_scores, dict)
+                            else None
+                        )
                     ),
-                    "extra_metadata": r.extra_metadata if isinstance(r.extra_metadata, dict) else {},
+                    "extra_metadata": (
+                        r.extra_metadata if isinstance(r.extra_metadata, dict) else {}
+                    ),
                 }
                 for r in rows
             ]
         except Exception as e:
             logger.warning(f"Failed to fetch pending signals: {e}", exc_info=True)
             return []
-
 
     async def _integrate_position_lifecycle(
         self,
@@ -1616,18 +1973,19 @@ class AutonomousEngine:
         try:
             from app.models.execution_slice import SliceAction
             from app.models.position import ClosingReason
-            from app.services.position_lifecycle_manager import \
-                PositionLifecycleManager
+            from app.services.position_lifecycle_manager import PositionLifecycleManager
 
             plm = PositionLifecycleManager(db)
             sig_type = str(signal.get("signal_type") or "").upper()
-            action    = str(decision.get("action")     or "").upper()
-            symbol    = str(decision.get("symbol")     or signal.get("symbol") or "")
-            qty       = float(decision.get("qty") or 0)
+            action = str(decision.get("action") or "").upper()
+            symbol = str(decision.get("symbol") or signal.get("symbol") or "")
+            qty = float(decision.get("qty") or 0)
             thesis_key = str(signal.get("thesis_key") or "default")
 
             # Determine signal direction
-            sig_dir   = str(signal.get("direction") or signal.get("signal_direction") or "").upper()
+            sig_dir = str(
+                signal.get("direction") or signal.get("signal_direction") or ""
+            ).upper()
             is_closing = (
                 sig_type in ("EXIT", "STOP_LOSS_EXIT", "TAKE_PROFIT_EXIT")
                 or action in ("SELL", "CLOSE", "REDUCE")
@@ -1642,13 +2000,17 @@ class AutonomousEngine:
 
             if is_entry_add:
                 # Try to find an existing active position (idempotent open)
-                existing = await plm._find_active_position(account_id, symbol, thesis_key)
+                existing = await plm._find_active_position(
+                    account_id, symbol, thesis_key
+                )
                 if existing is not None:
                     # Scale in
                     slc = await plm.add_to_position(
                         position_id=existing.id,
                         requested_qty=qty,
-                        signal_id=str(signal.get("signal_id") or signal.get("id") or ""),
+                        signal_id=str(
+                            signal.get("signal_id") or signal.get("id") or ""
+                        ),
                         signal_db_id=int(signal.get("id") or 0) or None,
                         intent_id=execution_intent_id,
                         execution_path=execution_path,
@@ -1664,7 +2026,9 @@ class AutonomousEngine:
                         requested_qty=qty,
                         thesis_key=thesis_key,
                         direction=sig_dir or action,
-                        signal_id=str(signal.get("signal_id") or signal.get("id") or ""),
+                        signal_id=str(
+                            signal.get("signal_id") or signal.get("id") or ""
+                        ),
                         signal_db_id=int(signal.get("id") or 0) or None,
                         intent_id=execution_intent_id,
                         execution_path=execution_path,
@@ -1675,7 +2039,9 @@ class AutonomousEngine:
                     _slc_id = slc.id
 
             elif is_closing:
-                existing = await plm._find_active_position(account_id, symbol, thesis_key)
+                existing = await plm._find_active_position(
+                    account_id, symbol, thesis_key
+                )
                 if existing is not None:
                     if sig_type == "STOP_LOSS_EXIT":
                         cr = ClosingReason.STOP_LOSS
@@ -1687,7 +2053,9 @@ class AutonomousEngine:
                         position_id=existing.id,
                         requested_qty=qty if qty > 0 else float(existing.open_qty or 0),
                         closing_reason=cr,
-                        signal_id=str(signal.get("signal_id") or signal.get("id") or ""),
+                        signal_id=str(
+                            signal.get("signal_id") or signal.get("id") or ""
+                        ),
                         signal_db_id=int(signal.get("id") or 0) or None,
                         intent_id=execution_intent_id,
                         execution_path=execution_path,
@@ -1701,11 +2069,13 @@ class AutonomousEngine:
                 try:
                     from sqlalchemy import update as _sa_upd
 
-                    from app.models.execution_intent import \
-                        AutonomousExecutionIntent
+                    from app.models.execution_intent import AutonomousExecutionIntent
+
                     await db.execute(
                         _sa_upd(AutonomousExecutionIntent)
-                        .where(AutonomousExecutionIntent.intent_id == execution_intent_id)
+                        .where(
+                            AutonomousExecutionIntent.intent_id == execution_intent_id
+                        )
                         .values(position_id=_pos_id, execution_slice_id=_slc_id)
                     )
                     await db.commit()
@@ -1754,12 +2124,20 @@ class AutonomousEngine:
             entry = max(entry, 0.01)
 
             qty_mode = str(signal.get("quantity_mode") or "PCT_EQUITY").upper()
-            qty_value = float(signal.get("quantity_value") or signal.get("quantity") or 0.05)
+            qty_value = float(
+                signal.get("quantity_value") or signal.get("quantity") or 0.05
+            )
             if qty_mode == "ABS_SHARES" and qty_value > 0 and entry > 0:
-                baseline_equity = float(getattr(settings, "PAPER_INITIAL_CAPITAL", 100000.0) or 100000.0)
-                target_position_pct = min(max((qty_value * entry) / baseline_equity, 0.01), 1.0)
+                baseline_equity = float(
+                    getattr(settings, "PAPER_INITIAL_CAPITAL", 100000.0) or 100000.0
+                )
+                target_position_pct = min(
+                    max((qty_value * entry) / baseline_equity, 0.01), 1.0
+                )
             else:
-                target_position_pct = qty_value if qty_value <= 1.0 else qty_value / 100.0
+                target_position_pct = (
+                    qty_value if qty_value <= 1.0 else qty_value / 100.0
+                )
                 target_position_pct = min(max(target_position_pct, 0.01), 1.0)
 
             if direction in ("BUY", "LONG"):
@@ -1782,12 +2160,15 @@ class AutonomousEngine:
                 take_profit=Decimal(str(tp)),
                 target_position=Decimal(str(round(target_position_pct, 4))),
                 direction=direction,
-                confidence=Decimal(str(round(float(decision.get("confidence") or 0.7), 4))),
+                confidence=Decimal(
+                    str(round(float(decision.get("confidence") or 0.7), 4))
+                ),
                 reasoning=str(decision.get("reasoning", ""))[:2000],
                 autonomy_action="AUTO_EXECUTE",
                 source="AI_AUTONOMOUS",
                 plan_tags={
-                    "signal_id": str(signal.get("signal_id") or signal.get("id") or "") or None,
+                    "signal_id": str(signal.get("signal_id") or signal.get("id") or "")
+                    or None,
                     "signal_db_id": signal.get("id"),
                     "execution_intent_id": execution_intent_id,
                     "order_id": str(order_id or "") or None,
@@ -1796,7 +2177,10 @@ class AutonomousEngine:
                 provenance_snapshot={
                     "execution_ref": {
                         "execution_intent_id": execution_intent_id,
-                        "signal_id": str(signal.get("signal_id") or signal.get("id") or "") or None,
+                        "signal_id": str(
+                            signal.get("signal_id") or signal.get("id") or ""
+                        )
+                        or None,
                         "signal_db_id": signal.get("id"),
                         "order_id": str(order_id or "") or None,
                     },
@@ -1805,20 +2189,22 @@ class AutonomousEngine:
                         "submitted": True,
                     },
                 },
-                pipeline_stage=7,           # S7: 下单执行（已完成）
+                pipeline_stage=7,  # S7: 下单执行（已完成）
                 stage_entered_at=datetime.now(timezone.utc),
                 position_fsm_state="ENTERING",  # 初始持仓状态
             )
             db.add(plan)
             await db.flush()
-            db.add(FsmTransitionLog(
-                plan_id=plan.id,
-                fsm_type="PLAN",
-                from_state="UNKNOWN",
-                to_state="STAGE_7",
-                engine="autonomous",
-                trigger_reason=f"Autonomous order submitted: {signal.get('symbol')} order_id={order_id}",
-            ))
+            db.add(
+                FsmTransitionLog(
+                    plan_id=plan.id,
+                    fsm_type="PLAN",
+                    from_state="UNKNOWN",
+                    to_state="STAGE_7",
+                    engine="autonomous",
+                    trigger_reason=f"Autonomous order submitted: {signal.get('symbol')} order_id={order_id}",
+                )
+            )
             await lifecycle_service.append_position_fsm_log(
                 db,
                 plan_id=plan.id,
@@ -1832,9 +2218,13 @@ class AutonomousEngine:
                 f"order_id={order_id}"
             )
         except Exception as _e:
-            logger.warning(f"[AutonomousEngine] Failed to auto-create TradingPlan: {_e}")
+            logger.warning(
+                f"[AutonomousEngine] Failed to auto-create TradingPlan: {_e}"
+            )
 
-    async def _execute_order(self, account_id: str, decision: dict, db: AsyncSession) -> Optional[str]:
+    async def _execute_order(
+        self, account_id: str, decision: dict, db: AsyncSession
+    ) -> Optional[str]:
         """通过 OrderService 执行订单。
         TWAP/VWAP 算法单只能在正常交易时段提交；非交易时段自动降级为 LMT（有参考价）或 MKT。
         """
@@ -1852,11 +2242,14 @@ class AutonomousEngine:
             # TWAP/VWAP 只能在正常交易时段使用；非交易时段降级
             if raw_algo in ("TWAP", "VWAP") and not is_symbol_market_active(symbol):
                 # 优先用 LMT（需要价格），价格未知时用 MKT
-                ref_price = float(decision.get("price") or decision.get("ref_price") or 0)
+                ref_price = float(
+                    decision.get("price") or decision.get("ref_price") or 0
+                )
                 if ref_price <= 0:
                     # 尝试从 DataHub 再取一次价格
                     try:
                         from app.data.hub import DataHub
+
                         q = await DataHub().get_quote(symbol)
                         ref_price = float(q.get("price") or q.get("last_price") or 0)
                     except Exception:
@@ -1916,7 +2309,9 @@ class AutonomousEngine:
             from app.services.journal_service import JournalService
 
             signal_ref = str(signal.get("signal_id") or signal.get("id") or "")
-            direction = str(decision.get("action") or signal.get("direction") or "BUY").upper()
+            direction = str(
+                decision.get("action") or signal.get("direction") or "BUY"
+            ).upper()
             symbol = str(signal.get("symbol") or decision.get("symbol") or "")
             price = float(
                 decision.get("ref_price")
@@ -1924,7 +2319,12 @@ class AutonomousEngine:
                 or signal.get("suggested_price")
                 or 1.0
             )
-            qty = float(decision.get("qty") or signal.get("quantity") or signal.get("quantity_value") or 0.0)
+            qty = float(
+                decision.get("qty")
+                or signal.get("quantity")
+                or signal.get("quantity_value")
+                or 0.0
+            )
 
             if direction in self._EXIT_DIRECTIONS:
                 # ── 出场信号：关闭对应的 DRAFT 建仓日志 ──
@@ -1940,7 +2340,9 @@ class AutonomousEngine:
                 # ── 建仓信号：幂等新建 ──
                 if signal_ref:
                     exists_row = await db.execute(
-                        _select(TradeJournal.id).where(TradeJournal.signal_id == signal_ref).limit(1)
+                        _select(TradeJournal.id)
+                        .where(TradeJournal.signal_id == signal_ref)
+                        .limit(1)
                     )
                     if exists_row.scalar_one_or_none() is not None:
                         return
@@ -1955,7 +2357,9 @@ class AutonomousEngine:
                     signal_id=signal_ref or None,
                 )
         except Exception as _e:
-            logger.warning(f"[AutonomousEngine] Failed to create/close TradeJournal entry: {_e}")
+            logger.warning(
+                f"[AutonomousEngine] Failed to create/close TradeJournal entry: {_e}"
+            )
 
     async def _close_journal_for_exit(
         self,
@@ -1991,6 +2395,7 @@ class AutonomousEngine:
             if journal is None:
                 # 找不到可关闭的日志，改为新建 SELL 记录（防止数据丢失）
                 from app.services.journal_service import JournalService
+
                 await JournalService(db).create_from_execution(
                     account_id=account_id,
                     symbol=symbol,
@@ -2001,25 +2406,39 @@ class AutonomousEngine:
                 )
                 return
 
-            entry_price = float(getattr(journal, 'entry_price') or 0)
-            used_qty = float(getattr(journal, 'quantity') or qty)
-            direction_mul = -1.0 if str(getattr(journal, 'direction') or "BUY").upper() in {"BUY", "LONG"} else 1.0
+            entry_price = float(getattr(journal, "entry_price") or 0)
+            used_qty = float(getattr(journal, "quantity") or qty)
+            direction_mul = (
+                -1.0
+                if str(getattr(journal, "direction") or "BUY").upper()
+                in {"BUY", "LONG"}
+                else 1.0
+            )
             realized_pnl = (exit_price - entry_price) * used_qty * direction_mul
 
-            setattr(journal, 'exit_price', exit_price)
-            setattr(journal, 'exit_date', _date.today())
-            setattr(journal, 'realized_pnl', realized_pnl)
-            setattr(journal, 'journal_status', "CLOSED")
+            setattr(journal, "exit_price", exit_price)
+            setattr(journal, "exit_date", _date.today())
+            setattr(journal, "realized_pnl", realized_pnl)
+            setattr(journal, "journal_status", "CLOSED")
             if exit_signal_id:
-                notes = getattr(journal, 'lesson_learned') or ""
-                setattr(journal, 'lesson_learned', (notes + f" | 平仓信号ID: {exit_signal_id}").strip(" |"))
+                notes = getattr(journal, "lesson_learned") or ""
+                setattr(
+                    journal,
+                    "lesson_learned",
+                    (notes + f" | 平仓信号ID: {exit_signal_id}").strip(" |"),
+                )
 
             logger.info(
                 "[AutonomousEngine] closed TradeJournal id=%s %s exit=%.4f pnl=%.2f",
-                journal.id, symbol, exit_price, realized_pnl,
+                journal.id,
+                symbol,
+                exit_price,
+                realized_pnl,
             )
         except Exception as _e:
-            logger.warning(f"[AutonomousEngine] Failed to close TradeJournal on exit: {_e}")
+            logger.warning(
+                f"[AutonomousEngine] Failed to close TradeJournal on exit: {_e}"
+            )
 
     async def _schedule_revoke_window(self, account_id: str, order_id: str) -> None:
         """SEMI 模式：记录可撤单窗口（实际撤单由 /autonomy/revoke API 触发）"""
@@ -2030,13 +2449,17 @@ class AutonomousEngine:
         try:
             # V9/V10 cache.set uses 'expire' not 'ex' if using our wrapper
             await cache.set(revoke_key, "open", expire=expire_secs)
-            logger.info(f"[AutonomousEngine] Revoke window open for order {order_id} ({expire_secs}s)")
+            logger.info(
+                f"[AutonomousEngine] Revoke window open for order {order_id} ({expire_secs}s)"
+            )
         except Exception:
             pass  # Redis 不可用时静默处理
 
     async def _notify_suggestion(self, account_id: str, decision: dict) -> None:
         """ADVISORY 模式：推送建议通知（Telegram）"""
-        logger.info(f"[AutonomousEngine] ADVISORY suggestion for {account_id}: {decision}")
+        logger.info(
+            f"[AutonomousEngine] ADVISORY suggestion for {account_id}: {decision}"
+        )
         # TODO: 接入 telegram_service.send_message
 
     async def _update_signal_status(
@@ -2051,6 +2474,7 @@ class AutonomousEngine:
         遇到锁超时自动重试一次（等待 1s）。
         """
         import asyncio
+
         # 如果状态变为 EXECUTED，同步写入 executed_at
         from datetime import datetime as _dt
 
@@ -2058,6 +2482,7 @@ class AutonomousEngine:
 
         from app.models.trading_signal import SignalStatus as _SSEnum
         from app.models.trading_signal import TradingSignal as _TS
+
         _values: dict = {"status": new_status}
         if hasattr(new_status, "value") and new_status == _SSEnum.EXECUTED:
             _values["executed_at"] = _dt.utcnow()
@@ -2070,7 +2495,9 @@ class AutonomousEngine:
                 return
             except Exception as e:
                 err_str = str(e)
-                if attempt == 1 and ("1205" in err_str or "Lock wait timeout" in err_str):
+                if attempt == 1 and (
+                    "1205" in err_str or "Lock wait timeout" in err_str
+                ):
                     logger.warning(
                         f"[AutonomousEngine] Lock timeout updating signal {signal_db_id}, "
                         f"retrying in 1s…"
@@ -2087,7 +2514,9 @@ class AutonomousEngine:
                     )
                     return
 
-    async def _notify_circuit_breaker(self, account_id: str, daily_pnl: float, equity: float) -> None:
+    async def _notify_circuit_breaker(
+        self, account_id: str, daily_pnl: float, equity: float
+    ) -> None:
         """熔断触发：推送紧急通知"""
         msg = f"⚠️ 熔断触发！账户 {account_id} 今日已亏损 ${abs(daily_pnl):,.2f}（{abs(daily_pnl)/equity:.1%}），AI 交易已暂停。"
         logger.critical(msg)
@@ -2108,11 +2537,17 @@ class AutonomousEngine:
         from sqlalchemy import func
         from sqlalchemy import select as sa_select
 
-        result: dict = {"trades": 0, "realized_pnl": 0.0, "equity": 100000.0, "positions": {}}
+        result: dict = {
+            "trades": 0,
+            "realized_pnl": 0.0,
+            "equity": 100000.0,
+            "positions": {},
+        }
 
         # ── 1. 审计日志：今日交易次数 ───────────────────────────────────────────
         try:
             from app.models.autonomy_audit_log import AutonomyAuditLog
+
             today = date.today()
             stmt = sa_select(func.count()).where(
                 AutonomyAuditLog.account_id == account_id,
@@ -2127,13 +2562,17 @@ class AutonomousEngine:
         # ── 2. 账户净值：优先 Broker 实时，再 EquitySnapshot ──────────────────
         try:
             from app.broker.factory import make_option_broker_client
+
             broker = make_option_broker_client()
             from app.broker.dummy_option_client import DummyOptionClient
+
             if not isinstance(broker, DummyOptionClient):
                 account_info: Any = await broker.get_account_equity(account_id)
                 if not isinstance(account_info, dict):
                     account_info = {}
-                equity_val = account_info.get("net_liquidation") or account_info.get("equity")
+                equity_val = account_info.get("net_liquidation") or account_info.get(
+                    "equity"
+                )
                 if equity_val:
                     result["equity"] = float(equity_val)
             else:
@@ -2141,6 +2580,7 @@ class AutonomousEngine:
         except Exception:
             try:
                 from app.models.equity_snapshot import EquitySnapshot
+
                 snap_stmt = (
                     sa_select(EquitySnapshot)
                     .where(EquitySnapshot.account_id == account_id)
@@ -2152,11 +2592,14 @@ class AutonomousEngine:
                 if snap and snap.total_equity:
                     result["equity"] = float(snap.total_equity)
             except Exception as e2:
-                logger.debug(f"[AutonomousEngine] equity snapshot fallback failed: {e2}")
+                logger.debug(
+                    f"[AutonomousEngine] equity snapshot fallback failed: {e2}"
+                )
 
         # ── 3. 实时持仓快照 ────────────────────────────────────────────────────
         try:
             from app.engine.position_monitor import PositionMonitor
+
             monitor = PositionMonitor(db)
             result["positions"] = await monitor.get_positions_snapshot(account_id)
         except Exception as e:
@@ -2182,8 +2625,8 @@ class AutonomousEngine:
         gate: Any,
         order_id: Optional[str],
         circuit_breaker: bool,
-        regime_at_decision: Optional[str] = None,    # V10.2-M1
-        regime_confidence: Optional[float] = None,   # V10.2-M1
+        regime_at_decision: Optional[str] = None,  # V10.2-M1
+        regime_confidence: Optional[float] = None,  # V10.2-M1
     ) -> None:
         from app.models.autonomy_audit_log import AutonomyAuditLog
 
@@ -2198,8 +2641,8 @@ class AutonomousEngine:
             risk_gate_detail=gate.details,
             order_id=order_id,
             circuit_breaker_triggered=circuit_breaker,
-            regime_at_decision=regime_at_decision,   # V10.2-M1
-            regime_confidence=regime_confidence,     # V10.2-M1
+            regime_at_decision=regime_at_decision,  # V10.2-M1
+            regime_confidence=regime_confidence,  # V10.2-M1
         )
         db.add(log)
 
@@ -2207,7 +2650,9 @@ class AutonomousEngine:
     # 撤单（SEMI 模式 30 分钟窗口）
     # ──────────────────────────────────────────
 
-    async def revoke_order(self, account_id: str, exec_id: str, reason: str, db: AsyncSession) -> dict:
+    async def revoke_order(
+        self, account_id: str, exec_id: str, reason: str, db: AsyncSession
+    ) -> dict:
         """在撤单窗口内撤销 AI 自动执行的订单"""
         from sqlalchemy import text as sql_text
 
@@ -2227,9 +2672,10 @@ class AutonomousEngine:
         # 取消订单（通过 broker）
         try:
             from app.services.order_service import OrderService
+
             order_svc = OrderService(db)
             await order_svc.cancel_order(exec_id)
-            
+
             # 更新审计日志
             from app.models.autonomy_audit_log import AutonomyAuditLog
 
@@ -2238,15 +2684,15 @@ class AutonomousEngine:
                     f"UPDATE {AutonomyAuditLog.__tablename__} "
                     "SET revoked_at=:now, revoke_reason=:reason WHERE order_id=:oid"
                 ),
-                {"now": datetime.now(timezone.utc), "reason": reason, "oid": exec_id}
+                {"now": datetime.now(timezone.utc), "reason": reason, "oid": exec_id},
             )
             await db.commit()
-            
+
             try:
                 await cache.delete(revoke_key)
             except Exception:
                 pass
-                
+
             return {"success": True, "message": f"Order {exec_id} revoked successfully"}
         except Exception as e:
             logger.error(f"Revoke failed: {e}")

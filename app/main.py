@@ -63,6 +63,7 @@ from app.routers import alpha_lab  # V10.5.1: Alpha Lab
 from app.routers import attribution  # V10.2-M5: 交易归因
 from app.routers import autonomy  # V10: AI自主中枢
 from app.routers import backtest  # V10: 回测引擎
+from app.routers import capacity_arbiter  # V10.5.2: 席位竞争仲裁
 from app.routers import copilot  # V10: AI助手
 from app.routers import dashboard_v2  # V10: 全新Dashboard
 from app.routers import etf  # V10.1: ETF自选列表
@@ -788,6 +789,9 @@ app.include_router(
 app.include_router(
     signal_quality.router, dependencies=[Depends(get_current_user)]
 )  # V10.4.2: 信号精英化漏斗
+app.include_router(
+    capacity_arbiter.router, dependencies=[Depends(get_current_user)]
+)  # V10.5.2: 席位竞争仲裁
 app.include_router(
     system_monitor.router, dependencies=[Depends(get_current_user)]
 )  # V10.4.3: 系统监控增强

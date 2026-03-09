@@ -22,7 +22,7 @@
 
 > 历史版本：V10.0（2026-02-24）变更摘要见下方历史记录节  
 > 当前交付主线：[V10.4 Release Plan](archived/v10/v10.4/RELEASE_PLAN_V10.4.md)  
-> 下一版本规划：[V10.5.1 Release Plan](archived/v10/v10.5/RELEASE_PLAN_V10.5.1.md)
+> 下一版本规划：[V10.5.2 Release Plan](archived/v10/v10.5/RELEASE_PLAN_V10.5.2.md)
 
 ---
 
