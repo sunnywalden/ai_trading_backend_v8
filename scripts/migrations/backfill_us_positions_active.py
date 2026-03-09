@@ -20,6 +20,22 @@ each SELL intent (action=CLOSE), so the position-board card's history is correct
 The avg_entry_price is derived as a weighted average from the associated
 ``trading_plan.entry_price`` values (joined via ``signal_db_id``).
 
+Broker Reconciliation (--broker-positions)
+-------------------------------------------
+When real broker holdings are provided via ``--broker-positions SYMBOL:QTY,...``
+the script performs a two-way reconciliation:
+
+1. **Ghost-position pruning** – any position the script would create that does NOT
+   appear in the broker list (qty == 0 in reality) is either skipped entirely (if
+   intent net qty is positive) or written as CLOSED.  This handles the common case
+   where the final exit was executed outside the autonomous intent path (e.g. manual
+   broker order).
+
+2. **Missing-position injection** – any broker symbol NOT covered by intent records
+   is reconstructed from ``trading_plan`` EXECUTED records and written as ACTIVE,
+   capping ``open_qty`` at the broker's actual share count.  This handles positions
+   opened via direct TradingPlan execution without autonomous_execution_intent rows.
+
 Usage
 -----
     # Dry-run (default – prints plan, touches nothing):
@@ -27,6 +43,10 @@ Usage
 
     # Actually write to DB:
     python scripts/migrations/backfill_us_positions_active.py --execute
+
+    # With broker reconciliation (recommended for production):
+    python scripts/migrations/backfill_us_positions_active.py --execute \\
+        --broker-positions "AMD:2322,FINW:1271,MSFT:100,ORCL:560,PLTR:763,QCOM:853"
 
     # Limit to specific account:
     python scripts/migrations/backfill_us_positions_active.py --execute \\
@@ -48,6 +68,7 @@ import asyncio
 import os
 import sys
 from collections import defaultdict
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -72,17 +93,41 @@ SELL_ACTIONS = frozenset({"SELL", "EXIT", "CLOSE", "REDUCE"})
 HK_SYMBOL_PATTERN = r"^[0-9]{5}$"  # 5-digit numeric codes
 
 
+def _parse_broker_positions(raw: str) -> dict[str, float]:
+    """Parse ``--broker-positions 'AMD:2322,MSFT:100'`` into a symbol→qty map.
+
+    Returns an empty dict when *raw* is None / empty.
+    """
+    if not raw:
+        return {}
+    result: dict[str, float] = {}
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if ":" not in part:
+            raise ValueError(
+                f"Invalid --broker-positions entry '{part}'. "
+                "Expected format: SYMBOL:QTY  (e.g. AMD:2322)"
+            )
+        sym, qty_str = part.split(":", 1)
+        result[sym.strip().upper()] = float(qty_str.strip())
+    return result
+
+
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 async def _backfill(
     db: AsyncSession,
     dry_run: bool,
     account_id_filter: str | None,
     min_qty: float,
+    broker_positions: dict[str, float],
 ) -> None:
     print(
         f"[Backfill] dry_run={dry_run}  account_id_filter={account_id_filter!r}  "
-        f"min_qty={min_qty}"
+        f"min_qty={min_qty}  broker_positions={broker_positions or '(not provided)'}"
     )
 
     # ── 1. Load all SUCCESS intents for non-HK symbols ─────────────────────
@@ -103,9 +148,7 @@ async def _backfill(
         )
     )
     if account_id_filter:
-        stmt = stmt.where(
-            AutonomousExecutionIntent.account_id == account_id_filter
-        )
+        stmt = stmt.where(AutonomousExecutionIntent.account_id == account_id_filter)
 
     result = await db.execute(stmt)
     all_intents: list[AutonomousExecutionIntent] = list(result.scalars().all())
@@ -116,8 +159,12 @@ async def _backfill(
         return
 
     # ── 2. Group into (account_id, symbol) buckets ─────────────────────────
-    buy_intents: dict[tuple[str, str], list[AutonomousExecutionIntent]] = defaultdict(list)
-    sell_intents: dict[tuple[str, str], list[AutonomousExecutionIntent]] = defaultdict(list)
+    buy_intents: dict[tuple[str, str], list[AutonomousExecutionIntent]] = defaultdict(
+        list
+    )
+    sell_intents: dict[tuple[str, str], list[AutonomousExecutionIntent]] = defaultdict(
+        list
+    )
 
     for intent in all_intents:
         key = (intent.account_id, intent.symbol)
@@ -135,13 +182,9 @@ async def _backfill(
         Position.thesis_key == THESIS_KEY,
     )
     if account_id_filter:
-        existing_stmt = existing_stmt.where(
-            Position.account_id == account_id_filter
-        )
+        existing_stmt = existing_stmt.where(Position.account_id == account_id_filter)
     existing_result = await db.execute(existing_stmt)
-    existing_keys = {
-        (r.account_id, r.symbol, r.thesis_key) for r in existing_result
-    }
+    existing_keys = {(r.account_id, r.symbol, r.thesis_key) for r in existing_result}
     if existing_keys:
         print(f"[Backfill] Already-existing positions: {existing_keys}")
 
@@ -173,11 +216,14 @@ async def _backfill(
                         float(r[1]) for r in price_rows if r[1] is not None
                     )
                     if total_weight > 0:
-                        symbol_avg_prices[(acc, sym)] = sum(
-                            float(r[0]) * float(r[1])
-                            for r in price_rows
-                            if r[1] is not None
-                        ) / total_weight
+                        symbol_avg_prices[(acc, sym)] = (
+                            sum(
+                                float(r[0]) * float(r[1])
+                                for r in price_rows
+                                if r[1] is not None
+                            )
+                            / total_weight
+                        )
                     else:
                         symbol_avg_prices[(acc, sym)] = sum(
                             float(r[0]) for r in price_rows
@@ -202,6 +248,26 @@ async def _backfill(
         total_sell_qty = sum(i.qty or 0.0 for i in s_intents)
         open_qty = total_buy_qty - total_sell_qty
 
+        # ── Broker reconciliation (when --broker-positions is provided) ───────
+        # The intent-arithmetic may be stale: some final closes happen outside
+        # the autonomous intent path (manual broker orders, direct plan exec, …).
+        # When the broker says this symbol is fully closed, honour that truth.
+        if broker_positions:
+            broker_qty = broker_positions.get(sym.upper(), 0.0)
+            if broker_qty <= 0:
+                # Broker confirms the position is gone — skip creation entirely.
+                # Positions that should be CLOSED are not useful in the lifecycle
+                # board; if we must record history, a CLOSED row can be added
+                # manually via the repair script.
+                print(
+                    f"  [SKIP-BROKER] {acc}/{sym}  intent_open_qty={open_qty:.4f} "
+                    f"but broker shows 0 — position fully closed out-of-band"
+                )
+                continue
+            # Use broker qty as the authoritative open_qty.
+            open_qty = broker_qty
+        # ──────────────────────────────────────────────────────────────────────
+
         if open_qty < min_qty:
             print(
                 f"  [SKIP] {acc}/{sym}  open_qty={open_qty:.4f} < min_qty={min_qty} "
@@ -212,8 +278,12 @@ async def _backfill(
         # avg_entry_price from trading_plan (weighted average of EXECUTED plans)
         avg_entry_price = symbol_avg_prices.get((acc, sym))
 
-        # Status
-        if total_sell_qty > 0:
+        # Status: PARTIALLY_CLOSED only when there were sells AND open_qty is
+        # genuinely less than total buys (not just "any sell exists").
+        # When broker data is available, prefer ACTIVE for confirmed holdings.
+        if broker_positions:
+            status = PositionStatus.ACTIVE.value
+        elif total_sell_qty > 0 and open_qty < total_buy_qty * 0.99:
             status = PositionStatus.PARTIALLY_CLOSED.value
         else:
             status = PositionStatus.ACTIVE.value
@@ -237,13 +307,96 @@ async def _backfill(
             }
         )
 
+    # ── 5b. Inject missing positions from trading_plan (broker-guided) ──────
+    # When broker_positions lists symbols that have NO autonomous_execution_intent
+    # records at all (positions opened via direct TradingPlan execution), reconstruct
+    # a minimal ACTIVE Position from trading_plan EXECUTED rows.
+    if broker_positions:
+        intent_symbols = {sym for _, sym in buy_intents.keys()}
+        for sym, broker_qty in broker_positions.items():
+            if broker_qty <= 0:
+                continue
+            if sym in intent_symbols:
+                continue  # already handled above
+            # Determine account_id from trading_plan records
+            try:
+                tp_rows = await db.execute(
+                    text(
+                        "SELECT account_id, entry_price, target_position, created_at "
+                        "FROM trading_plan "
+                        "WHERE symbol = :sym "
+                        "  AND plan_status NOT IN ('REVOKED', 'EXPIRED', 'CANCELLED') "
+                        "ORDER BY created_at ASC"
+                    ),
+                    {"sym": sym},
+                )
+                tp_list = list(tp_rows)
+            except Exception as exc:
+                print(f"  [WARN] trading_plan lookup failed for {sym}: {exc}")
+                tp_list = []
+
+            if not tp_list:
+                print(
+                    f"  [SKIP-NO-DATA] {sym}  broker_qty={broker_qty:.4f} "
+                    f"but no trading_plan records found — add manually"
+                )
+                continue
+
+            acc = str(tp_list[0][0])
+            if account_id_filter and acc != account_id_filter:
+                print(
+                    f"  [SKIP-ACCOUNT] {sym}  account={acc} "
+                    f"does not match filter {account_id_filter!r}"
+                )
+                continue
+
+            if (acc, sym, THESIS_KEY) in existing_keys:
+                continue  # already has a position record
+
+            # Weighted-average entry price from plan records with valid prices.
+            price_valid = [
+                (float(r[1]), float(r[2] or 0))
+                for r in tp_list
+                if r[1] and float(r[1]) > 1.0
+            ]
+            if price_valid:
+                total_w = sum(w for _, w in price_valid)
+                if total_w > 0:
+                    avg_entry_price = sum(p * w for p, w in price_valid) / total_w
+                else:
+                    avg_entry_price = sum(p for p, _ in price_valid) / len(price_valid)
+            else:
+                avg_entry_price = None
+
+            opened_at = tp_list[0][3]  # created_at of earliest plan
+
+            print(
+                f"  [INJECT-FROM-PLAN] {acc}/{sym}  broker_qty={broker_qty:.4f}  "
+                f"avg_entry={avg_entry_price}  (no intent records)"
+            )
+            positions_to_create.append(
+                {
+                    "acc": acc,
+                    "sym": sym,
+                    "status": PositionStatus.ACTIVE.value,
+                    "direction": "LONG",
+                    "total_qty": broker_qty,
+                    "filled_qty": broker_qty,
+                    "closed_qty": 0.0,
+                    "open_qty": broker_qty,
+                    "avg_entry_price": avg_entry_price,
+                    "opened_at": opened_at,
+                    "b_intents": [],  # no slices — data integrity over false history
+                    "s_intents": [],
+                    "_source": "trading_plan_fallback",
+                }
+            )
+
     if not positions_to_create:
         print("[Backfill] No net-positive open positions found (after filtering).")
         return
 
-    print(
-        f"\n[Backfill] Found {len(positions_to_create)} symbol(s) to backfill:"
-    )
+    print(f"\n[Backfill] Found {len(positions_to_create)} symbol(s) to backfill:")
     for p in positions_to_create:
         print(
             f"  {'[DRY]' if dry_run else '[CREATE]'} {p['acc']}/{p['sym']}  "
@@ -370,7 +523,19 @@ async def main() -> None:
             "(default: 0.01).  Use a higher value to skip near-zero residuals."
         ),
     )
+    parser.add_argument(
+        "--broker-positions",
+        default=None,
+        metavar="SYMBOL:QTY,...",
+        help=(
+            "Comma-separated list of actual broker holdings used for two-way "
+            "reconciliation.  Format: AMD:2322,MSFT:100,QCOM:853  "
+            "Symbols not listed are treated as having 0 broker qty."
+        ),
+    )
     args = parser.parse_args()
+
+    broker_pos = _parse_broker_positions(args.broker_positions)
 
     engine = create_async_engine(settings.DATABASE_URL, echo=False)
     SessionFactory = async_sessionmaker(engine, expire_on_commit=False)
@@ -381,6 +546,7 @@ async def main() -> None:
             dry_run=not args.execute,
             account_id_filter=args.account_id,
             min_qty=args.min_qty,
+            broker_positions=broker_pos,
         )
 
     await engine.dispose()
