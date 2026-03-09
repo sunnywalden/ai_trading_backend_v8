@@ -21,12 +21,6 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.core.config import settings
-from app.jobs.data_refresh_jobs import refresh_technical_indicators_job
-from app.models.db import SessionLocal, close_db_resources
-from app.services.autonomy_health_monitor import autonomy_health_monitor
-from app.services.data_freshness_guard_service import data_freshness_guard_service
-
 DEFAULT_HEALTH_CHECKS = [
     "check_equity_snapshot",
     "check_plan_fsm_alignment",
@@ -51,9 +45,32 @@ _STATUS_ICON = {
 }
 
 
+def _runtime_modules() -> dict[str, Any]:
+    from app.core.config import settings
+    from app.jobs.data_refresh_jobs import refresh_technical_indicators_job
+    from app.models.db import SessionLocal, close_db_resources
+    from app.services.autonomy_health_monitor import autonomy_health_monitor
+    from app.services.data_freshness_guard_service import \
+        data_freshness_guard_service
+
+    return {
+        "settings": settings,
+        "refresh_technical_indicators_job": refresh_technical_indicators_job,
+        "SessionLocal": SessionLocal,
+        "close_db_resources": close_db_resources,
+        "autonomy_health_monitor": autonomy_health_monitor,
+        "data_freshness_guard_service": data_freshness_guard_service,
+    }
+
+
 def parse_args() -> argparse.Namespace:
+    settings = _runtime_modules()["settings"]
+
     parser = argparse.ArgumentParser(
-        description="Run Live Safety self-checks for freshness and key health signals.",
+        description=(
+            "Run Live Safety self-checks for freshness and key health "
+            "signals."
+        ),
     )
     parser.add_argument(
         "--account-id",
@@ -116,6 +133,15 @@ def _health_result_to_dict(result: Any) -> dict[str, Any]:
 
 
 async def run_self_check(args: argparse.Namespace) -> dict[str, Any]:
+    runtime = _runtime_modules()
+    refresh_technical_indicators_job = runtime[
+        "refresh_technical_indicators_job"
+    ]
+    session_local = runtime["SessionLocal"]
+    close_db_resources = runtime["close_db_resources"]
+    autonomy_health_monitor = runtime["autonomy_health_monitor"]
+    data_freshness_guard_service = runtime["data_freshness_guard_service"]
+
     refresh_result: dict[str, Any] | None = None
     health_results: list[dict[str, Any]] = []
 
@@ -123,10 +149,12 @@ async def run_self_check(args: argparse.Namespace) -> dict[str, Any]:
         if not args.skip_refresh_job:
             await refresh_technical_indicators_job()
 
-        async with SessionLocal() as db:
-            freshness = await data_freshness_guard_service.get_freshness_matrix(
-                db,
-                args.account_id,
+        async with session_local() as db:
+            freshness = (
+                await data_freshness_guard_service.get_freshness_matrix(
+                    db,
+                    args.account_id,
+                )
             )
 
             if not args.skip_health:
@@ -136,10 +164,13 @@ async def run_self_check(args: argparse.Namespace) -> dict[str, Any]:
                     health_results.append(_health_result_to_dict(result))
 
             summary_statuses = [freshness.get("overall_status", "OK")]
-            summary_statuses.extend(item.get("status", "OK") for item in health_results)
-            worst_status = (
-                max(summary_statuses, key=_severity) if summary_statuses else "OK"
+            summary_statuses.extend(
+                item.get("status", "OK") for item in health_results
             )
+            worst_status = max(
+                summary_statuses,
+                key=_severity,
+            ) if summary_statuses else "OK"
 
             refresh_result = {
                 "executed": not args.skip_refresh_job,
@@ -159,7 +190,9 @@ async def run_self_check(args: argparse.Namespace) -> dict[str, Any]:
                         if item.get("status") != "OK"
                     ],
                     "non_ok_health_checks": [
-                        item for item in health_results if item.get("status") != "OK"
+                        item
+                        for item in health_results
+                        if item.get("status") != "OK"
                     ],
                 },
             }
@@ -178,7 +211,8 @@ def print_human_report(report: dict[str, Any]) -> None:
     print(f"账户: {report['account_id']}")
     print(f"刷新任务: {refresh_job['status']}")
     print(
-        f"Freshness 总状态: {_icon(freshness['overall_status'])} {freshness['overall_status']}"
+        f"Freshness 总状态: {_icon(freshness['overall_status'])} "
+        f"{freshness['overall_status']}"
         f" | 推荐动作: {freshness['recommended_action']}"
     )
     print(f"最严重状态: {_icon(summary['worst_status'])} {summary['worst_status']}")
@@ -210,7 +244,10 @@ def print_human_report(report: dict[str, Any]) -> None:
         for item in non_ok_freshness:
             print(f"[freshness] {item['source']}: {item['status']} -> {item}")
         for item in non_ok_health_checks:
-            print(f"[health] {item['name']}: {item['status']} -> {item['message']}")
+            print(
+                f"[health] {item['name']}: {item['status']} "
+                f"-> {item['message']}"
+            )
     else:
         print("\n✅ 所有 freshness / 关键健康检查均为 OK")
 
