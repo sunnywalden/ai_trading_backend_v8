@@ -6,18 +6,19 @@
 活跃时段（包含盘前/盘中/盘后）内触发；评估与优化任务不受时段限制。
 """
 import logging
+from datetime import datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy.ext.asyncio import AsyncSession
-from datetime import datetime
 
-from app.models.db import SessionLocal
-from app.engine.quant_trading_loop import QuantTradingLoop
+from app.broker.factory import make_option_broker_client
 from app.core.config import settings
 from app.core.market_hours import is_any_market_active
-from app.broker.factory import make_option_broker_client
+from app.engine.quant_trading_loop import QuantTradingLoop
+from app.models.db import SessionLocal
 from app.services.regime_classifier import RegimeClassifier
-from app.services.signal_quality_config import get_regime_adjusted_config, get_signal_quality_config
+from app.services.signal_quality_config import (get_regime_adjusted_config,
+                                                get_signal_quality_config)
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +76,7 @@ async def run_daily_trading_cycle():
 
 async def run_intraday_signal_cycle():
     """
-    日内信号生成周期：在港股交易时段内多次触发。
+    日内信号生成周期：在任一活跃市场时段内多次触发。
     目标是持续生成/验证新信号，避免仅依赖 08:00 单次扫描。
 
     与每日周期不同点：
@@ -121,8 +122,8 @@ async def run_autonomous_decision_cycle():
         logger.debug("[quant_jobs] run_autonomous_decision_cycle: market inactive, skip")
         return
 
-    from app.services.autonomous_engine import autonomous_engine
     from app.models.db import SessionLocal as _SL
+    from app.services.autonomous_engine import autonomous_engine
     account_id = await _resolve_runtime_account_id()
 
     async with _SL() as session:
@@ -236,7 +237,8 @@ async def run_position_rebalance_scan():
 
     async with SessionLocal() as session:
         try:
-            from app.engine.position_rebalance_monitor import PositionRebalanceMonitor
+            from app.engine.position_rebalance_monitor import \
+                PositionRebalanceMonitor
             account_id = await _resolve_runtime_account_id()
 
             monitor = PositionRebalanceMonitor(session)
@@ -272,7 +274,8 @@ async def run_position_capacity_guard():
 
     async with SessionLocal() as session:
         try:
-            from app.engine.position_rebalance_monitor import PositionRebalanceMonitor
+            from app.engine.position_rebalance_monitor import \
+                PositionRebalanceMonitor
 
             account_id = await _resolve_runtime_account_id()
             sq_cfg = get_signal_quality_config()
@@ -317,7 +320,8 @@ async def run_broker_order_reconcile():
     """
     async with SessionLocal() as session:
         try:
-            from app.services.broker_order_sync_service import reconcile_broker_order_status
+            from app.services.broker_order_sync_service import \
+                reconcile_broker_order_status
 
             account_id = await _resolve_runtime_account_id()
             result = await reconcile_broker_order_status(
@@ -347,7 +351,8 @@ async def run_post_trade_pipeline_job():
     """
     async with SessionLocal() as session:
         try:
-            from app.services.post_trade_pipeline_service import post_trade_pipeline_service
+            from app.services.post_trade_pipeline_service import \
+                post_trade_pipeline_service
 
             result = await post_trade_pipeline_service.advance_post_trade_plans(
                 db=session,
@@ -396,14 +401,15 @@ def register_quant_loop_jobs(scheduler: AsyncIOScheduler):
         replace_existing=True,
     )
 
-    # ①-补充：港股时段内每 30 分钟追加一次信号生成（09:00-11:30, 13:00-16:00）
+    # ①-补充：活跃市场时段内每 30 分钟追加一次信号生成
+    # 由 is_any_market_active() 做市场时段守卫，因此无需手工区分 US/HK cron。
     scheduler.add_job(
         run_intraday_signal_cycle,
-        trigger="cron",
-        hour="9-11,13-16",
-        minute="0,30",
-        id="intraday_signal_cycle_hk",
-        name="Intraday Signal Cycle HK Session (every 30m)",
+        trigger="interval",
+        minutes=30,
+        next_run_time=datetime.now() + timedelta(minutes=1),
+        id="intraday_signal_cycle_market_hours",
+        name="Intraday Signal Cycle (every 30m, market guard)",
         replace_existing=True,
     )
 
@@ -491,7 +497,7 @@ def register_quant_loop_jobs(scheduler: AsyncIOScheduler):
 
     logger.info("✓ Quantitative Trading Loop jobs registered:")
     logger.info("  ① Daily Trading Cycle:       08:00  (Signal Gen + Execute by Autonomy Level)")
-    logger.info("  ①+ Intraday Signal Cycle:    09:00-11:30 & 13:00-16:00 every 30m (HK session)")
+    logger.info("  ①+ Intraday Signal Cycle:    every 30m (all active markets, market guard)")
     logger.info("  ② Autonomous Decision Cycle: every 30m  (market guard, core auto-trade driver)")
     logger.info("  ③ Performance Evaluation:    18:00  (Post-Market)")
     logger.info("  ④ Adaptive Optimization:     22:00  (Daily)")

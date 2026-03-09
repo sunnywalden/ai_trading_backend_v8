@@ -18,6 +18,7 @@ from app.core.market_hours import is_symbol_market_active
 from app.models.db import get_session, redis_client
 from app.models.execution_intent import AutonomousExecutionIntent
 from app.models.fsm_transition_log import FsmTransitionLog
+from app.models.strategy import StrategyRun
 from app.models.technical_indicator import TechnicalIndicator
 from app.models.trading_plan import TradingPlan
 from app.models.trading_signal import TradingSignal
@@ -129,6 +130,46 @@ def _status_from_counts(
     if unknown:
         return "UNKNOWN"
     return "HEALTHY"
+
+
+def _job_next_run_at(job_id: str) -> datetime | None:
+    try:
+        from app.jobs.scheduler import get_job
+
+        job = get_job(job_id)
+    except Exception:
+        return None
+    return _to_utc(getattr(job, "next_run_time", None) if job else None)
+
+
+def _classify_source_status(
+    *,
+    now: datetime,
+    requires_live_data: bool,
+    lag_seconds: float | None,
+    warn_after: float,
+    critical_after: float,
+    pending_next_run_at: datetime | None = None,
+) -> str:
+    if not requires_live_data:
+        return "HEALTHY"
+
+    next_run_in_seconds = None
+    if pending_next_run_at is not None:
+        next_run_in_seconds = (pending_next_run_at - now).total_seconds()
+
+    if lag_seconds is None:
+        if next_run_in_seconds is not None and 0 <= next_run_in_seconds <= warn_after:
+            return "WARN"
+        return "UNKNOWN"
+
+    if lag_seconds <= warn_after:
+        return "HEALTHY"
+    if lag_seconds <= critical_after:
+        return "WARN"
+    if next_run_in_seconds is not None and 0 <= next_run_in_seconds <= warn_after:
+        return "WARN"
+    return "CRITICAL"
 
 
 def _stage_thresholds(stage_id: int) -> tuple[float | None, float | None]:
@@ -692,8 +733,20 @@ async def _build_data_flow_payload(
     }
     requires_live_market_data = has_active_pipeline and bool(active_market_symbols)
 
+    signal_next_run = _job_next_run_at("intraday_signal_cycle_market_hours")
+    if signal_next_run is None:
+        signal_next_run = _job_next_run_at("daily_trading_cycle")
+    market_next_run = _job_next_run_at("refresh_technical_indicators")
+
     signal_ts = await _load_latest_timestamp(
-        db, [f"SELECT MAX(created_at) FROM {TradingSignal.__tablename__}"]
+        db,
+        [
+            (
+                f"SELECT MAX(finished_at) FROM {StrategyRun.__tablename__} "
+                "WHERE status='COMPLETED'"
+            ),
+            f"SELECT MAX(created_at) FROM {TradingSignal.__tablename__}",
+        ],
     )
     market_ts = await _load_latest_timestamp(
         db,
@@ -706,15 +759,26 @@ async def _build_data_flow_payload(
     signal_lag = (now - signal_ts).total_seconds() if signal_ts else None
     market_lag = (now - market_ts).total_seconds() if market_ts else None
 
-    signal_status = (
-        "HEALTHY"
-        if (not requires_live_market_data) or signal_lag is None or signal_lag <= 1800
-        else ("WARN" if signal_lag <= 3600 else "CRITICAL")
+    signal_warn_after = 45 * 60.0
+    signal_critical_after = 90 * 60.0
+    market_warn_after = 90 * 60.0
+    market_critical_after = 180 * 60.0
+
+    signal_status = _classify_source_status(
+        now=now,
+        requires_live_data=requires_live_market_data,
+        lag_seconds=signal_lag,
+        warn_after=signal_warn_after,
+        critical_after=signal_critical_after,
+        pending_next_run_at=signal_next_run,
     )
-    market_status = (
-        "HEALTHY"
-        if (not requires_live_market_data) or market_lag is None or market_lag <= 1800
-        else ("WARN" if market_lag <= 3600 else "CRITICAL")
+    market_status = _classify_source_status(
+        now=now,
+        requires_live_data=requires_live_market_data,
+        lag_seconds=market_lag,
+        warn_after=market_warn_after,
+        critical_after=market_critical_after,
+        pending_next_run_at=market_next_run,
     )
 
     def _stage_node(
@@ -785,12 +849,16 @@ async def _build_data_flow_payload(
             ),
             last_error_code=(
                 "SIGNAL_STALE"
-                if requires_live_market_data and signal_lag and signal_lag > 1800
+                if requires_live_market_data
+                and signal_lag
+                and signal_lag > signal_warn_after
                 else None
             ),
             last_error_message=(
                 "信号生成长时间无更新"
-                if requires_live_market_data and signal_lag and signal_lag > 1800
+                if requires_live_market_data
+                and signal_lag
+                and signal_lag > signal_warn_after
                 else None
             ),
             downstream_nodes=["portfolio_decision"],
@@ -820,12 +888,16 @@ async def _build_data_flow_payload(
             throughput_5m=None,
             last_error_code=(
                 "MARKET_DATA_STALE"
-                if requires_live_market_data and market_lag and market_lag > 1800
+                if requires_live_market_data
+                and market_lag
+                and market_lag > market_warn_after
                 else None
             ),
             last_error_message=(
                 "市场数据长时间无更新"
-                if requires_live_market_data and market_lag and market_lag > 1800
+                if requires_live_market_data
+                and market_lag
+                and market_lag > market_warn_after
                 else None
             ),
             downstream_nodes=["regime_classification"],
