@@ -648,7 +648,7 @@ class TigerOptionClient(OptionBrokerClient):
             # 注意: tigeropen API 创建订单通常使用 TradeClient.create_order
             # 获取合约信息可能需要, 但对于简单股票可以直接创建
             from app.broker.factory import is_hk_stock as _place_is_hk
-            _contract_market = Market.HK if _place_is_hk(symbol) else Market.US
+            _contract_market = Market.HK if (symbol and _place_is_hk(symbol)) else Market.US
             contract = await self._run_in_executor(
                 self.trade_client.get_contracts,
                 symbol,
