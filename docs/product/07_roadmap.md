@@ -71,7 +71,7 @@
 - **M6 文档重构**：PRODUCT.md 拆分为模块化多文件，主文件 ≤300 行
 - **★ V10.4.2 信号精英化**：五层信号漏斗 + Conviction Score + 多维共振门控 + 幽灵交易追踪 → 详细规划：[docs/archived/v10/v10.4/RELEASE_PLAN_V10.4.2.md](../archived/v10/v10.4/RELEASE_PLAN_V10.4.2.md)
 
-### Phase 14: 机构级研究与交易纪律 🚀 V10.5.1 当前规划
+### Phase 14: 机构级研究与交易纪律 ✅ V10.5.1 已交付
 > 详细规划见：[docs/archived/v10/v10.5/RELEASE_PLAN_V10.5.1.md](../archived/v10/v10.5/RELEASE_PLAN_V10.5.1.md)
 
 - **M1 Alpha Truth Stack**：策略/信号从 gross alpha 升级到 net alpha 真相治理，新增 Strategy Scorecard 2.0、信号衰减、影子组合、Purged Walk-Forward、成本后收益归因
@@ -82,7 +82,17 @@
 - **前端重点**：围绕 Alpha Lab、Portfolio Construction Console、Execution Policy Console、Promotion Pipeline Board 做决策级可视化，而非继续横向扩页
 - **★ V10.5.1 补丁（已交付）**：事后决策剖析自动化（`post_mortem_jobs.py` EventBus + Cron) + 事件日历 freshness 修复 + `confirmed=False` 体制修复
 
-### Phase 15: V11 计划 🔜
+### Phase 15: 组合席位竞争与资本配置闭环 🚀 V10.5.2 当前规划
+> 详细规划见：[docs/archived/v10/v10.5/RELEASE_PLAN_V10.5.2.md](../archived/v10/v10.5/RELEASE_PLAN_V10.5.2.md)
+
+- **M1 Capacity-Aware Admission & Replacement Engine**：当持仓达到上限时，不再直接拒绝新信号，而是将“当前持仓 + 新信号”统一排序，淘汰末位 N 个对象；若淘汰的是持仓则平仓，若淘汰的是信号则拒绝
+- **M2 Incumbent Quality Governance**：持仓持续参与席位竞争，引入持仓衰减、机会成本、体制适配与替换摩擦成本，不再默认“先入场就一直占位”
+- **M3 Capacity Simulation & What-If Console**：执行前输出替换预演、淘汰名单、风险预算释放与影子替换账本，先 dry-run 后落地
+- **M4 Rotation Orchestrator**：将退出清单、拒绝清单与执行清单纳入同一原子周期，解决“先拒绝后异步减仓”的链路割裂问题
+- **M5 Capacity Observability & Governance**：新增 capacity audit log、replacement attribution、seat utilization、false rejection rate 等治理指标
+- **前端重点**：围绕 Portfolio / Autonomy / Order Book / System Monitor 增加席位竞争、替换解释、容量健康状态可视化，而非新增独立孤岛页面
+
+### Phase 16: V11 计划 🔜
 - 期权执行开启（`STOCK,ETF,OPTION` 全模式）
 - 多账户 / 多用户支持
 - LLM Fine-tuning 个人交易风格适配

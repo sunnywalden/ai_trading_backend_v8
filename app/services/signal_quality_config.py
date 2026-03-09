@@ -6,13 +6,15 @@
   2. 运行时热更新（PATCH /api/v1/signals/quality-config）
   3. 体制自适应覆盖（CRISIS / HIGH_VOL 自动提升门槛）
 """
+
 from __future__ import annotations
 
 import logging
 from typing import Any
 
-from pydantic_settings import BaseSettings
 from pydantic import Field
+from pydantic_settings import BaseSettings
+
 from app.core.config import ENV_FILE
 
 logger = logging.getLogger(__name__)
@@ -21,37 +23,37 @@ logger = logging.getLogger(__name__)
 _REGIME_OVERRIDES: dict[str, dict[str, Any]] = {
     "BULL_TREND": {
         "conviction_threshold": 93,
-        "resonance_min_dims":   4,
+        "resonance_min_dims": 4,
         "max_concurrent_positions": 6,
         "long_allowed": True,
         "short_allowed": True,
     },
     "SIDEWAYS": {
         "conviction_threshold": 95,
-        "resonance_min_dims":   4,
+        "resonance_min_dims": 4,
         "max_concurrent_positions": 5,
         "long_allowed": True,
         "short_allowed": True,
     },
     "BEAR_TREND": {
         "conviction_threshold": 97,
-        "resonance_min_dims":   5,
+        "resonance_min_dims": 5,
         "max_concurrent_positions": 4,
-        "long_allowed": False,   # 仅 SHORT 或防御性标的
+        "long_allowed": False,  # 仅 SHORT 或防御性标的
         "short_allowed": True,
     },
     "HIGH_VOL": {
         "conviction_threshold": 97,
-        "resonance_min_dims":   5,
+        "resonance_min_dims": 5,
         "max_concurrent_positions": 3,
-        "long_allowed": True,    # 允许做多，但需对冲
+        "long_allowed": True,  # 允许做多，但需对冲
         "short_allowed": True,
     },
     "CRISIS": {
         "conviction_threshold": 99,
-        "resonance_min_dims":   6,
+        "resonance_min_dims": 6,
         "max_concurrent_positions": 2,
-        "long_allowed": False,   # CRISIS 期间关闭所有做多
+        "long_allowed": False,  # CRISIS 期间关闭所有做多
         "short_allowed": True,
     },
 }
@@ -154,6 +156,32 @@ class SignalQualityConfig(BaseSettings):
         description="是否为被拒信号创建幽灵交易记录",
     )
 
+    # ── V10.5.2: 席位竞争准入机制 ────────────────────────────────────────────────
+    CAPACITY_REPLACEMENT_ENABLED: bool = Field(
+        default=True,
+        description="是否启用席位竞争准入机制（否则维持原有硬拒绝行为）",
+    )
+    CAPACITY_REPLACEMENT_DRY_RUN: bool = Field(
+        default=False,
+        description="席位竞争仅评估，不触发实际平仓或拒绝（观察模式）",
+    )
+    CAPACITY_REPLACEMENT_MAX_PER_CYCLE: int = Field(
+        default=2,
+        description="每个决策周期最多触发席位替换次数",
+    )
+    CAPACITY_REPLACEMENT_MIN_EDGE: float = Field(
+        default=5.0,
+        description="触发席位替换的最低得分优势（挑战者分 - 持仓分 ≥ 此值才替换）",
+    )
+    CAPACITY_MIN_HOLD_MINUTES: int = Field(
+        default=30,
+        description="持仓受保护的最小持有时间（分钟），新建持仓不参与竞争",
+    )
+    CAPACITY_REPLACEMENT_COOLDOWN_MINUTES: int = Field(
+        default=120,
+        description="同一持仓在被替换后的冷却期（分钟），冷却期内不参与竞争",
+    )
+
     # ── 紧急覆盖 ───────────────────────────────────────────────────────────────
     QUALITY_GATE_BYPASS_KEY: str = Field(
         default="",
@@ -188,14 +216,18 @@ def apply_runtime_override(updates: dict[str, Any]) -> SignalQualityConfig:
     """热更新信号质量配置（无需重启服务）。"""
     _config_overrides.update(updates)
     new_cfg = get_signal_quality_config()
-    logger.info(f"[SignalQualityConfig] Runtime overrides applied: {list(updates.keys())}")
+    logger.info(
+        f"[SignalQualityConfig] Runtime overrides applied: {list(updates.keys())}"
+    )
     return new_cfg
 
 
 def reset_runtime_overrides() -> None:
     """清除所有热更新覆盖，恢复环境变量默认值。"""
     _config_overrides.clear()
-    logger.info("[SignalQualityConfig] Runtime overrides cleared, restored to env defaults.")
+    logger.info(
+        "[SignalQualityConfig] Runtime overrides cleared, restored to env defaults."
+    )
 
 
 def get_regime_adjusted_config(regime: str) -> dict[str, Any]:
@@ -213,10 +245,10 @@ def get_regime_adjusted_config(regime: str) -> dict[str, Any]:
             result["SIGNAL_RESONANCE_MIN_DIMS"] = overrides["resonance_min_dims"]
         if "max_concurrent_positions" in overrides:
             result["MAX_CONCURRENT_POSITIONS"] = overrides["max_concurrent_positions"]
-        result["long_allowed"]  = overrides.get("long_allowed", True)
+        result["long_allowed"] = overrides.get("long_allowed", True)
         result["short_allowed"] = overrides.get("short_allowed", True)
     else:
-        result["long_allowed"]  = True
+        result["long_allowed"] = True
         result["short_allowed"] = True
 
     return result
