@@ -19,13 +19,119 @@ class V1051ResearchService:
             return 0.0
 
     @staticmethod
+    def _safe_dict(value: Any) -> dict[str, Any]:
+        return value if isinstance(value, dict) else {}
+
+    @classmethod
+    def _extract_turnover_penalty(cls, signal: Any) -> float:
+        meta = cls._safe_dict(getattr(signal, "extra_metadata", None))
+        for key in (
+            "turnover_penalty_pct",
+            "turnover_cost_pct",
+            "estimated_turnover_cost",
+            "after_turnover_penalty",
+        ):
+            if key in meta:
+                return abs(cls._safe_float(meta.get(key)))
+        return 0.0
+
+    @classmethod
+    def _extract_regime_bucket(cls, signal: Any) -> str:
+        meta = cls._safe_dict(getattr(signal, "extra_metadata", None))
+        regime = (
+            meta.get("market_regime")
+            or meta.get("regime")
+            or meta.get("regime_at_decision")
+        )
+        return str(regime or "UNKNOWN").upper()
+
+    @classmethod
+    def _extract_capacity_bucket(cls, signal: Any) -> str:
+        meta = cls._safe_dict(getattr(signal, "extra_metadata", None))
+        adv_usd = cls._safe_float(meta.get("adv_usd"))
+        market_cap = cls._safe_float(meta.get("market_cap"))
+        liquidity_proxy = max(
+            adv_usd,
+            market_cap / 250 if market_cap > 0 else 0.0,
+        )
+        if liquidity_proxy >= 50_000_000:
+            return "XL"
+        if liquidity_proxy >= 10_000_000:
+            return "L"
+        if liquidity_proxy >= 1_000_000:
+            return "M"
+        if liquidity_proxy > 0:
+            return "S"
+        return "UNKNOWN"
+
+    @classmethod
+    def _infer_data_quality(
+        cls,
+        signals: list[Any],
+        evaluated_count: int,
+    ) -> str:
+        if not signals:
+            return "INSUFFICIENT"
+        latest_generated = max(
+            (
+                signal.generated_at
+                for signal in signals
+                if getattr(signal, "generated_at", None)
+            ),
+            default=None,
+        )
+        if evaluated_count == 0:
+            return "PROXY"
+        if evaluated_count < 5:
+            return "INSUFFICIENT"
+        if latest_generated and latest_generated < datetime.now() - timedelta(
+            days=21,
+        ):
+            return "STALE"
+        return "REAL"
+
+    @classmethod
+    def _summarize_bucket_breakdown(
+        cls,
+        signals: list[Any],
+        extractor: Any,
+    ) -> list[dict[str, Any]]:
+        buckets: dict[str, list[Any]] = defaultdict(list)
+        for signal in signals:
+            buckets[extractor(signal)].append(signal)
+        ranked = []
+        for bucket_name, bucket_signals in buckets.items():
+            actual_returns = [
+                cls._safe_float(signal.actual_return)
+                for signal in bucket_signals
+                if signal.actual_return is not None
+            ]
+            ranked.append(
+                {
+                    "bucket": bucket_name,
+                    "count": len(bucket_signals),
+                    "avg_actual_return": (
+                        round(sum(actual_returns) / len(actual_returns), 4)
+                        if actual_returns
+                        else 0.0
+                    ),
+                }
+            )
+        ranked.sort(key=lambda item: item["count"], reverse=True)
+        return ranked
+
+    @staticmethod
     def _candidate_keys(account_id: str) -> list[str]:
         keys = [str(account_id)]
         if "@" in account_id:
             keys.append(account_id.split("@", 1)[0])
         if account_id.lower().startswith("user_"):
             keys.append(account_id[5:])
-        return [key for idx, key in enumerate(keys) if key and key not in keys[:idx]]
+        return [
+            key
+            for idx, key in enumerate(keys)
+            if key and key not in keys[:idx]
+        ]
 
     @staticmethod
     def _coerce_winner(signal: Any) -> bool | None:
@@ -44,27 +150,215 @@ class V1051ResearchService:
     @classmethod
     def _summarize_signal_bucket(cls, signals: list[Any]) -> dict[str, Any]:
         generated = len(signals)
-        executed = sum(1 for signal in signals if str(signal.status) == "SignalStatus.EXECUTED" or str(signal.status) == "EXECUTED")
-        evaluated = [signal for signal in signals if signal.actual_return is not None or signal.pnl is not None or signal.pnl_pct is not None]
-        winners = [signal for signal in evaluated if cls._coerce_winner(signal) is True]
-        expected_returns = [cls._safe_float(signal.expected_return) for signal in signals if signal.expected_return is not None]
-        actual_returns = [cls._safe_float(signal.actual_return) for signal in evaluated if signal.actual_return is not None]
-        pnl_pcts = [cls._safe_float(signal.pnl_pct) for signal in evaluated if signal.pnl_pct is not None]
-        confidences = [cls._safe_float(signal.confidence) for signal in signals if signal.confidence is not None]
+        executed = sum(
+            1
+            for signal in signals
+            if str(signal.status) == "SignalStatus.EXECUTED"
+            or str(signal.status) == "EXECUTED"
+        )
+        evaluated = [
+            signal
+            for signal in signals
+            if signal.actual_return is not None
+            or signal.pnl is not None
+            or signal.pnl_pct is not None
+        ]
+        winners = [
+            signal for signal in evaluated if cls._coerce_winner(signal) is True
+        ]
+        expected_returns = [
+            cls._safe_float(signal.expected_return)
+            for signal in signals
+            if signal.expected_return is not None
+        ]
+        actual_returns = [
+            cls._safe_float(signal.actual_return)
+            for signal in evaluated
+            if signal.actual_return is not None
+        ]
+        pnl_pcts = [
+            cls._safe_float(signal.pnl_pct)
+            for signal in evaluated
+            if signal.pnl_pct is not None
+        ]
+        confidences = [
+            cls._safe_float(signal.confidence)
+            for signal in signals
+            if signal.confidence is not None
+        ]
+        execution_slippages = [
+            abs(cls._safe_float(signal.execution_slippage))
+            for signal in evaluated
+            if getattr(signal, "execution_slippage", None) is not None
+        ]
+        turnover_penalties = [
+            cls._extract_turnover_penalty(signal)
+            for signal in signals
+            if cls._extract_turnover_penalty(signal) > 0
+        ]
+
+        gross_return = (
+            round(sum(expected_returns) / len(expected_returns), 4)
+            if expected_returns
+            else 0.0
+        )
+        net_return = (
+            round(sum(actual_returns) / len(actual_returns), 4)
+            if actual_returns
+            else 0.0
+        )
+        avg_execution_slippage = (
+            round(sum(execution_slippages) / len(execution_slippages), 4)
+            if execution_slippages
+            else 0.0
+        )
+        after_cost_return = round(net_return - avg_execution_slippage, 4)
+        if pnl_pcts:
+            after_turnover_return = round(sum(pnl_pcts) / len(pnl_pcts), 4)
+        else:
+            turnover_penalty = (
+                sum(turnover_penalties) / len(turnover_penalties)
+                if turnover_penalties
+                else 0.0
+            )
+            after_turnover_return = round(
+                after_cost_return - turnover_penalty,
+                4,
+            )
+        data_quality = cls._infer_data_quality(signals, len(evaluated))
 
         return {
             "generated": generated,
             "executed": executed,
             "evaluated": len(evaluated),
-            "win_rate": round(len(winners) / len(evaluated), 4) if evaluated else 0.0,
-            "avg_expected_return": round(sum(expected_returns) / len(expected_returns), 4) if expected_returns else 0.0,
-            "avg_actual_return": round(sum(actual_returns) / len(actual_returns), 4) if actual_returns else 0.0,
-            "avg_pnl_pct": round(sum(pnl_pcts) / len(pnl_pcts), 4) if pnl_pcts else 0.0,
-            "avg_confidence": round(sum(confidences) / len(confidences), 4) if confidences else 0.0,
+            "win_rate": (
+                round(len(winners) / len(evaluated), 4)
+                if evaluated
+                else 0.0
+            ),
+            "gross_return": gross_return,
+            "net_return": net_return,
+            "after_cost_return": after_cost_return,
+            "after_turnover_return": after_turnover_return,
+            "data_quality": data_quality,
+            "avg_execution_slippage": avg_execution_slippage,
+            "avg_expected_return": gross_return,
+            "avg_actual_return": net_return,
+            "avg_pnl_pct": (
+                round(sum(pnl_pcts) / len(pnl_pcts), 4)
+                if pnl_pcts
+                else 0.0
+            ),
+            "avg_confidence": (
+                round(sum(confidences) / len(confidences), 4)
+                if confidences
+                else 0.0
+            ),
+            "regime_breakdown": cls._summarize_bucket_breakdown(
+                signals,
+                cls._extract_regime_bucket,
+            )[:6],
+            "capacity_breakdown": cls._summarize_bucket_breakdown(
+                signals,
+                cls._extract_capacity_bucket,
+            )[:6],
+        }
+
+    @classmethod
+    def _summarize_shadow_book(cls, ghost_trades: list[Any]) -> dict[str, Any]:
+        closed_ghosts = [
+            trade for trade in ghost_trades if str(trade.ghost_result) != "OPEN"
+        ]
+        ghost_wins = [
+            trade for trade in closed_ghosts if str(trade.ghost_result) == "WIN"
+        ]
+        rejection_buckets: dict[str, list[Any]] = defaultdict(list)
+        for trade in ghost_trades:
+            rejection_buckets[trade.rejection_reason or "UNKNOWN"].append(trade)
+
+        positive_pnls = [
+            max(cls._safe_float(trade.ghost_pnl_pct), 0.0)
+            for trade in closed_ghosts
+            if cls._safe_float(trade.ghost_pnl_pct) > 0
+        ]
+        negative_pnls = [
+            abs(min(cls._safe_float(trade.ghost_pnl_pct), 0.0))
+            for trade in closed_ghosts
+            if cls._safe_float(trade.ghost_pnl_pct) < 0
+        ]
+        missed_alpha_pct = (
+            round(sum(positive_pnls) / len(positive_pnls), 4)
+            if positive_pnls
+            else 0.0
+        )
+        avoided_loss_pct = (
+            round(sum(negative_pnls) / len(negative_pnls), 4)
+            if negative_pnls
+            else 0.0
+        )
+        return {
+            "total": len(ghost_trades),
+            "closed": len(closed_ghosts),
+            "win_rate": (
+                round(len(ghost_wins) / len(closed_ghosts), 4)
+                if closed_ghosts
+                else 0.0
+            ),
+            "false_reject_rate": (
+                round(len(ghost_wins) / len(closed_ghosts), 4)
+                if closed_ghosts
+                else 0.0
+            ),
+            "missed_alpha_pct": missed_alpha_pct,
+            "avoided_loss_pct": avoided_loss_pct,
+            "protection_benefit_pct": round(
+                avoided_loss_pct - missed_alpha_pct,
+                4,
+            ),
+            "avg_pnl_pct": round(
+                sum(
+                    cls._safe_float(trade.ghost_pnl_pct)
+                    for trade in closed_ghosts
+                )
+                / len(closed_ghosts),
+                4,
+            ) if closed_ghosts else 0.0,
+            "rejection_breakdown": sorted(
+                (
+                    {
+                        "reason": reason,
+                        "count": len(bucket),
+                        "avg_pnl_pct": round(
+                            sum(
+                                cls._safe_float(item.ghost_pnl_pct)
+                                for item in bucket
+                                if item.ghost_pnl_pct is not None
+                            )
+                            / max(
+                                sum(
+                                    1
+                                    for item in bucket
+                                    if item.ghost_pnl_pct is not None
+                                ),
+                                1,
+                            ),
+                            4,
+                        ),
+                    }
+                    for reason, bucket in rejection_buckets.items()
+                ),
+                key=lambda item: item["count"],
+                reverse=True,
+            )[:8],
         }
 
     @staticmethod
-    def _compute_strategy_stage(active: bool, last_status: str | None, hit_rate: float, sample_size: int) -> str:
+    def _compute_strategy_stage(
+        active: bool,
+        last_status: str | None,
+        hit_rate: float,
+        sample_size: int,
+    ) -> str:
         status = (last_status or "").upper()
         if active and status == "SUCCESS" and sample_size >= 20 and hit_rate >= 0.55:
             return "PRODUCTION"
@@ -73,6 +367,73 @@ class V1051ResearchService:
         if sample_size > 0:
             return "PAPER"
         return "DISCOVERY"
+
+    @staticmethod
+    def _compute_governance_stage(
+        active: bool,
+        last_status: str | None,
+        hit_rate: float,
+        sample_size: int,
+    ) -> str:
+        status = (last_status or "").upper()
+        if active and status == "SUCCESS" and sample_size >= 30 and hit_rate >= 0.58:
+            return "PRODUCTION"
+        if status == "SUCCESS" and sample_size >= 20 and hit_rate >= 0.55:
+            return "CHALLENGER"
+        if sample_size >= 10 and hit_rate >= 0.50:
+            return "SHADOW_LIVE"
+        if sample_size > 0:
+            return "PAPER"
+        return "DISCOVERY"
+
+    @classmethod
+    def _build_governance_evidence(
+        cls,
+        *,
+        active: bool,
+        last_status: str | None,
+        sample_size: int,
+        hit_rate: float,
+        avg_signal_strength: float,
+    ) -> dict[str, bool]:
+        status = (last_status or "").upper()
+        return {
+            "backtest": sample_size > 0,
+            "paper": sample_size >= 1,
+            "shadow": sample_size >= 10 and hit_rate >= 0.50,
+            "execution": status == "SUCCESS",
+            "calibration": avg_signal_strength > 0,
+            "rollback_ready": active or sample_size >= 10,
+        }
+
+    @staticmethod
+    def _build_governance_blockers(
+        evidence_chain: dict[str, bool],
+        hit_rate: float,
+        last_status: str | None,
+    ) -> list[str]:
+        blockers: list[str] = []
+        if not evidence_chain["backtest"]:
+            blockers.append("BACKTEST_EVIDENCE_MISSING")
+        if not evidence_chain["shadow"]:
+            blockers.append("SHADOW_LIVE_EVIDENCE_MISSING")
+        if (last_status or "").upper() != "SUCCESS":
+            blockers.append("LATEST_RUN_NOT_SUCCESS")
+        if hit_rate < 0.55:
+            blockers.append("HIT_RATE_BELOW_PROMOTION_THRESHOLD")
+        return blockers
+
+    @staticmethod
+    def _build_rollback_suggestion(stage: str, blockers: list[str]) -> str:
+        if not blockers:
+            return "HOLD_CURRENT_STAGE"
+        if stage == "PRODUCTION":
+            return "DOWNGRADE_TO_CHALLENGER"
+        if stage == "CHALLENGER":
+            return "ROLLBACK_TO_SHADOW_LIVE"
+        if stage == "SHADOW_LIVE":
+            return "ROLLBACK_TO_PAPER"
+        return "REMAIN_IN_DISCOVERY"
 
     @classmethod
     def _summarize_weight_shift(
@@ -115,12 +476,16 @@ class V1051ResearchService:
             key=lambda item: item["weight"],
             reverse=True,
         )
-        positive_weights = [item["weight"] for item in top_target if item["weight"] > 0]
+        positive_weights = [
+            cls._safe_float(item["weight"])
+            for item in top_target
+            if cls._safe_float(item["weight"]) > 0
+        ]
         risk_budget = []
         denom = sum(weight * weight for weight in positive_weights)
         if denom > 0:
             for item in top_target:
-                weight = max(item["weight"], 0.0)
+                weight = max(cls._safe_float(item["weight"]), 0.0)
                 if weight <= 0:
                     continue
                 risk_budget.append(
@@ -186,10 +551,26 @@ class V1051ResearchService:
 
         return {
             "sample_size": len(logs),
-            "avg_total_is_bps": round(sum(total_is) / len(total_is), 2) if total_is else 0.0,
-            "avg_fill_rate": round(sum(fill_rates) / len(fill_rates), 4) if fill_rates else 0.0,
-            "avg_time_to_fill_ms": round(sum(fill_times) / len(fill_times), 1) if fill_times else 0.0,
-            "avg_quality_score": round(sum(quality_scores) / len(quality_scores), 2) if quality_scores else 0.0,
+            "avg_total_is_bps": (
+                round(sum(total_is) / len(total_is), 2)
+                if total_is
+                else 0.0
+            ),
+            "avg_fill_rate": (
+                round(sum(fill_rates) / len(fill_rates), 4)
+                if fill_rates
+                else 0.0
+            ),
+            "avg_time_to_fill_ms": (
+                round(sum(fill_times) / len(fill_times), 1)
+                if fill_times
+                else 0.0
+            ),
+            "avg_quality_score": (
+                round(sum(quality_scores) / len(quality_scores), 2)
+                if quality_scores
+                else 0.0
+            ),
             "worst_symbols": worst_symbols,
         }
 
@@ -205,7 +586,7 @@ class V1051ResearchService:
         from app.models.trading_signal import TradingSignal
 
         keys = self._candidate_keys(account_id)
-        now = datetime.utcnow()
+        now = datetime.now()
         since = now - timedelta(days=max(lookback_days, 7))
 
         signal_stmt = (
@@ -225,7 +606,9 @@ class V1051ResearchService:
         strategy_ids = [signal.strategy_id for signal in signals if signal.strategy_id]
         strategies_by_id: dict[str, Any] = {}
         if strategy_ids:
-            strategy_stmt = select(Strategy).where(Strategy.id.in_(sorted(set(strategy_ids))))
+            strategy_stmt = select(Strategy).where(
+                Strategy.id.in_(sorted(set(strategy_ids)))
+            )
             strategies = (await db.execute(strategy_stmt)).scalars().all()
             strategies_by_id = {strategy.id: strategy for strategy in strategies}
 
@@ -248,19 +631,37 @@ class V1051ResearchService:
                     "generated": summary["generated"],
                     "evaluated": summary["evaluated"],
                     "win_rate": summary["win_rate"],
+                    "gross_return": summary["gross_return"],
+                    "net_return": summary["net_return"],
+                    "after_cost_return": summary["after_cost_return"],
+                    "after_turnover_return": summary["after_turnover_return"],
+                    "data_quality": summary["data_quality"],
                     "avg_expected_return": summary["avg_expected_return"],
                     "avg_actual_return": summary["avg_actual_return"],
-                    "alpha_gap": round(summary["avg_actual_return"] - summary["avg_expected_return"], 4),
+                    "alpha_gap": round(
+                        summary["avg_actual_return"]
+                        - summary["avg_expected_return"],
+                        4,
+                    ),
                     "avg_confidence": summary["avg_confidence"],
+                    "regime_breakdown": summary["regime_breakdown"],
+                    "capacity_breakdown": summary["capacity_breakdown"],
                 }
             )
-        strategy_scorecards.sort(key=lambda item: (item["evaluated"], item["win_rate"]), reverse=True)
+        strategy_scorecards.sort(
+            key=lambda item: (item["evaluated"], item["win_rate"]),
+            reverse=True,
+        )
 
         recent_window = now - timedelta(days=30)
         previous_window = recent_window - timedelta(days=30)
         decay_monitor = []
         for strategy_id, bucket in by_strategy.items():
-            recent_bucket = [signal for signal in bucket if signal.generated_at and signal.generated_at >= recent_window]
+            recent_bucket = [
+                signal
+                for signal in bucket
+                if signal.generated_at and signal.generated_at >= recent_window
+            ]
             previous_bucket = [
                 signal
                 for signal in bucket
@@ -277,51 +678,43 @@ class V1051ResearchService:
                     "strategy_name": strategy.name if strategy else strategy_id,
                     "recent_win_rate": recent_summary["win_rate"],
                     "previous_win_rate": previous_summary["win_rate"],
-                    "win_rate_delta": round(recent_summary["win_rate"] - previous_summary["win_rate"], 4),
-                    "recent_alpha_gap": round(recent_summary["avg_actual_return"] - recent_summary["avg_expected_return"], 4),
-                    "previous_alpha_gap": round(previous_summary["avg_actual_return"] - previous_summary["avg_expected_return"], 4),
+                    "win_rate_delta": round(
+                        recent_summary["win_rate"]
+                        - previous_summary["win_rate"],
+                        4,
+                    ),
+                    "recent_alpha_gap": round(
+                        recent_summary["avg_actual_return"]
+                        - recent_summary["avg_expected_return"],
+                        4,
+                    ),
+                    "previous_alpha_gap": round(
+                        previous_summary["avg_actual_return"]
+                        - previous_summary["avg_expected_return"],
+                        4,
+                    ),
                     "recent_sample_size": recent_summary["evaluated"],
                     "previous_sample_size": previous_summary["evaluated"],
+                    "data_quality": recent_summary["data_quality"],
                 }
             )
         decay_monitor.sort(key=lambda item: item["win_rate_delta"])
 
-        regime_stmt = select(MarketRegime).order_by(desc(MarketRegime.classification_date)).limit(12)
+        regime_stmt = (
+            select(MarketRegime)
+            .order_by(desc(MarketRegime.classification_date))
+            .limit(12)
+        )
         regimes = list((await db.execute(regime_stmt)).scalars().all())
         current_regime = regimes[0].to_dict() if regimes else None
 
-        ghost_stmt = select(GhostTrade).order_by(desc(GhostTrade.created_at)).limit(300)
+        ghost_stmt = (
+            select(GhostTrade)
+            .order_by(desc(GhostTrade.created_at))
+            .limit(300)
+        )
         ghost_trades = list((await db.execute(ghost_stmt)).scalars().all())
-        closed_ghosts = [trade for trade in ghost_trades if str(trade.ghost_result) != "OPEN"]
-        ghost_wins = sum(1 for trade in closed_ghosts if str(trade.ghost_result) == "WIN")
-        rejection_buckets: dict[str, list[Any]] = defaultdict(list)
-        for trade in ghost_trades:
-            rejection_buckets[trade.rejection_reason or "UNKNOWN"].append(trade)
-        shadow_book = {
-            "total": len(ghost_trades),
-            "closed": len(closed_ghosts),
-            "win_rate": round(ghost_wins / len(closed_ghosts), 4) if closed_ghosts else 0.0,
-            "avg_pnl_pct": round(
-                sum(self._safe_float(trade.ghost_pnl_pct) for trade in closed_ghosts) / len(closed_ghosts),
-                4,
-            ) if closed_ghosts else 0.0,
-            "rejection_breakdown": sorted(
-                (
-                    {
-                        "reason": reason,
-                        "count": len(bucket),
-                        "avg_pnl_pct": round(
-                            sum(self._safe_float(item.ghost_pnl_pct) for item in bucket if item.ghost_pnl_pct is not None)
-                            / max(sum(1 for item in bucket if item.ghost_pnl_pct is not None), 1),
-                            4,
-                        ),
-                    }
-                    for reason, bucket in rejection_buckets.items()
-                ),
-                key=lambda item: item["count"],
-                reverse=True,
-            )[:8],
-        }
+        shadow_book = self._summarize_shadow_book(ghost_trades)
 
         recent_signals = [
             {
@@ -329,10 +722,18 @@ class V1051ResearchService:
                 "symbol": signal.symbol,
                 "direction": signal.direction,
                 "status": str(signal.status).split(".")[-1],
-                "strategy_name": strategies_by_id.get(signal.strategy_id).name if signal.strategy_id in strategies_by_id else None,
+                "strategy_name": (
+                    strategies_by_id[signal.strategy_id].name
+                    if signal.strategy_id in strategies_by_id
+                    else None
+                ),
                 "confidence": self._safe_float(signal.confidence),
                 "expected_return": self._safe_float(signal.expected_return),
                 "actual_return": self._safe_float(signal.actual_return) if signal.actual_return is not None else None,
+                "data_quality": self._infer_data_quality(
+                    [signal],
+                    1 if signal.actual_return is not None or signal.pnl is not None or signal.pnl_pct is not None else 0,
+                ),
                 "generated_at": signal.generated_at.isoformat() if signal.generated_at else None,
             }
             for signal in signals[:20]
@@ -352,7 +753,7 @@ class V1051ResearchService:
     async def get_governance_pipeline_snapshot(
         self,
         db: AsyncSession,
-        account_id: str,
+        _account_id: str,
         limit: int = 20,
     ) -> dict[str, Any]:
         from app.models.ai_insight import ABExperiment, AIInsight
@@ -380,8 +781,28 @@ class V1051ResearchService:
             latest_run = runs[0] if runs else None
             history = latest_run.history if latest_run else None
             hit_rate = self._safe_float(getattr(history, "hit_rate", 0.0))
+            avg_signal_strength = self._safe_float(
+                getattr(history, "avg_signal_strength", 0.0)
+            )
             sample_size = int(getattr(history, "hits", 0) or len(runs))
-            stage = self._compute_strategy_stage(strategy.is_active, strategy.last_run_status, hit_rate, sample_size)
+            stage = self._compute_governance_stage(
+                strategy.is_active,
+                strategy.last_run_status,
+                hit_rate,
+                sample_size,
+            )
+            evidence_chain = self._build_governance_evidence(
+                active=strategy.is_active,
+                last_status=strategy.last_run_status,
+                sample_size=sample_size,
+                hit_rate=hit_rate,
+                avg_signal_strength=avg_signal_strength,
+            )
+            blockers = self._build_governance_blockers(
+                evidence_chain,
+                hit_rate,
+                strategy.last_run_status,
+            )
             pipeline.append(
                 {
                     "strategy_id": strategy.id,
@@ -393,13 +814,25 @@ class V1051ResearchService:
                     "last_run_at": strategy.last_run_at.isoformat() if strategy.last_run_at else None,
                     "run_count": len(runs),
                     "stage": stage,
+                    "evidence_chain": evidence_chain,
+                    "promotion_blockers": blockers,
+                    "rollback_suggestion": self._build_rollback_suggestion(
+                        stage,
+                        blockers,
+                    ),
                     "hit_rate": round(hit_rate, 4),
-                    "avg_signal_strength": round(self._safe_float(getattr(history, "avg_signal_strength", 0.0)), 4),
+                    "avg_signal_strength": round(avg_signal_strength, 4),
                     "scanned_total": int(getattr(history, "scanned_total", 0) or 0),
                     "hits": int(getattr(history, "hits", 0) or 0),
                 }
             )
-        stage_rank = {"PRODUCTION": 4, "CHALLENGER": 3, "PAPER": 2, "DISCOVERY": 1}
+        stage_rank = {
+            "PRODUCTION": 5,
+            "CHALLENGER": 4,
+            "SHADOW_LIVE": 3,
+            "PAPER": 2,
+            "DISCOVERY": 1,
+        }
         pipeline.sort(key=lambda item: (stage_rank.get(item["stage"], 0), item["run_count"]), reverse=True)
 
         experiments_stmt = select(ABExperiment).order_by(desc(ABExperiment.created_at)).limit(10)
@@ -434,8 +867,22 @@ class V1051ResearchService:
         return {
             "funnel": {
                 "discovery": len(pipeline),
-                "paper": sum(1 for item in pipeline if item["stage"] in {"PAPER", "CHALLENGER", "PRODUCTION"}),
-                "challenger": sum(1 for item in pipeline if item["stage"] in {"CHALLENGER", "PRODUCTION"}),
+                "paper": sum(
+                    1
+                    for item in pipeline
+                    if item["stage"]
+                    in {"PAPER", "SHADOW_LIVE", "CHALLENGER", "PRODUCTION"}
+                ),
+                "shadow_live": sum(
+                    1
+                    for item in pipeline
+                    if item["stage"] in {"SHADOW_LIVE", "CHALLENGER", "PRODUCTION"}
+                ),
+                "challenger": sum(
+                    1
+                    for item in pipeline
+                    if item["stage"] in {"CHALLENGER", "PRODUCTION"}
+                ),
                 "production": sum(1 for item in pipeline if item["stage"] == "PRODUCTION"),
             },
             "pipeline": pipeline[:limit],

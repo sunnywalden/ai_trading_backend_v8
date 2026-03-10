@@ -706,9 +706,8 @@ class AutonomousEngine:
                             and _funnel_decision.rejection_reason == "MAX_POSITIONS_REACHED"
                         ):
                             try:
-                                from app.services.capacity_displacement_service import (
-                                    CapacityDisplacementService,
-                                )
+                                from app.services.capacity_displacement_service import \
+                                    CapacityDisplacementService
                                 _disp_svc = CapacityDisplacementService(db)
                                 _displacement_result = await _disp_svc.evaluate_and_displace(
                                     account_id           = account_id,
@@ -2043,7 +2042,8 @@ class AutonomousEngine:
         from sqlalchemy import select as sa_select
 
         from app.broker.factory import make_option_broker_client
-        from app.models.trading_signal import SignalStatus, SignalType, TradingSignal
+        from app.models.trading_signal import (SignalStatus, SignalType,
+                                               TradingSignal)
 
         cutoff = datetime.utcnow() - timedelta(days=3)
         stmt = (
@@ -2625,21 +2625,32 @@ class AutonomousEngine:
         TWAP/VWAP 算法单只能在正常交易时段提交；非交易时段自动降级为 LMT（有参考价）或 MKT。
         """
         try:
-            from app.broker.factory import is_hk_stock as _is_hk
             from app.core.market_hours import is_symbol_market_active
+            from app.services.execution_policy_service import \
+                execution_policy_service
             from app.services.order_service import OrderService
 
             symbol = decision["symbol"]
-            raw_algo = (decision.get("algo") or "MARKET").upper()
-            # MKT 是我们内部简写，映射为 MARKET
-            if raw_algo == "MKT":
-                raw_algo = "MARKET"
+            execution_controls = (
+                await execution_policy_service
+                .build_live_execution_controls_with_feedback(
+                    db,
+                    account_id,
+                    decision,
+                )
+            )
+            raw_algo = str(
+                execution_controls["broker_order_type"] or "MARKET"
+            ).upper()
 
             # TWAP/VWAP 只能在正常交易时段使用；非交易时段降级
             if raw_algo in ("TWAP", "VWAP") and not is_symbol_market_active(symbol):
                 # 优先用 LMT（需要价格），价格未知时用 MKT
                 ref_price = float(
-                    decision.get("price") or decision.get("ref_price") or 0
+                    execution_controls.get("limit_price")
+                    or decision.get("price")
+                    or decision.get("ref_price")
+                    or 0
                 )
                 if ref_price <= 0:
                     # 尝试从 DataHub 再取一次价格
@@ -2656,12 +2667,23 @@ class AutonomousEngine:
                     f"downgrading {raw_algo} → {fallback_algo} (price={ref_price or 'N/A'})"
                 )
                 raw_algo = fallback_algo
-                if raw_algo == "LMT":
-                    decision = {**decision, "ref_price": ref_price}
+                if raw_algo == "LMT" and ref_price > 0:
+                    execution_controls["limit_price"] = ref_price
 
             # Tiger API 用 LONG/SHORT，不是 BUY/SELL
             _action = decision["action"].upper()
             tiger_direction = "LONG" if _action == "BUY" else "SHORT"
+
+            if execution_controls["control_state"]["enabled"]:
+                logger.info(
+                    "[AutonomousEngine._execute_order] %s hard control: %s → %s "
+                    "budget_breached=%s urgency=%s",
+                    symbol,
+                    execution_controls["requested_algo"],
+                    raw_algo,
+                    execution_controls["budget_breached"],
+                    execution_controls["policy"]["urgency"],
+                )
 
             order_svc = OrderService(db)
             payload = {
@@ -2670,8 +2692,14 @@ class AutonomousEngine:
                 "quantity": float(decision.get("qty", 0)),
                 "order_type": raw_algo,
                 # OrderService.submit_order 读 limit_price 并传给 broker
-                "limit_price": decision.get("ref_price") if raw_algo == "LMT" else None,
+                "limit_price": (
+                    execution_controls.get("limit_price")
+                    if raw_algo == "LMT"
+                    else None
+                ),
                 "strategy_tag": "Autonomous",
+                "execution_policy": execution_controls["policy"],
+                "execution_control_mode": execution_controls["control_state"]["mode"],
             }
             result = await order_svc.submit_order(account_id, payload)
             return result.order_id

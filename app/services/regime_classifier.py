@@ -146,6 +146,9 @@ class RegimeScores:
             score += 15
         if self.breadth <= 40:
             score += 15
+        # 极端高波动是 CRISIS 特征，降低 BEAR 竞争分以保证 CRISIS 置信度
+        if self.vol >= 85:
+            score -= 35
         return min(score, 100.0)
 
     def _score_high_vol(self) -> float:
@@ -159,6 +162,9 @@ class RegimeScores:
             score += 15
         if self.breadth < 50:
             score += 15
+        # 极端恐慌区（vol≥85）属于 CRISIS 领域，HIGH_VOL 应退让
+        if self.vol >= 85:
+            score -= 30
         return min(score, 100.0)
 
     def _score_bull(self) -> float:
@@ -181,7 +187,8 @@ class RegimeScores:
         score = 0.0
         if 35 <= self.trend <= 65:
             score += 30
-        if self.vol <= 55:
+        # 极低波动（<22）是区间震荡特征，均值回复需要一定波动才有效
+        if 22 <= self.vol <= 55:
             score += 25
         if 40 <= self.momentum <= 60:
             score += 25
@@ -193,6 +200,9 @@ class RegimeScores:
         """区间震荡：兜底分类，低波动横盘"""
         score = max(0.0, 40 - self.vol * 0.3)  # 越低波动越高分
         score += max(0.0, 10 - abs(self.momentum - 50) * 0.2)
+        # 极低波动（≤20）强确认 RANGE_BOUND
+        if self.vol <= 20:
+            score += 40
         return score
 
 

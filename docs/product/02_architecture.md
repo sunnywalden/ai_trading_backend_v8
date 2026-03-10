@@ -63,6 +63,7 @@
 - **风险门禁**：VaR/CVaR + 压力测试，双重把关，AI 不绕过
 - **信号融合引擎** ★ V10.2-M4：六维加权融合（tech 25% / fundamental 20% / macro 15% / vol 15% / options 15% / sentiment 10%）+ 体制倍数加权
 - **盈利围栏** ★ V10.2-M2：盈利前 1 天自动激活 50% 仓位上限，防止盈利期决策扭曲
+- **CapacityArbiterService** ★ V10.5.2：统一候选池席位竞争，动态替换末位持仓（详见模块 H）
 
 #### C. 执行层
 - **智能执行路由**：小单市价 → 大单 TWAP/VWAP 自动选择
@@ -88,4 +89,15 @@
 - **Multi-Agent Orchestration（五智能体协作）**：MarketAnalystAgent / RiskChallengerAgent / ExecutionOptimizerAgent / ResearchAgent / OrchestratorAgent，结构化 `AgentMessage` 传递，全量通信日志溯源
 - **AI Confidence Calibration（置信度校准）**：置信区间 → 实际胜率映射校准曲线，Brier Score + ECE 量化校准误差，自适应降评因子（ECE > 0.12 时自动介入）
 - **Adaptive Factor Framework（自适应因子框架）**：Kalman Filter 在线权重更新，因子动量加成（近20日 IC 前两名 +5%），因子拥挤度检测
+
+#### G. 信号质量治理层 ★ V10.4.2 新增
+- **SignalQualityFunnel（五层漏斗）**：Layer 0（宇宙过滤：标的池黑白名单）→ Layer 1（体制门控：策略/体制兼容性）→ Layer 2（组合预检：MAX_CONCURRENT_POSITIONS / MAX_DAILY_SIGNALS 硬约束）→ Layer 3（多维共振：技术/基本面对立或 CRISIS 做多时 conviction=0）→ Layer 4（置信度校准门：SignalConvictionScorer 质量评级）
+- **SignalConvictionScorer（信号质量评级）**：输出 LOW / MEDIUM / HIGH / ELITE 四级质量标签；conviction 公式：`composite×0.4 + resonance_bonus×0.25 + regime_alignment×0.15 + historical_ic×0.1 + timing_quality×0.1`；ELITE 信号豁免 `MAX_DAILY_SIGNALS` 限制（但不豁免仓位/RiskGate）
+- **GhostTradeService（幽灵交易追踪）**：Layer 3/4 拒绝信号自动创建虚拟跟踪，每日价格更新，计算"幽灵胜率 vs 实际胜率"对比，量化误拒代价；数据表：`signal_quality_audit_logs / ghost_trades`
+
+#### H. 席位竞争层 ★ V10.5.2 新增
+- **CapacityArbiterService（席位仲裁服务）**：将当前持仓与新信号统一放入候选池，按 `admission_score = alpha_quality - replacement_friction - risk_penalty + regime_fit` 排序；满仓时淘汰末位 N 项（持仓 → `FORCE_EXIT`，信号 → `REJECTED_BY_CAPACITY_REPLACEMENT`）
+- **PositionScoringService（持仓动态评估）**：实现 Incumbent Decay Model，持仓质量随时间衰减，定期重新参与席位竞争
+- **替换保护机制**：`MIN_REPLACEMENT_EDGE_BPS`（最小替换优势）/ `MAX_REPLACEMENTS_PER_CYCLE`（每轮最多替换数）/ `MIN_HOLD_MINUTES_BEFORE_REPLACEMENT`（最短持有时间门槛）/ `REPLACEMENT_COOLDOWN_MINUTES`（冷却期），防止过度翻仓
+- **审计与治理**：`capacity_decision_audit_log` 全量记录评分与淘汰原因；`CAPACITY_REPLACEMENT_DRY_RUN` 模式支持先观测后执行
 - **Decision Post-Mortem Engine（事后剖析）**：每笔平仓后自动生成反事实分析（BUY/HOLD/SELL 三条路径对比），洞察自动反哺 InsightService（source=POST_MORTEM）

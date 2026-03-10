@@ -26,6 +26,8 @@
 - ✅ 信号精英化（V10.4.2）：LOW/MEDIUM/HIGH/ELITE 质量标识 + Signal Quality Funnel + Ghost Trades
 - ✅ 风险降低优先执行（V10.4.3）：REDUCE/EXIT 快速通道 + force_exit + odd-lot 退出
 - ✅ 以仓位为中心的生命周期（V10.4.4）：positions 聚合根 + execution_slices + Append-Only 审计
+- ✅ 机构级研究操作台（V10.5.1）：Alpha Truth Stack（/alpha-lab）+ Portfolio Construction 2.0（/portfolio）+ Execution Policy Engine（/execution-policy）+ Governance Pipeline（/governance/pipeline）+ Live Safety Guard
+- ✅ 组合席位竞争引擎（V10.5.2）：Unified Candidate Pool + admission_score 排序 + 替换保护带 + Incumbent Decay Model + `capacity_decision_audit_log` + DRY_RUN 模式
 
 ### 6.2 用户体验
 
@@ -45,7 +47,7 @@
 - 数据新鲜度告警率 < 1%（event_calendar / market_data 等来源无 WARN）
 - 体制分类准确率 ≥ 80%（confirmed 体制与后验吻合）
 
-### 6.4 V10.5.3 收益质量指标（规划中）
+### 6.4 V10.5.3 收益质量指标（已实现 ✅）
 
 - Net Alpha Positive Rate 提升：扣除执行与换手成本后仍为正的策略占比持续提升
 - Seat Efficiency 提升：前 N 个席位贡献的净收益占比提升，减少低价值仓位占位

@@ -36,6 +36,12 @@ class CandidateSnapshot(BaseModel):
     rank: int = 0
     eliminate: bool = False
     eliminated_reason: Optional[str] = None
+    seat_value: float = 0.0
+    marginal_alpha: float = 0.0
+    marginal_risk: float = 0.0
+    marginal_turnover: float = 0.0
+    liquidity_usage: float = 0.0
+    replace_or_hold_reason: Optional[str] = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

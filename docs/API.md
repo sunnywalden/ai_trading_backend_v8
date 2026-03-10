@@ -33,6 +33,7 @@ Base URL 以你的启动参数为准（示例：`http://localhost:8088`）。
 - **Portfolio Construction 2.0（/api/v1/portfolio）— V10.5.1 M2**
 - **Execution Policy & Microscope（/api/v1/execution-policy）— V10.5.1 M3**
 - **Live Safety & Model Degradation（/api/v1/live-safety）— V10.5.1 M4**
+- **席位竞争仲裁（/api/v1/capacity）— V10.5.2**
 
 ---
 
@@ -648,7 +649,18 @@ CACHE_TTL_GEOPOLITICAL_HOURS=24
 ### GET /api/v1/alpha-lab/snapshot
 - 用途：获取 Alpha Lab 实验室快照，包含 Purged Walk-Forward 验证结果与影子组合表现。
 - Query: `lookback_days?: int` (默认 90)
-- 响应关键字段：`{ shadow_portfolio_pnl, purged_wf_results, total_alpha_decay_pct, generated_at }`
+- 响应关键字段（V10.5.3 扩展）：
+  - `summary{ gross_return, net_return, after_cost_return, after_turnover_return, data_quality }`
+  - `strategy_scorecards[]`：每项包含 `gross_return / net_return / after_cost_return / after_turnover_return / data_quality / regime_breakdown / capacity_breakdown`
+  - `shadow_book{ false_reject_rate, protection_benefit_pct, missed_alpha_pct, avoided_loss_pct }`
+  - `recent_signals[]`：每项包含 `data_quality`
+
+### Feature flags（V10.5.3）
+
+- `ALPHA_TRUTH_V2_ENABLED`
+- `SEAT_VALUE_ARBITER_ENABLED`
+- `EXECUTION_POLICY_HARD_CONTROL_ENABLED`
+- `GOVERNANCE_HARD_GATE_ENABLED`
 
 ---
 
@@ -706,6 +718,7 @@ CACHE_TTL_GEOPOLITICAL_HOURS=24
 
 ## 更新历史
 
+- **2026-03-10**: V10.5.2 上线；新增 /api/v1/capacity 席位竞争仲裁路由组（6 个端点：config GET/PATCH、preview、logs、logs/{id}、stats）。
 - **2026-03-08**: V10.5.1 上线；新增 Alpha Truth Stack, Portfolio 2.0, Execution Policy, Live Safety 共 14 个核心端点；同步 v10.5.1 架构更新。
 - **2026-02-28**: V10.2-M2~M8 上线；新增事件日历、动态仓位、信号融合、交易归因、AI 洞察进化、Copilot Deep Research 共 18 个端点；文档补全
 - **2026-02-27**: V10.2-M1 上线；新增 `/api/v1/regime` 4 个端点
@@ -714,6 +727,19 @@ CACHE_TTL_GEOPOLITICAL_HOURS=24
 - 其它历史记录请见各相关文件头部注释
 
 ---
+
+## 席位竞争仲裁（/api/v1/capacity）— V10.5.2
+
+> 功能：Capacity-Aware Admission & Replacement Engine，席位竞争仲裁与审计。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | /api/v1/capacity/config | 查看当前容量仲裁参数（含运行时覆盖值） |
+| PATCH | /api/v1/capacity/config | 热更新仲裁参数（重启后恢复默认） |
+| POST | /api/v1/capacity/preview | Dry-run 仲裁预演（返回候选排序与淘汰清单，不实际执行） |
+| GET | /api/v1/capacity/logs | 仲裁决策日志列表（支持 dry_run、时间范围、触发来源过滤） |
+| GET | /api/v1/capacity/logs/{log_id} | 单条仲裁日志详情（含候选评分明细） |
+| GET | /api/v1/capacity/stats | 仲裁指标摘要（触发次数、替换成功率、干预命中率等） |
 
 ## 相关文档
 

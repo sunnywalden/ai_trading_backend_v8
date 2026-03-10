@@ -20,9 +20,11 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +60,14 @@ class CapacityCandidate:
     eliminate: bool = False
     eliminated_reason: Optional[str] = None
 
+    # ── V10.5.3: Portfolio Construction 2.1 可解释字段 ──
+    seat_value: float = 0.0
+    marginal_alpha: float = 0.0
+    marginal_risk: float = 0.0
+    marginal_turnover: float = 0.0
+    liquidity_usage: float = 0.0
+    replace_or_hold_reason: Optional[str] = None
+
     def as_snapshot_dict(self) -> dict:
         return {
             "symbol": self.symbol,
@@ -82,6 +92,12 @@ class CapacityCandidate:
             "rank": self.rank,
             "eliminate": self.eliminate,
             "eliminated_reason": self.eliminated_reason,
+            "seat_value": round(self.seat_value, 2),
+            "marginal_alpha": round(self.marginal_alpha, 4),
+            "marginal_risk": round(self.marginal_risk, 4),
+            "marginal_turnover": round(self.marginal_turnover, 4),
+            "liquidity_usage": round(self.liquidity_usage, 4),
+            "replace_or_hold_reason": self.replace_or_hold_reason,
         }
 
 
@@ -158,12 +174,17 @@ class CapacityArbiterService:
 
         Returns ArbiterDecision with approved/rejected signals and positions to close.
         """
-        from app.services.signal_quality_config import get_signal_quality_config
+        from app.services.signal_quality_config import \
+            get_signal_quality_config
 
         cfg = get_signal_quality_config()
 
         # dry_run 优先使用显式参数，否则使用配置
-        _dry_run = dry_run if dry_run is not None else cfg.CAPACITY_REPLACEMENT_DRY_RUN
+        _dry_run = (
+            dry_run
+            if dry_run is not None
+            else cfg.CAPACITY_REPLACEMENT_DRY_RUN
+        )
 
         if not cfg.CAPACITY_REPLACEMENT_ENABLED:
             # 功能关闭 → 所有信号不参与竞争，全部通过（Layer 2 硬拒逻辑仍生效）
@@ -224,7 +245,10 @@ class CapacityArbiterService:
         #    受保护的持仓强制排在前面（不参与末尾淘汰）
         protected = [c for c in candidates if c.is_protected]
         unprotected = [c for c in candidates if not c.is_protected]
-        unprotected.sort(key=lambda c: c.admission_score, reverse=True)
+        unprotected.sort(
+            key=self._candidate_rank_score,
+            reverse=True,
+        )
 
         # 合并：受保护排在最前（视为"已安全"）
         candidates = protected + unprotected
@@ -253,7 +277,7 @@ class CapacityArbiterService:
             c for c in unprotected if c.candidate_type == CANDIDATE_POSITION
         ] + [c for c in unprotected if c.candidate_type == CANDIDATE_SIGNAL]
         # 重新排 admission_score 从低到高（候选末尾 = 得分最低）
-        to_eliminate_pool.sort(key=lambda c: c.admission_score)
+        to_eliminate_pool.sort(key=self._candidate_rank_score)
 
         min_edge = cfg.CAPACITY_REPLACEMENT_MIN_EDGE
         max_replace = cfg.CAPACITY_REPLACEMENT_MAX_PER_CYCLE
@@ -261,8 +285,6 @@ class CapacityArbiterService:
 
         positions_to_close: List[str] = []
         rejected_signals: List[dict] = []
-        approved_signal_ids: set = set()
-
         remaining_overflow = overflow
         for candidate in to_eliminate_pool:
             if remaining_overflow <= 0:
@@ -273,16 +295,17 @@ class CapacityArbiterService:
                 # 找当前候选池中得分最高的信号进行比较
                 best_signal_score = max(
                     (
-                        c.admission_score
+                        self._candidate_rank_score(c)
                         for c in signal_candidates
                         if not c.is_protected
                     ),
                     default=0.0,
                 )
-                edge = best_signal_score - candidate.admission_score
+                edge = best_signal_score - self._candidate_rank_score(candidate)
                 if edge < min_edge:
                     candidate.is_protected = True
                     candidate.protect_reason = "min_edge"
+                    candidate.replace_or_hold_reason = "MIN_EDGE_PROTECTED"
                     decision.min_edge_protected += 1
                     logger.debug(
                         "[CapacityArbiter] Position %s protected by min_edge (edge=%.1f < %.1f)",
@@ -306,6 +329,9 @@ class CapacityArbiterService:
                         worst_signal.eliminated_reason = (
                             "seat_competition_signal_eliminated"
                         )
+                        worst_signal.replace_or_hold_reason = (
+                            "REJECTED_BY_MIN_EDGE"
+                        )
                         rejected_signals.append(worst_signal.signal_dict or {})
                     continue
 
@@ -328,11 +354,15 @@ class CapacityArbiterService:
                     if worst_signal:
                         worst_signal.eliminate = True
                         worst_signal.eliminated_reason = "max_replacements_cap"
+                        worst_signal.replace_or_hold_reason = (
+                            "REJECTED_BY_MAX_REPLACEMENTS_CAP"
+                        )
                         rejected_signals.append(worst_signal.signal_dict or {})
                     continue
 
                 candidate.eliminate = True
                 candidate.eliminated_reason = "seat_competition_position_eliminated"
+                candidate.replace_or_hold_reason = "REPLACED_BY_CHALLENGER"
                 positions_to_close.append(candidate.symbol)
                 replace_count += 1
                 remaining_overflow -= 1
@@ -344,6 +374,7 @@ class CapacityArbiterService:
                     continue
                 candidate.eliminate = True
                 candidate.eliminated_reason = "seat_competition_signal_eliminated"
+                candidate.replace_or_hold_reason = "SIGNAL_ELIMINATED"
                 rejected_signals.append(candidate.signal_dict or {})
                 remaining_overflow -= 1
 
@@ -551,6 +582,17 @@ class CapacityArbiterService:
                 is_protected = True
                 protect_reason = "cooldown"
 
+            portfolio_metrics = self._build_portfolio_21_metrics(
+                candidate_type=CANDIDATE_POSITION,
+                raw_score=overall_score,
+                admission_score=admission_score,
+                hold_minutes=hold_minutes,
+                unrealized_pnl_pct=float(
+                    enriched_pos_data.get("unrealized_pnl_pct") or 0.0
+                ),
+                source_payload=enriched_pos_data,
+            )
+
             candidates.append(
                 CapacityCandidate(
                     candidate_type=CANDIDATE_POSITION,
@@ -561,6 +603,14 @@ class CapacityArbiterService:
                     recommendation=recommendation,
                     is_protected=is_protected,
                     protect_reason=protect_reason,
+                    seat_value=portfolio_metrics["seat_value"],
+                    marginal_alpha=portfolio_metrics["marginal_alpha"],
+                    marginal_risk=portfolio_metrics["marginal_risk"],
+                    marginal_turnover=portfolio_metrics["marginal_turnover"],
+                    liquidity_usage=portfolio_metrics["liquidity_usage"],
+                    replace_or_hold_reason=portfolio_metrics[
+                        "replace_or_hold_reason"
+                    ],
                 )
             )
 
@@ -573,10 +623,8 @@ class CapacityArbiterService:
         regime: str,
     ) -> List[CapacityCandidate]:
         """为每个待处理 ENTRY 信号构建 CapacityCandidate，使用 preview_quality 评分。"""
-        from app.services.signal_quality_funnel import (
-            SignalFunnelInput,
-            signal_quality_funnel,
-        )
+        from app.services.signal_quality_funnel import (SignalFunnelInput,
+                                                        signal_quality_funnel)
 
         candidates: List[CapacityCandidate] = []
         for sig in entry_signals:
@@ -598,6 +646,12 @@ class CapacityArbiterService:
                 raw_score = 0.0
 
             admission_score = self._signal_admission_score(raw_score)
+            portfolio_metrics = self._build_portfolio_21_metrics(
+                candidate_type=CANDIDATE_SIGNAL,
+                raw_score=raw_score,
+                admission_score=admission_score,
+                source_payload=sig,
+            )
 
             candidates.append(
                 CapacityCandidate(
@@ -607,10 +661,104 @@ class CapacityArbiterService:
                     admission_score=admission_score,
                     signal_id=signal_id,
                     signal_dict=sig,
+                    seat_value=portfolio_metrics["seat_value"],
+                    marginal_alpha=portfolio_metrics["marginal_alpha"],
+                    marginal_risk=portfolio_metrics["marginal_risk"],
+                    marginal_turnover=portfolio_metrics["marginal_turnover"],
+                    liquidity_usage=portfolio_metrics["liquidity_usage"],
+                    replace_or_hold_reason=portfolio_metrics[
+                        "replace_or_hold_reason"
+                    ],
                 )
             )
 
         return candidates
+
+    @staticmethod
+    def _clip_ratio(value: float) -> float:
+        return max(0.0, min(1.0, float(value)))
+
+    @staticmethod
+    def _seat_value_arbiter_enabled() -> bool:
+        return bool(settings.SEAT_VALUE_ARBITER_ENABLED)
+
+    @classmethod
+    def _candidate_rank_score(cls, candidate: CapacityCandidate) -> float:
+        if cls._seat_value_arbiter_enabled():
+            return float(candidate.seat_value)
+        return float(candidate.admission_score)
+
+    @classmethod
+    def _estimate_liquidity_usage(
+        cls,
+        *,
+        quantity: Any = None,
+        price: Any = None,
+        adv_usd: Any = None,
+        default: float = 0.0,
+    ) -> float:
+        qty = abs(float(quantity or 0.0))
+        px = abs(float(price or 0.0))
+        adv = abs(float(adv_usd or 0.0))
+        if qty > 0 and px > 0 and adv > 0:
+            return cls._clip_ratio((qty * px) / adv)
+        return cls._clip_ratio(default)
+
+    @classmethod
+    def _build_portfolio_21_metrics(
+        cls,
+        *,
+        candidate_type: str,
+        raw_score: float,
+        admission_score: float,
+        hold_minutes: float = 0.0,
+        unrealized_pnl_pct: float = 0.0,
+        source_payload: Optional[dict] = None,
+    ) -> dict[str, float | str]:
+        payload = source_payload or {}
+        adv_usd = float(payload.get("adv_usd") or payload.get("avg_daily_volume") or 0.0)
+        quantity = payload.get("quantity") or payload.get("qty") or payload.get("suggested_quantity")
+        price = payload.get("current_price") or payload.get("avg_cost") or payload.get("suggested_price")
+
+        marginal_alpha = cls._clip_ratio(raw_score / 100.0)
+        marginal_risk = cls._clip_ratio((100.0 - admission_score) / 100.0)
+        if candidate_type == CANDIDATE_SIGNAL:
+            marginal_turnover = cls._clip_ratio(
+                float(payload.get("quantity_value") or 0.25)
+            )
+            liquidity_usage = cls._estimate_liquidity_usage(
+                quantity=quantity,
+                price=price,
+                adv_usd=adv_usd,
+                default=0.25,
+            )
+            reason = (
+                "REPLACE_CANDIDATE"
+                if admission_score >= 60
+                else "LOW_SEAT_VALUE"
+            )
+        else:
+            marginal_turnover = cls._clip_ratio(min(0.15, hold_minutes / 28800.0))
+            liquidity_usage = cls._estimate_liquidity_usage(
+                quantity=quantity,
+                price=price,
+                adv_usd=adv_usd,
+                default=0.10,
+            )
+            reason = "HOLD" if admission_score >= 60 else "REPLACEABLE"
+
+        pnl_bonus = max(-5.0, min(5.0, float(unrealized_pnl_pct) * 5.0))
+        seat_value = admission_score - marginal_turnover * 12 - liquidity_usage * 8
+        seat_value = max(0.0, min(100.0, seat_value + pnl_bonus))
+
+        return {
+            "seat_value": seat_value,
+            "marginal_alpha": marginal_alpha,
+            "marginal_risk": marginal_risk,
+            "marginal_turnover": marginal_turnover,
+            "liquidity_usage": liquidity_usage,
+            "replace_or_hold_reason": reason,
+        }
 
     @staticmethod
     def _position_admission_score(
@@ -753,12 +901,8 @@ class CapacityArbiterService:
         from datetime import datetime as _dt
         from uuid import uuid4 as _uuid4
 
-        from app.models.trading_signal import (
-            SignalSource,
-            SignalStatus,
-            SignalType,
-            TradingSignal,
-        )
+        from app.models.trading_signal import (SignalSource, SignalStatus,
+                                               SignalType, TradingSignal)
 
         pos_map = {c.symbol: c for c in position_candidates}
         created_symbols: List[str] = []
@@ -835,10 +979,8 @@ class CapacityArbiterService:
     ) -> None:
         """写容量决策审计日志。"""
         try:
-            from app.models.capacity_decision_log import (
-                ArbiterTriggerReason,
-                CapacityDecisionLog,
-            )
+            from app.models.capacity_decision_log import (ArbiterTriggerReason,
+                                                          CapacityDecisionLog)
 
             pos_candidates = [
                 c
