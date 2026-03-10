@@ -338,6 +338,21 @@ class RegimeClassifier:
                     existing.momentum_score = scores.momentum
                     existing.reasoning = self._build_reasoning(candidate_regime, scores)
                     await db.commit()
+                    try:
+                        from app.services.regime_strategy_allocator import \
+                            sync_regime_runtime_state
+
+                        await sync_regime_runtime_state(
+                            curr_regime=candidate_regime.value,
+                            confidence=confidence,
+                            var_multiplier=_parse_var_multipliers().get(
+                                candidate_regime.value, 1.0
+                            ),
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            f"[RegimeClassifier] Failed to sync runtime regime state: {exc}"
+                        )
                     logger.info(
                         f"[RegimeClassifier] Regime unchanged ({candidate_regime.value}), "
                         f"refreshed classification_date to {now_utc.isoformat()}"
@@ -354,6 +369,21 @@ class RegimeClassifier:
             if existing is not None:
                 existing.classification_date = now_utc
                 await db.commit()
+                try:
+                    from app.services.regime_strategy_allocator import \
+                        sync_regime_runtime_state
+
+                    await sync_regime_runtime_state(
+                        curr_regime=str(existing.regime),
+                        confidence=float(existing.confidence or 0.0),
+                        var_multiplier=_parse_var_multipliers().get(
+                            str(existing.regime), 1.0
+                        ),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        f"[RegimeClassifier] Failed to sync pending runtime regime state: {exc}"
+                    )
                 logger.info(
                     f"[RegimeClassifier] Active regime {existing.regime} classification_date "
                     f"refreshed to {now_utc.isoformat()} "

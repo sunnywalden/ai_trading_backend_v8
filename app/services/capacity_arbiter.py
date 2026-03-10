@@ -419,6 +419,7 @@ class CapacityArbiterService:
         """为每个当前持仓构建 CapacityCandidate，带评分与保护判断。"""
         from sqlalchemy import and_, desc, select
 
+        from app.models.position import Position, PositionStatus
         from app.models.position_score import PositionScore
 
         now = datetime.now(timezone.utc)
@@ -442,6 +443,45 @@ class CapacityArbiterService:
             except Exception as e:
                 logger.warning(
                     "[CapacityArbiter] Failed to load position scores: %s", e
+                )
+
+        # 批量查 lifecycle 持仓时间，避免仅用最近 PositionScore.timestamp
+        # 误判老仓位为“刚开仓”，从而把所有席位都套上 min_hold 保护。
+        lifecycle_opened_at: Dict[str, datetime] = {}
+        if symbols:
+            try:
+                pos_stmt = (
+                    select(Position)
+                    .where(
+                        Position.account_id == account_id,
+                        Position.symbol.in_(symbols),
+                        Position.status.in_(
+                            [
+                                PositionStatus.PENDING.value,
+                                PositionStatus.OPENING.value,
+                                PositionStatus.ACTIVE.value,
+                                PositionStatus.SCALING_IN.value,
+                                PositionStatus.SCALING_OUT.value,
+                                PositionStatus.CLOSING.value,
+                                PositionStatus.PARTIALLY_CLOSED.value,
+                                PositionStatus.EXCEPTION.value,
+                            ]
+                        ),
+                    )
+                    .order_by(Position.opened_at.is_(None), Position.opened_at.asc(), Position.id.asc())
+                )
+                pos_result = await db.execute(pos_stmt)
+                for row in pos_result.scalars().all():
+                    symbol = str(row.symbol or "").upper()
+                    if symbol and symbol not in lifecycle_opened_at and row.opened_at:
+                        opened_at = row.opened_at
+                        if opened_at.tzinfo is None:
+                            opened_at = opened_at.replace(tzinfo=timezone.utc)
+                        lifecycle_opened_at[symbol] = opened_at
+            except Exception as e:
+                logger.warning(
+                    "[CapacityArbiter] Failed to load lifecycle opened_at timestamps: %s",
+                    e,
                 )
 
         # 查替换冷却记录（最近被平仓的持仓，检查 cooldown）
@@ -473,6 +513,7 @@ class CapacityArbiterService:
 
         candidates: List[CapacityCandidate] = []
         for symbol, pos_data in current_positions.items():
+            symbol_upper = str(symbol or "").upper()
             pos_score_obj = score_map.get(symbol)
             overall_score = (
                 float(pos_score_obj.overall_score) if pos_score_obj else 50.0
@@ -481,14 +522,23 @@ class CapacityArbiterService:
                 str(pos_score_obj.recommendation) if pos_score_obj else "HOLD"
             )
 
-            # 持仓年龄：从 extra_metadata 或 position_score.timestamp 估算
-            hold_minutes = self._estimate_hold_minutes(pos_data, pos_score_obj, now)
+            enriched_pos_data = dict(pos_data)
+            lifecycle_open = lifecycle_opened_at.get(symbol_upper)
+            if lifecycle_open and not (
+                enriched_pos_data.get("opened_at") or enriched_pos_data.get("open_time")
+            ):
+                enriched_pos_data["opened_at"] = lifecycle_open
+
+            # 持仓年龄：优先用 lifecycle opened_at，再回退到快照/score 时间
+            hold_minutes = self._estimate_hold_minutes(
+                enriched_pos_data, pos_score_obj, now
+            )
 
             # 计算准入分（持仓扣摩擦罚分, 但 overall_score 是0~100）
             admission_score = self._position_admission_score(
                 overall_score=overall_score,
                 hold_minutes=hold_minutes,
-                unrealized_pnl_pct=pos_data.get("unrealized_pnl_pct", 0.0),
+                unrealized_pnl_pct=enriched_pos_data.get("unrealized_pnl_pct", 0.0),
             )
 
             # 保护判断

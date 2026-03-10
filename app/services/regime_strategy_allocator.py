@@ -101,6 +101,53 @@ def get_regime_strategy_weights(regime: str) -> dict[str, float]:
 _risk_gate_svc = RiskGateService()
 
 
+async def sync_regime_runtime_state(
+    curr_regime: str,
+    confidence: float = 0.0,
+    var_multiplier: float = 1.0,
+) -> None:
+    """同步当前体制到 RiskGate 与 Redis，供运行时组件统一读取。"""
+    curr_regime = str(curr_regime or "RANGE_BOUND").upper()
+
+    # 1) RiskGate 内存态
+    try:
+        _risk_gate_svc.set_regime_var_multiplier(curr_regime)
+        logger.info(
+            f"[StrategyAllocator] VaR multiplier updated: ×{var_multiplier:.2f} for {curr_regime}"
+        )
+    except Exception as exc:
+        logger.error(f"[StrategyAllocator] Failed to update VaR multiplier: {exc}")
+
+    # 2) Redis 运行态
+    try:
+        from app.models.db import redis_client  # 延迟导入避免循环
+
+        if not redis_client:
+            return
+
+        weights = get_regime_strategy_weights(curr_regime)
+
+        pipe = redis_client.pipeline()
+        pipe.set(REDIS_REGIME_WEIGHTS_KEY, json.dumps(weights), ex=86400 * 7)
+        pipe.set(
+            REDIS_REGIME_CURRENT_KEY,
+            json.dumps(
+                {
+                    "regime": curr_regime,
+                    "confidence": confidence,
+                    "var_multiplier": var_multiplier,
+                }
+            ),
+            ex=86400 * 7,
+        )
+        await pipe.execute()
+        logger.info(
+            f"[StrategyAllocator] Redis updated: weights={weights}, regime={curr_regime}"
+        )
+    except Exception as exc:
+        logger.error(f"[StrategyAllocator] Failed to write to Redis: {exc}", exc_info=True)
+
+
 async def on_regime_changed(payload: dict[str, Any]) -> None:
     """
     处理 REGIME_CHANGED 事件：
@@ -117,33 +164,11 @@ async def on_regime_changed(payload: dict[str, Any]) -> None:
         f"[StrategyAllocator] Handling REGIME_CHANGED: {prev_regime} → {curr_regime} "
         f"(confidence={confidence:.2%}, var_multiplier={var_multiplier:.2f})"
     )
-
-    # ── 1. 更新 RiskGate VaR 倍数 ──────────────────────────────────────────
-    try:
-        _risk_gate_svc.set_regime_var_multiplier(curr_regime)
-        logger.info(f"[StrategyAllocator] VaR multiplier updated: ×{var_multiplier:.2f} for {curr_regime}")
-    except Exception as exc:
-        logger.error(f"[StrategyAllocator] Failed to update VaR multiplier: {exc}")
-
-    # ── 2. 写入 Redis ───────────────────────────────────────────────────────
-    try:
-        from app.models.db import redis_client  # 延迟导入避免循环
-
-        weights = get_regime_strategy_weights(curr_regime)
-
-        pipe = redis_client.pipeline()
-        # 权重矩阵
-        pipe.set(REDIS_REGIME_WEIGHTS_KEY, json.dumps(weights), ex=86400 * 7)  # 7天TTL
-        # 当前体制状态
-        pipe.set(
-            REDIS_REGIME_CURRENT_KEY,
-            json.dumps({"regime": curr_regime, "confidence": confidence, "va_multiplier": var_multiplier}),
-            ex=86400 * 7,
-        )
-        await pipe.execute()
-        logger.info(f"[StrategyAllocator] Redis updated: weights={weights}, regime={curr_regime}")
-    except Exception as exc:
-        logger.error(f"[StrategyAllocator] Failed to write to Redis: {exc}", exc_info=True)
+    await sync_regime_runtime_state(
+        curr_regime=curr_regime,
+        confidence=confidence,
+        var_multiplier=var_multiplier,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

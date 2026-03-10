@@ -462,6 +462,38 @@ class AutonomousEngine:
         except Exception as _re:
             logger.debug(f"[AutonomousEngine] Could not fetch regime info: {_re}")
 
+        if regime_at_decision is None:
+            try:
+                from sqlalchemy import desc, select
+
+                from app.models.market_regime import MarketRegime
+                from app.services.regime_strategy_allocator import \
+                    sync_regime_runtime_state
+
+                latest_regime = (
+                    await db.execute(
+                        select(MarketRegime)
+                        .order_by(desc(MarketRegime.classification_date))
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if latest_regime is not None:
+                    regime_at_decision = str(latest_regime.regime)
+                    regime_confidence = float(latest_regime.confidence or 0.0)
+                    await sync_regime_runtime_state(
+                        curr_regime=regime_at_decision,
+                        confidence=regime_confidence,
+                        var_multiplier=1.0,
+                    )
+                    logger.info(
+                        f"[AutonomousEngine] Regime context recovered from DB: {regime_at_decision} "
+                        f"(confidence={regime_confidence:.2%})"
+                    )
+            except Exception as _db_re:
+                logger.debug(
+                    f"[AutonomousEngine] Could not recover regime info from DB: {_db_re}"
+                )
+
         """
         1. 拉取待处理信号
         2. AI 推理决策
@@ -665,9 +697,91 @@ class AutonomousEngine:
                             f"quality-funnel(L{_funnel_decision.rejected_at_layer},"
                             f"{_funnel_decision.rejection_reason})"
                         )
+
+                        # ── V10.5: 容量置换 — Layer 2 MAX_POSITIONS_REACHED 时
+                        #    尝试对比新信号质量与最弱持仓，若新信号更优则自动换仓 ──
+                        _displacement_result = None
+                        if (
+                            _funnel_decision.rejected_at_layer == 2
+                            and _funnel_decision.rejection_reason == "MAX_POSITIONS_REACHED"
+                        ):
+                            try:
+                                from app.services.capacity_displacement_service import (
+                                    CapacityDisplacementService,
+                                )
+                                _disp_svc = CapacityDisplacementService(db)
+                                _displacement_result = await _disp_svc.evaluate_and_displace(
+                                    account_id           = account_id,
+                                    signal_id            = signal["id"],
+                                    signal_symbol        = str(signal.get("symbol") or ""),
+                                    signal_quality_score = float(_funnel_decision.signal_quality_score or 0.0),
+                                    current_positions    = current_positions,
+                                )
+                                if _displacement_result.displaced:
+                                    # EXIT 信号已 flush → commit 写库
+                                    await db.commit()
+                                    # 入场信号置回 VALIDATED，等待 EXIT 执行后下轮重拾
+                                    await self._update_signal_status(db, signal["id"], _SS.VALIDATED)
+                                    _reject_reason = (
+                                        f"capacity-displacement("
+                                        f"waiting-for-exit-{_displacement_result.target_symbol})"
+                                    )
+                                    logger.info(
+                                        "[AutonomousEngine] 容量置换触发: EXIT %s(score=%s) "
+                                        "→ 为 %s(quality=%.1f) 腾仓，信号 %s 置回 VALIDATED",
+                                        _displacement_result.target_symbol,
+                                        _displacement_result.target_score,
+                                        _displacement_result.incoming_symbol,
+                                        _displacement_result.incoming_quality,
+                                        signal["id"],
+                                    )
+                                    await self._update_signal_watchtower_metadata(
+                                        db,
+                                        signal["id"],
+                                        stage="QUALITY_FUNNEL",
+                                        result="CAPACITY_DISPLACEMENT_PENDING",
+                                        reason_code="MAX_POSITIONS_REACHED",
+                                        reason_detail=_funnel_decision.rejection_detail,
+                                        rejected_at_layer=_funnel_decision.rejected_at_layer,
+                                        reason_category="CAPACITY_DISPLACEMENT",
+                                        regime=regime_at_decision,
+                                        signal_quality_tier=_funnel_decision.signal_quality_tier,
+                                        signal_quality_score=_funnel_decision.signal_quality_score,
+                                        signal_quality_quota_exempt=_funnel_decision.quota_exempt,
+                                    )
+                                    results.append(
+                                        {
+                                            "signal_id":                   signal["id"],
+                                            "decision":                    decision,
+                                            "gate_passed":                 False,
+                                            "order_id":                    None,
+                                            "execution_intent_id":         None,
+                                            "execution_path":              execution_path,
+                                            "signal_quality_tier":         _funnel_decision.signal_quality_tier,
+                                            "signal_quality_score":        _funnel_decision.signal_quality_score,
+                                            "signal_quality_quota_exempt": _funnel_decision.quota_exempt,
+                                            "reason":                      _reject_reason,
+                                            "capacity_displacement":       True,
+                                            "displacement_target":         _displacement_result.target_symbol,
+                                            "displacement_exit_signal_id": _displacement_result.exit_signal_db_id,
+                                        }
+                                    )
+                                    continue  # 跳过下方的 REJECTED 流程
+                                else:
+                                    logger.info(
+                                        "[AutonomousEngine] 容量置换评估：%s",
+                                        _displacement_result.reason,
+                                    )
+                            except Exception as _disp_err:
+                                logger.warning(
+                                    "[AutonomousEngine] 容量置换评估失败（不影响主流程）: %s",
+                                    _disp_err,
+                                )
+                        # ─────────────────────────────────────────────────────
+
                         logger.info(
-                            f"[AutonomousEngine] Signal {signal['id']} blocked by quality funnel: "
-                            f"{_reject_reason}"
+                            "[AutonomousEngine] Signal %s blocked by quality funnel: %s",
+                            signal["id"], _reject_reason,
                         )
                         await self._update_signal_status(db, signal["id"], _SS.REJECTED)
                         await self._update_signal_watchtower_metadata(
@@ -696,6 +810,8 @@ class AutonomousEngine:
                                 "signal_quality_score": _funnel_decision.signal_quality_score,
                                 "signal_quality_quota_exempt": _funnel_decision.quota_exempt,
                                 "reason": _reject_reason,
+                                "capacity_displacement": False,
+                                "displacement_target": None,
                             }
                         )
             except Exception as _sq_err:

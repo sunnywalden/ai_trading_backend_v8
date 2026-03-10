@@ -27,6 +27,23 @@ logger = logging.getLogger(__name__)
 class DataHub:
     """统一数据访问接口，屏蔽底层数据源差异"""
 
+    def __init__(self) -> None:
+        # Tiger 账户若未开通港股行情权限，港股请求会稳定返回 permission denied。
+        # 记录该状态后，后续港股请求直接走 yfinance，避免重复错误日志和无意义重试。
+        self._hk_tiger_permission_denied = False
+
+    @staticmethod
+    def _is_tiger_hk_permission_error(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return "permission denied" in msg and "hk market" in msg
+
+    @staticmethod
+    def _normalize_hk_symbols(symbol: str) -> tuple[str, str]:
+        normalized_tiger = normalize_hk_symbol(symbol)
+        core = normalized_tiger.lstrip('0') or '0'
+        normalized_yf = f"{core.zfill(4)}.HK"
+        return normalized_tiger, normalized_yf
+
     async def get_ohlcv(
         self,
         symbol: str,
@@ -44,18 +61,28 @@ class DataHub:
 
         # 港股处理逻辑
         if is_hk_stock(symbol):
-            normalized_tiger = normalize_hk_symbol(symbol)  # 如 00700
-            # yfinance 港股通常使用 XXXX.HK 格式
-            core = normalized_tiger.lstrip('0')
-            normalized_yf = f"{core.zfill(4)}.HK"
+            normalized_tiger, normalized_yf = self._normalize_hk_symbols(symbol)
             
             logger.debug(f"DataHub: HK symbol detected ({symbol}), Tiger: {normalized_tiger}, YF: {normalized_yf}")
+
+            if self._hk_tiger_permission_denied:
+                logger.info(
+                    f"DataHub: Tiger HK permission unavailable, skip Tiger OHLCV for {normalized_tiger}"
+                )
+                return await self._fetch_ohlcv("yfinance", normalized_yf, start, end, interval)
             
             # 优先尝试 Tiger API
             try:
                 return await self._tiger_ohlcv(normalized_tiger, start, end, interval)
             except Exception as e:
-                logger.warning(f"DataHub: Tiger fail for {normalized_tiger}: {e}, trying yfinance as fallback")
+                if self._is_tiger_hk_permission_error(e):
+                    self._hk_tiger_permission_denied = True
+                    logger.warning(
+                        f"DataHub: Tiger HK permission unavailable for {normalized_tiger}, "
+                        "switching to yfinance for subsequent HK OHLCV requests"
+                    )
+                else:
+                    logger.warning(f"DataHub: Tiger fail for {normalized_tiger}: {e}, trying yfinance as fallback")
                 return await self._fetch_ohlcv("yfinance", normalized_yf, start, end, interval)
 
         try:
@@ -75,14 +102,25 @@ class DataHub:
 
         # 港股处理
         if is_hk_stock(symbol):
-            normalized_tiger = normalize_hk_symbol(symbol)
-            core = normalized_tiger.lstrip('0')
-            normalized_yf = f"{core.zfill(4)}.HK"
+            normalized_tiger, normalized_yf = self._normalize_hk_symbols(symbol)
+
+            if self._hk_tiger_permission_denied:
+                logger.info(
+                    f"DataHub: Tiger HK permission unavailable, skip Tiger quote for {normalized_tiger}"
+                )
+                return await self._fetch_quote("yfinance", normalized_yf)
             
             try:
                 return await self._tiger_quote(normalized_tiger)
             except Exception as e:
-                logger.warning(f"DataHub: Tiger quote fail for {normalized_tiger}: {e}, trying yfinance")
+                if self._is_tiger_hk_permission_error(e):
+                    self._hk_tiger_permission_denied = True
+                    logger.warning(
+                        f"DataHub: Tiger HK permission unavailable for {normalized_tiger}, "
+                        "switching to yfinance for subsequent HK quote requests"
+                    )
+                else:
+                    logger.warning(f"DataHub: Tiger quote fail for {normalized_tiger}: {e}, trying yfinance")
                 return await self._fetch_quote("yfinance", normalized_yf)
 
         try:
@@ -213,7 +251,10 @@ class DataHub:
             df.sort_index(inplace=True)
             return df
         except Exception as e:
-            logger.error(f"Tiger _tiger_ohlcv error for {symbol}: {e}")
+            if self._is_tiger_hk_permission_error(e):
+                logger.warning(f"Tiger _tiger_ohlcv permission denied for {symbol}: {e}")
+            else:
+                logger.error(f"Tiger _tiger_ohlcv error for {symbol}: {e}")
             raise
 
     async def _tiger_quote(self, symbol: str) -> dict:
@@ -243,7 +284,10 @@ class DataHub:
                 "source": "tiger",
             }
         except Exception as e:
-            logger.error(f"Tiger _tiger_quote error for {symbol}: {e}")
+            if self._is_tiger_hk_permission_error(e):
+                logger.warning(f"Tiger _tiger_quote permission denied for {symbol}: {e}")
+            else:
+                logger.error(f"Tiger _tiger_quote error for {symbol}: {e}")
             raise
 
 
