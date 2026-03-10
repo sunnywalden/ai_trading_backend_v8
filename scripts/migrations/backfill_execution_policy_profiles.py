@@ -9,7 +9,8 @@
 示例：
   python scripts/migrations/backfill_execution_policy_profiles.py
   python scripts/migrations/backfill_execution_policy_profiles.py --execute
-  python scripts/migrations/backfill_execution_policy_profiles.py --execute --account-id 2127xxxx
+    python scripts/migrations/backfill_execution_policy_profiles.py \
+            --execute --account-id 2127xxxx
 """
 from __future__ import annotations
 
@@ -18,16 +19,14 @@ import asyncio
 import os
 import sys
 
+from sqlalchemy.ext.asyncio import (AsyncSession, async_sessionmaker,
+                                    create_async_engine)
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-
-from app.core.config import settings
-from scripts.maintenance.execution_policy_profile_common import (
-    aggregate_profiles,
-    load_source_rows,
-    replace_profiles,
-)
+from app.core.config import settings  # noqa: E402
+from scripts.maintenance.execution_policy_profile_common import (  # noqa: E402
+    aggregate_profiles, load_source_rows, replace_profiles)
 
 
 async def run_backfill(
@@ -46,7 +45,8 @@ async def run_backfill(
             rows = await load_source_rows(db, account_id=account_id)
             expected = aggregate_profiles(rows)
             print(
-                f"[backfill] source_rows={len(rows)} expected_profiles={len(expected)} "
+                f"[backfill] source_rows={len(rows)} "
+                f"expected_profiles={len(expected)} "
                 f"account_id={account_id!r} execute={execute}"
             )
 
@@ -72,19 +72,27 @@ async def run_backfill(
                 account_id=account_id,
             )
             print(
-                f"[backfill] ✓ deleted_existing={deleted} inserted_profiles={inserted}"
+                f"[backfill] ✓ deleted_existing={deleted} "
+                f"inserted_profiles={inserted}"
             )
     finally:
         await engine.dispose()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Backfill execution policy profiles")
+    parser = argparse.ArgumentParser(
+        description="Backfill execution policy profiles"
+    )
     parser.add_argument("--execute", action="store_true", help="Write changes")
-    parser.add_argument("--account-id", default=None, help="Only rebuild one account")
+    parser.add_argument(
+        "--account-id",
+        default=None,
+        help="Only rebuild one account",
+    )
     args = parser.parse_args()
     asyncio.run(run_backfill(execute=args.execute, account_id=args.account_id))
 
 
 if __name__ == "__main__":
     main()
+

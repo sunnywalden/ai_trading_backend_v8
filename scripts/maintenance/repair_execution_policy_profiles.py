@@ -16,18 +16,15 @@ import asyncio
 import os
 import sys
 
+from sqlalchemy.ext.asyncio import (AsyncSession, async_sessionmaker,
+                                    create_async_engine)
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-
-from app.core.config import settings
-from scripts.maintenance.execution_policy_profile_common import (
-    aggregate_profiles,
-    compare_profile_payload,
-    load_existing_profiles,
-    load_source_rows,
-    replace_profile_keys,
-)
+from app.core.config import settings  # noqa: E402
+from scripts.maintenance.execution_policy_profile_common import (  # noqa: E402
+    aggregate_profiles, compare_profile_payload, load_existing_profiles,
+    load_source_rows, replace_profile_keys)
 
 
 async def run_repair(
@@ -54,16 +51,23 @@ async def run_repair(
             stale = sorted(
                 key
                 for key in set(existing).intersection(expected)
-                if not compare_profile_payload(existing[key], expected[key].payload)
+                if not compare_profile_payload(
+                    existing[key],
+                    expected[key].payload,
+                )
             )
             duplicate_keys = sorted(duplicates)
-            repair_keys = sorted(set(missing + orphan + stale + duplicate_keys))
+            repair_keys = sorted(
+                set(missing + orphan + stale + duplicate_keys)
+            )
 
             print(
-                f"[repair] account_id={account_id!r} existing={len(existing)} expected={len(expected)}"
+                f"[repair] account_id={account_id!r} "
+                f"existing={len(existing)} expected={len(expected)}"
             )
             print(
-                f"[repair] missing={len(missing)} orphan={len(orphan)} stale={len(stale)} duplicates={len(duplicate_keys)}"
+                f"[repair] missing={len(missing)} orphan={len(orphan)} "
+                f"stale={len(stale)} duplicates={len(duplicate_keys)}"
             )
 
             if not execute:
@@ -83,19 +87,27 @@ async def run_repair(
                 expected=expected,
             )
             print(
-                f"[repair] ✓ repaired_keys={len(repair_keys)} deleted_rows={deleted} inserted_rows={inserted}"
+                f"[repair] ✓ repaired_keys={len(repair_keys)} "
+                f"deleted_rows={deleted} inserted_rows={inserted}"
             )
     finally:
         await engine.dispose()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Repair execution policy profiles")
+    parser = argparse.ArgumentParser(
+        description="Repair execution policy profiles"
+    )
     parser.add_argument("--execute", action="store_true", help="Apply repair")
-    parser.add_argument("--account-id", default=None, help="Only repair one account")
+    parser.add_argument(
+        "--account-id",
+        default=None,
+        help="Only repair one account",
+    )
     args = parser.parse_args()
     asyncio.run(run_repair(execute=args.execute, account_id=args.account_id))
 
 
 if __name__ == "__main__":
     main()
+
