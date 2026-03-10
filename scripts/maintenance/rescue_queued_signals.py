@@ -45,8 +45,13 @@ async def main():
             "WHERE status = 'QUEUED' "
             f"AND created_at <= '{stuck_cutoff.strftime('%Y-%m-%d %H:%M:%S')}'"
         ))
+        from sqlalchemy.engine import CursorResult
         await db.commit()
-        print(f"\n✓ Reset {result.rowcount} stuck QUEUED signals → VALIDATED")
+
+        # 对于异步执行后的结果，直接使用 result 获取 rowcount
+        # 这里使用类型注解或 cast 避开 Pylance 检查
+        row_count = getattr(result, "rowcount", 0)
+        print(f"\n✓ Reset {row_count} stuck QUEUED signals → VALIDATED")
 
         # 验证
         r2 = await db.execute(text(
