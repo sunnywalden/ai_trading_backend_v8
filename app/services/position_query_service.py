@@ -21,16 +21,23 @@ from app.models.position_lifecycle_event import PositionLifecycleEvent
 # ---------------------------------------------------------------------------
 # Statuses considered "active" (position is not yet fully settled)
 # ---------------------------------------------------------------------------
-_ACTIVE_STATUSES = {
-    PositionStatus.PENDING.value,
-    PositionStatus.OPENING.value,
-    PositionStatus.ACTIVE.value,
-    PositionStatus.SCALING_IN.value,
-    PositionStatus.SCALING_OUT.value,
-    PositionStatus.CLOSING.value,
-    PositionStatus.PARTIALLY_CLOSED.value,
-    PositionStatus.EXCEPTION.value,
-}
+ACTIVE_POSITION_STATUSES = frozenset(
+    {
+        PositionStatus.PENDING.value,
+        PositionStatus.OPENING.value,
+        PositionStatus.ACTIVE.value,
+        PositionStatus.SCALING_IN.value,
+        PositionStatus.SCALING_OUT.value,
+        PositionStatus.CLOSING.value,
+        PositionStatus.PARTIALLY_CLOSED.value,
+        PositionStatus.EXCEPTION.value,
+    }
+)
+
+
+def is_active_position_status(status: str | None) -> bool:
+    """Return whether a Position.status should be treated as active everywhere."""
+    return bool(status and status in ACTIVE_POSITION_STATUSES)
 
 
 class PositionQueryService:
@@ -49,7 +56,7 @@ class PositionQueryService:
             select(Position)
             .where(
                 Position.account_id == account_id,
-                Position.status.in_(list(_ACTIVE_STATUSES)),
+                Position.status.in_(tuple(ACTIVE_POSITION_STATUSES)),
             )
             .order_by(Position.opened_at.desc())
         )
@@ -168,7 +175,7 @@ class PositionQueryService:
         """High-level counts for dashboard widgets."""
         active_stmt = select(func.count(Position.id)).where(
             Position.account_id == account_id,
-            Position.status.in_(list(_ACTIVE_STATUSES)),
+            Position.status.in_(tuple(ACTIVE_POSITION_STATUSES)),
         )
         exception_stmt = select(func.count(Position.id)).where(
             Position.account_id == account_id,

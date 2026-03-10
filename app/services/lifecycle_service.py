@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.fsm_transition_log import FsmTransitionLog
 from app.models.trading_plan import TradingPlan
+from app.services.position_query_service import is_active_position_status
 from app.schemas.lifecycle import (
     PIPELINE_P50_BENCHMARKS,
     PIPELINE_STAGE_NAMES,
@@ -274,7 +275,7 @@ class LifecycleService:
     async def get_position_board(self, db: AsyncSession) -> PositionBoard:
         """Return position-lifecycle kanban grouped by position status.
 
-        Active states (PENDING … EXCEPTION) show all records.
+        Active states are aligned with PositionQueryService active-status logic.
         CLOSED / LIQUIDATED show only records closed in the past 90 days so
         recently-closed positions (e.g. capacity-guard exits) remain visible
         without polluting the board with ancient history.
@@ -346,7 +347,7 @@ class LifecycleService:
             meta = POSITION_FSM_META.get(state, {"label": state, "color": "#9ca3af"})
             cards = state_map.get(state, [])
             is_terminal = state in ("CLOSED", "LIQUIDATED")
-            if not is_terminal:
+            if is_active_position_status(state):
                 total_active += len(cards)
             # Skip empty terminal columns to avoid clutter when there's no history
             if is_terminal and not cards:

@@ -63,6 +63,44 @@ def apply_calibration(confidence: float, adjustment_factor: float) -> float:
     return confidence + adjustment_factor * (0.5 - confidence)
 
 
+def _parse_bucket_range(bucket: Any) -> tuple[float | None, float | None]:
+    """从 bucket 字符串（如 0.0-0.1）解析数值边界。"""
+    if not isinstance(bucket, str) or "-" not in bucket:
+        return None, None
+    left, right = bucket.split("-", 1)
+    try:
+        return float(left), float(right)
+    except (TypeError, ValueError):
+        return None, None
+
+
+def _normalize_calibration_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
+    """补齐 bucket_start / bucket_end，兼容历史 JSON 快照。"""
+    normalized = dict(bucket)
+    bucket_start = normalized.get("bucket_start")
+    bucket_end = normalized.get("bucket_end")
+    if isinstance(bucket_start, (int, float)) and isinstance(bucket_end, (int, float)):
+        normalized["bucket_start"] = float(bucket_start)
+        normalized["bucket_end"] = float(bucket_end)
+        return normalized
+
+    parsed_start, parsed_end = _parse_bucket_range(normalized.get("bucket"))
+    normalized["bucket_start"] = parsed_start
+    normalized["bucket_end"] = parsed_end
+    return normalized
+
+
+def _normalize_calibration_buckets(buckets: Any) -> list[dict[str, Any]] | None:
+    """统一 bucket 结构，确保接口对新旧快照都返回完整边界字段。"""
+    if not isinstance(buckets, list):
+        return None
+    return [
+        _normalize_calibration_bucket(bucket)
+        for bucket in buckets
+        if isinstance(bucket, dict)
+    ]
+
+
 class ConfidenceCalibrationService:
     """置信度校准系统。"""
 
@@ -379,6 +417,8 @@ def _build_calibration_buckets(
         actual_rate = float(np.mean([o for _, o in pairs])) if pairs else 0.0
         result.append({
             "bucket": key,
+            "bucket_start": round(b_lo_f, 4),
+            "bucket_end": round(b_hi_f, 4),
             "count": count,
             "predicted_rate": round(pred_rate, 4),
             "actual_rate": round(actual_rate, 4),
@@ -394,7 +434,7 @@ def _snap_to_dict(snap: ConfidenceCalibrationSnapshot) -> dict[str, Any]:
         "brier_score": snap.brier_score,
         "ece": snap.ece,
         "overconfidence_bias": snap.overconfidence_bias,
-        "calibration_buckets": snap.calibration_buckets,
+        "calibration_buckets": _normalize_calibration_buckets(snap.calibration_buckets),
         "total_samples": snap.total_samples,
         "valid_bucket_count": snap.valid_bucket_count,
         "needs_adjustment": snap.needs_adjustment,
