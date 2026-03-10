@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""从历史 execution_quality_log 回填 V10.5.3 execution_policy_profiles。
+
+说明：
+1. 以 AutonomousExecutionIntent + ExecutionQualityLog 为唯一真相源。
+2. 默认 dry-run，只打印统计。
+3. --execute 会先删除目标范围内既有画像，再按历史日志完整重建，确保幂等。
+
+示例：
+  python scripts/migrations/backfill_execution_policy_profiles.py
+  python scripts/migrations/backfill_execution_policy_profiles.py --execute
+  python scripts/migrations/backfill_execution_policy_profiles.py --execute --account-id 2127xxxx
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from app.core.config import settings
+from scripts.maintenance.execution_policy_profile_common import (
+    aggregate_profiles,
+    load_source_rows,
+    replace_profiles,
+)
+
+
+async def run_backfill(
+    *,
+    execute: bool,
+    account_id: str | None,
+) -> None:
+    engine = create_async_engine(settings.DATABASE_URL, echo=False)
+    session_factory = async_sessionmaker(
+        engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+    try:
+        async with session_factory() as db:
+            rows = await load_source_rows(db, account_id=account_id)
+            expected = aggregate_profiles(rows)
+            print(
+                f"[backfill] source_rows={len(rows)} expected_profiles={len(expected)} "
+                f"account_id={account_id!r} execute={execute}"
+            )
+
+            if not execute:
+                sample = list(expected.values())[:5]
+                for item in sample:
+                    payload = item.payload
+                    print(
+                        "[dry-run] %s/%s/%s/%s/%s sample_size=%s bias=%s",
+                        payload["account_id"],
+                        payload["symbol"],
+                        payload["side"],
+                        payload["urgency_bucket"],
+                        payload["algo_type"],
+                        payload["sample_size"],
+                        payload["feedback_bias"],
+                    )
+                return
+
+            deleted, inserted = await replace_profiles(
+                db,
+                expected=expected,
+                account_id=account_id,
+            )
+            print(
+                f"[backfill] ✓ deleted_existing={deleted} inserted_profiles={inserted}"
+            )
+    finally:
+        await engine.dispose()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Backfill execution policy profiles")
+    parser.add_argument("--execute", action="store_true", help="Write changes")
+    parser.add_argument("--account-id", default=None, help="Only rebuild one account")
+    args = parser.parse_args()
+    asyncio.run(run_backfill(execute=args.execute, account_id=args.account_id))
+
+
+if __name__ == "__main__":
+    main()
