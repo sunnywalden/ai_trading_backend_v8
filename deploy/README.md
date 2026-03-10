@@ -141,6 +141,255 @@ docker compose up -d
 
 在容器中执行这些脚本时请确保 `DATABASE_URL` 环境变量已正确注入（或在 Kubernetes 使用 Job 运行初始化）。
 
+### V10.5.3 上线 SOP（迁移 → 回填 → 灰度开关 → 验收）
+
+V10.5.3 引入了 `execution_policy_profiles`（执行策略长期反馈画像），并新增四个收益质量升级开关：
+
+- `ALPHA_TRUTH_V2_ENABLED`
+- `SEAT_VALUE_ARBITER_ENABLED`
+- `EXECUTION_POLICY_HARD_CONTROL_ENABLED`
+- `GOVERNANCE_HARD_GATE_ENABLED`
+
+> 建议：**不要第一次发布就四个一起全开**。推荐先完成迁移和回填，再按 Observe → Seat Value → Execution Hard Control → Governance Hard Gate 的顺序逐步开启。
+
+#### 0) 发布前准备
+
+1. 备份 MySQL（至少备份 `execution_quality_log`、`autonomous_execution_intent`、`execution_policy_profiles`）。
+2. 确认镜像版本已推送，例如：`sunnywalden/ai-trading-backend:v10.5.3`。
+3. 确认目标环境的 `.env` / ConfigMap / Secret 已包含 V10.5.3 所需开关。
+4. 建议第一次上线先保持：
+
+```dotenv
+ALPHA_TRUTH_V2_ENABLED=true
+SEAT_VALUE_ARBITER_ENABLED=false
+EXECUTION_POLICY_HARD_CONTROL_ENABLED=false
+GOVERNANCE_HARD_GATE_ENABLED=false
+```
+
+#### 1) 执行数据库迁移
+
+先检查：
+
+```bash
+python scripts/migrations/upgrade_to_v10_5_3.py --check
+```
+
+若目标表不存在，再执行：
+
+```bash
+python scripts/migrations/upgrade_to_v10_5_3.py
+```
+
+迁移内容：
+
+- 新建 `execution_policy_profiles`
+- 为 Execution Closed Loop 提供长期反馈画像存储
+
+#### 2) 执行历史回填（默认 dry-run）
+
+先 dry-run 观察历史数据规模：
+
+```bash
+python scripts/migrations/backfill_execution_policy_profiles.py
+```
+
+如果结果符合预期，再真正写入：
+
+```bash
+python scripts/migrations/backfill_execution_policy_profiles.py --execute
+```
+
+如果希望先对单账户灰度：
+
+```bash
+python scripts/migrations/backfill_execution_policy_profiles.py --execute --account-id 2127xxxx
+```
+
+#### 3) 执行一致性修复 / 校验（默认 dry-run）
+
+先检查是否存在以下异常：
+
+- missing profiles
+- orphan profiles
+- stale profiles
+- duplicate keys
+
+```bash
+python scripts/maintenance/repair_execution_policy_profiles.py
+```
+
+若检查结果非空，再执行修复：
+
+```bash
+python scripts/maintenance/repair_execution_policy_profiles.py --execute
+```
+
+单账户灰度：
+
+```bash
+python scripts/maintenance/repair_execution_policy_profiles.py --execute --account-id 2127xxxx
+```
+
+#### 4) 发布后第一阶段：Observe 模式
+
+建议先只开启：
+
+```dotenv
+ALPHA_TRUTH_V2_ENABLED=true
+SEAT_VALUE_ARBITER_ENABLED=false
+EXECUTION_POLICY_HARD_CONTROL_ENABLED=false
+GOVERNANCE_HARD_GATE_ENABLED=false
+```
+
+目标：
+
+- 让 `/api/v1/alpha-lab/snapshot` 输出真相四层收益口径
+- 不改变席位竞争排序、不改变真实执行算法、不收紧毕业门槛
+
+重点观察：
+
+- `/api/v1/alpha-lab/snapshot?lookback_days=30`
+- `summary.gross_return / net_return / after_cost_return / after_turnover_return`
+- `shadow_book`
+
+#### 5) 第二阶段：启用 Seat Value 排序
+
+当 Alpha Truth 观察稳定后，可开启：
+
+```dotenv
+SEAT_VALUE_ARBITER_ENABLED=true
+```
+
+目标：
+
+- 让席位竞争从 `admission_score` 排序升级为 `seat_value` 排序
+- 在 `/api/v1/capacity/preview` 中观察 explainability 字段
+
+重点观察：
+
+- `/api/v1/capacity/config`
+- `/api/v1/capacity/preview`
+- `/api/v1/capacity/stats`
+
+关键字段：
+
+- `seat_value`
+- `marginal_alpha`
+- `marginal_risk`
+- `marginal_turnover`
+- `replace_or_hold_reason`
+
+#### 6) 第三阶段：启用 Execution Hard Control
+
+当持仓替换逻辑稳定后，再开启：
+
+```dotenv
+EXECUTION_POLICY_HARD_CONTROL_ENABLED=true
+```
+
+目标：
+
+- 从 Observe Only 升级为 Hard Control
+- 执行层开始真正使用策略画像反馈调整算法与参与率
+
+重点观察：
+
+- `/api/v1/execution-policy/overview`
+- `/api/v1/execution-policy/intents/{intent_id}`
+
+关键字段：
+
+- `control_state.mode`
+- `persistent_profile`
+- `feedback_profile`
+- `policy.slippage_budget_bps`
+
+#### 7) 第四阶段：启用 Governance Hard Gate
+
+最后再开启：
+
+```dotenv
+GOVERNANCE_HARD_GATE_ENABLED=true
+```
+
+目标：
+
+- 将 Governance Pipeline 从展示/观察升级为真正 Promotion Gate
+- 无完整 evidence chain 的策略不能进入更高阶段
+
+重点观察：
+
+- `/api/v1/governance/pipeline?limit=10`
+- Paper 毕业检查结果中的 `governance_gate`
+
+关键字段：
+
+- `evidence_chain`
+- `promotion_blockers`
+- `stage`
+- `rollback_suggestion`
+
+#### 8) 发布后 Smoke Check
+
+建议至少校验以下接口：
+
+```bash
+curl http://127.0.0.1:8088/health
+curl http://127.0.0.1:8088/api/v1/alpha-lab/snapshot?lookback_days=30
+curl http://127.0.0.1:8088/api/v1/capacity/config
+curl http://127.0.0.1:8088/api/v1/capacity/preview
+curl http://127.0.0.1:8088/api/v1/execution-policy/overview?limit=5
+curl http://127.0.0.1:8088/api/v1/governance/pipeline?limit=10
+```
+
+若前后端一并发布，再补：
+
+- `/alpha-lab`
+- `/portfolio`
+- `/execution-policy`
+- `/governance/pipeline`
+
+#### 9) 回滚策略
+
+若上线后发现问题，建议按下面顺序回退：
+
+1. **先关开关**（最快、最安全）
+
+```dotenv
+SEAT_VALUE_ARBITER_ENABLED=false
+EXECUTION_POLICY_HARD_CONTROL_ENABLED=false
+GOVERNANCE_HARD_GATE_ENABLED=false
+```
+
+必要时只保留：
+
+```dotenv
+ALPHA_TRUTH_V2_ENABLED=true
+```
+
+2. 若仅画像数据异常：
+
+- 重新执行 `backfill_execution_policy_profiles.py --execute`
+- 再执行 `repair_execution_policy_profiles.py --execute`
+
+3. 若必须回滚 schema：
+
+```bash
+python scripts/migrations/upgrade_to_v10_5_3.py --rollback
+```
+
+> 注意：schema rollback 会删除 `execution_policy_profiles`，请先确认数据已备份。
+
+#### 10) 推荐上线节奏
+
+- **T0**：迁移 + 回填 + repair dry-run/execute
+- **T0 ~ T+1d**：仅开 `ALPHA_TRUTH_V2_ENABLED`
+- **T+1d ~ T+3d**：开启 `SEAT_VALUE_ARBITER_ENABLED`
+- **T+3d ~ T+5d**：开启 `EXECUTION_POLICY_HARD_CONTROL_ENABLED`
+- **T+5d 以后**：开启 `GOVERNANCE_HARD_GATE_ENABLED`
+
+如果是测试/灰度环境，且你已经完成专项回归与联调，也可以直接四个全开；但生产环境仍建议按阶段推进，别让四个新齿轮第一次见面就一起高速运转。
+
 ---
 
 ### API 监控（Monitoring）与健康检查
