@@ -78,6 +78,7 @@ async def _reconcile(
     dry_run: bool,
     account_id_filter: str | None,
     fallback_account_id: str | None,
+    sync_quantities: bool,
 ) -> None:
     now = datetime.now(timezone.utc)
     print(
@@ -265,10 +266,23 @@ async def _reconcile(
         delta = abs(float(pos.open_qty or 0) - broker_qty)
         if delta > 0.5:
             print(
-                f"  [QTY-MISMATCH] {sym}  lifecycle.open_qty={pos.open_qty:.4f}  "
-                f"broker_qty={broker_qty:.4f}  delta={delta:.4f}  "
-                f"(manual review recommended)"
+                f"  {'[DRY-QTY]' if dry_run else '[SYNC-QTY]' if sync_quantities else '[QTY-MISMATCH]'} {sym}  "
+                f"lifecycle.open_qty={pos.open_qty:.4f}  broker_qty={broker_qty:.4f}  delta={delta:.4f}"
             )
+            if not dry_run and sync_quantities:
+                new_total_qty = max(float(pos.total_qty or 0.0), broker_qty)
+                new_filled_qty = max(float(pos.filled_qty or 0.0), broker_qty)
+                await db.execute(
+                    update(Position)
+                    .where(Position.id == pos.id)
+                    .values(
+                        status=PositionStatus.ACTIVE.value,
+                        open_qty=broker_qty,
+                        total_qty=new_total_qty,
+                        filled_qty=new_filled_qty,
+                        updated_at=now,
+                    )
+                )
         else:
             print(
                 f"  [QTY-OK] {sym}  lifecycle={pos.open_qty:.4f}  "
@@ -321,6 +335,15 @@ async def main() -> None:
             "Use when broker holds a position that was opened outside all tracked paths."
         ),
     )
+    parser.add_argument(
+        "--sync-quantities",
+        action="store_true",
+        default=False,
+        help=(
+            "When applying changes, also update lifecycle open_qty/total_qty/filled_qty "
+            "to match current broker holdings for existing active positions."
+        ),
+    )
     args = parser.parse_args()
 
     broker_pos = _parse_broker_positions(args.broker_positions)
@@ -335,6 +358,7 @@ async def main() -> None:
             dry_run=not args.execute,
             account_id_filter=args.account_id,
             fallback_account_id=args.fallback_account_id,
+            sync_quantities=args.sync_quantities,
         )
 
     await engine.dispose()
