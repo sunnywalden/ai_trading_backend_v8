@@ -23,9 +23,9 @@ async def _resolve_broker_account_id(current_user: str) -> str:
 
 @router.get("/snapshot")
 async def get_alpha_lab_snapshot(
-    lookback_days: Annotated[int, Query(default=90, ge=7, le=365)],
     db: Annotated[AsyncSession, Depends(get_session)],
     user_id: Annotated[str, Depends(get_current_user)],
+    lookback_days: Annotated[int, Query(ge=7, le=365)] = 90,
 ):
     account_id = await _resolve_broker_account_id(user_id)
     return await v1051_research_service.get_alpha_lab_snapshot(

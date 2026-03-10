@@ -23,9 +23,9 @@ async def _resolve_broker_account_id(current_user: str) -> str:
 
 @router.get("/pipeline")
 async def get_governance_pipeline(
-    limit: Annotated[int, Query(default=20, ge=5, le=100)],
     db: Annotated[AsyncSession, Depends(get_session)],
     user_id: Annotated[str, Depends(get_current_user)],
+    limit: Annotated[int, Query(ge=5, le=100)] = 20,
 ):
     account_id = await _resolve_broker_account_id(user_id)
     return await v1051_research_service.get_governance_pipeline_snapshot(
