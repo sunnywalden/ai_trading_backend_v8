@@ -10,6 +10,7 @@
 6. 与broker集成
 """
 import asyncio
+import logging
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 from uuid import uuid4
@@ -25,6 +26,9 @@ from app.services.risk_event_logger import log_risk_event
 from app.providers.market_data_provider import MarketDataProvider
 from app.core.trade_mode import TradeMode
 from app.core.config import settings
+
+
+logger = logging.getLogger(__name__)
 
 
 class OrderExecutor:
@@ -421,10 +425,33 @@ class OrderExecutor:
         
         # 2. 更新关联的信号状态
         from app.models.trading_signal import TradingSignal, SignalStatus
+        from app.models.execution_intent import AutonomousExecutionIntent
         # 精确匹配 order_id (string)
         stmt = select(TradingSignal).where(TradingSignal.order_id == str(order_id))
         result = await self.session.execute(stmt)
         signal = result.scalars().first()
+
+        if signal is None:
+            intent_stmt = (
+                select(AutonomousExecutionIntent)
+                .where(AutonomousExecutionIntent.order_id == str(order_id))
+                .order_by(AutonomousExecutionIntent.updated_at.desc(), AutonomousExecutionIntent.id.desc())
+            )
+            intent_result = await self.session.execute(intent_stmt)
+            intent = intent_result.scalars().first()
+
+            if intent is not None:
+                if intent.signal_db_id is not None:
+                    signal_by_dbid = await self.session.execute(
+                        select(TradingSignal).where(TradingSignal.id == intent.signal_db_id)
+                    )
+                    signal = signal_by_dbid.scalars().first()
+
+                if signal is None and intent.signal_id:
+                    signal_by_sid = await self.session.execute(
+                        select(TradingSignal).where(TradingSignal.signal_id == str(intent.signal_id))
+                    )
+                    signal = signal_by_sid.scalars().first()
         if signal:
             # 状态映射
             if status == "FILLED":
@@ -483,7 +510,7 @@ class OrderExecutor:
             except Exception as e:
                 print(f"[OrderExecutor] Failed to update journal for signal {signal.signal_id}: {e}")
         else:
-            print(f"[OrderExecutor] No signal found matching order_id: {order_id}")
+            logger.debug("[OrderExecutor] No signal found matching order_id=%s during status sync", order_id)
         
         return resp
     
