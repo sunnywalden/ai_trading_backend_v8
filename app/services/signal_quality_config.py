@@ -23,15 +23,15 @@ logger = logging.getLogger(__name__)
 _REGIME_OVERRIDES: dict[str, dict[str, Any]] = {
     "BULL_TREND": {
         "conviction_threshold": 93,
-        "resonance_min_dims": 4,
-        "max_concurrent_positions": 6,
+        "resonance_min_dims": 2,
+        "max_concurrent_positions": 8,
         "long_allowed": True,
         "short_allowed": True,
     },
     "SIDEWAYS": {
         "conviction_threshold": 95,
-        "resonance_min_dims": 4,
-        "max_concurrent_positions": 5,
+        "resonance_min_dims": 3,
+        "max_concurrent_positions": 6,
         "long_allowed": True,
         "short_allowed": True,
     },
