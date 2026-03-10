@@ -738,6 +738,16 @@ async def get_signal_pipeline(
                 "funnel_result": funnel_map.get(s.signal_id, {}).get("funnel_result"),
                 "funnel_rejected_at_layer": funnel_map.get(s.signal_id, {}).get("funnel_rejected_at_layer"),
                 "funnel_rejection_reason": funnel_map.get(s.signal_id, {}).get("funnel_rejection_reason"),
+                "rejection_stage": (
+                    (s.extra_metadata or {}).get("watchtower_stage")
+                    if isinstance(s.extra_metadata, dict)
+                    else None
+                ),
+                "rejection_detail": (
+                    (s.extra_metadata or {}).get("watchtower_reason_detail")
+                    if isinstance(s.extra_metadata, dict)
+                    else None
+                ),
                 **_build_signal_quality_snapshot(s),
             }
             for s in signals
