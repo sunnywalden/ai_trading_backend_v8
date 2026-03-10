@@ -15,6 +15,7 @@
 - **[v10_2.md](v10_2.md)**：V10.2 波次脚本
 - **[v10_3_x.md](v10_3_x.md)**：V10.3.x 波次脚本
 - **[v10_4_x.md](v10_4_x.md)**：V10.4.x 波次脚本
+- **[v10_5_x.md](v10_5_x.md)**：V10.5.x 波次脚本
 - **[general.md](general.md)**：通用脚本归纳
 - **[legacy.md](legacy.md)**：历史遗留迁移脚本
 
@@ -108,6 +109,18 @@
 - `archived/v10_4_3/_tmp_check_and_fix_three_failed.py`
 - `archived/v10_4_3/_tmp_check_s12.py`
 - `archived/v10_4_3/_tmp_check_fsm_type_counts.py`
+
+## v10.5.x
+
+| 版本 | 脚本 | 说明 |
+| --- | --- | --- |
+| v10.5.1 | `migrations/upgrade_to_v10_5_1.py` | V10.5.1 升级 |
+| v10.5.2 | `migrations/upgrade_to_v10_5_2.py` | V10.5.2 升级 |
+| v10.5.3 | `migrations/upgrade_to_v10_5_3.py` | V10.5.3 升级（建 execution_policy_profiles） |
+| v10.5.3 | `migrations/backfill_execution_policy_profiles.py` | 回填长期执行画像 |
+| v10.5.3 | `maintenance/repair_execution_policy_profiles.py` | 校验并修复执行画像数据 |
+
+详见：**[v10_5_x.md](v10_5_x.md)**
 
 ## 通用脚本（不强绑定单一版本）
 

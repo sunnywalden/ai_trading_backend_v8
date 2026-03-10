@@ -14,5 +14,6 @@
 
 ## V10.5.3 新增
 
+- `../migrations/backfill_execution_policy_profiles.py`：从历史 `execution_quality_log` 幂等回填 `execution_policy_profiles`。
 - `repair_execution_policy_profiles.py`：校验并修复 `execution_policy_profiles` 的 stale / orphan / missing / duplicate 数据。
 - `execution_policy_profile_common.py`：执行画像回填/修复共用聚合逻辑（供迁移脚本与修复脚本复用）。

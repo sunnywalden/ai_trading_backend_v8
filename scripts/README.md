@@ -54,6 +54,7 @@
 - **[by_version/v10_2.md](by_version/v10_2.md)**：V10.2 相关脚本
 - **[by_version/v10_3_x.md](by_version/v10_3_x.md)**：V10.3.x 相关脚本
 - **[by_version/v10_4_x.md](by_version/v10_4_x.md)**：V10.4.x 相关脚本
+- **[by_version/v10_5_x.md](by_version/v10_5_x.md)**：V10.5.x 相关脚本
 - **[by_version/general.md](by_version/general.md)**：通用脚本归纳
 - **[by_version/legacy.md](by_version/legacy.md)**：历史遗留迁移脚本归纳
 - **[archived/README.md](archived/README.md)**：归档脚本入口
@@ -142,6 +143,7 @@
 - `v10.2` 迁移脚本
 - `v10.3.x` 升级 / 验收 / 数据修复脚本
 - `v10.4.x` 升级 / 验收 / 生命周期与监控上线辅助脚本
+- `v10.5.x` 升级 / 执行画像回填 / 数据修复脚本
 
 ## ⚠️ 使用建议
 
