@@ -39,6 +39,9 @@ class RiskConfigService:
     def __init__(self, session: AsyncSession):
         self.session = session
         self.profile_svc = SymbolRiskProfileService(session)
+        self._latest_window_days_cache: Dict[str, int] = {}
+        self._relevant_symbols_cache: Dict[tuple[str, Optional[int]], list[str]] = {}
+        self._effective_state_cache: Dict[tuple[str, int], EffectiveRiskState] = {}
 
     async def _get_relevant_symbols(self, account_id: str, window_days: Optional[int] = None) -> Iterable[str]:
         """从数据库获取实际有行为数据的标的列表。
@@ -47,10 +50,14 @@ class RiskConfigService:
             account_id: 账户ID
             window_days: 可选，指定窗口期则只返回该窗口期有数据的标的
         """
+        cache_key = (account_id, window_days)
+        if cache_key in self._relevant_symbols_cache:
+            return self._relevant_symbols_cache[cache_key]
+
         from sqlalchemy import select, distinct, and_
         from app.models.symbol_behavior_stats import SymbolBehaviorStats
         
-        logger.info(f" Querying symbols for account: {account_id}, window_days: {window_days}")
+        logger.debug(f"[RiskConfigService] Querying symbols for account={account_id}, window_days={window_days}")
         
         if window_days is not None:
             # 如果指定了 window_days，只返回该窗口期有数据的标的
@@ -69,32 +76,38 @@ class RiskConfigService:
         result = await self.session.execute(stmt)
         symbols = [row[0] for row in result.all()]
         
-        logger.info(f" Found {len(symbols)} symbols from DB: {symbols}")
+        logger.debug(f"[RiskConfigService] Found {len(symbols)} symbols from DB")
         
         # 如果没有数据，返回空列表或者根据配置返回
         if not symbols:
-            logger.info(f" No symbols found in behavior stats. Returning empty list.")
+            logger.debug("[RiskConfigService] No symbols found in behavior stats. Returning empty list.")
+            self._relevant_symbols_cache[cache_key] = []
             return []
         
+        self._relevant_symbols_cache[cache_key] = symbols
         return symbols
 
     async def _get_latest_window_days(self, account_id: str) -> int:
         """获取数据库中最新的 window_days（优先使用较小的值）"""
+        if account_id in self._latest_window_days_cache:
+            return self._latest_window_days_cache[account_id]
+
         from sqlalchemy import select, distinct
         from app.models.symbol_behavior_stats import SymbolBehaviorStats
         
-        logger.info(f" Querying window_days for account: {account_id}")
+        logger.debug(f"[RiskConfigService] Querying window_days for account={account_id}")
         stmt = select(distinct(SymbolBehaviorStats.window_days)).where(
             SymbolBehaviorStats.account_id == account_id
         ).order_by(SymbolBehaviorStats.window_days.asc())
         result = await self.session.execute(stmt)
         window_days_list = [row[0] for row in result.all()]
         
-        logger.info(f" Found window_days: {window_days_list}")
+        logger.debug(f"[RiskConfigService] Found window_days: {window_days_list}")
         
         # 返回最小的 window_days，如果没有数据则返回 60
         result_days = window_days_list[0] if window_days_list else 60
-        logger.info(f" Using window_days: {result_days}")
+        logger.debug(f"[RiskConfigService] Using window_days: {result_days}")
+        self._latest_window_days_cache[account_id] = result_days
         return result_days
 
     def _load_global_shock_policy(self) -> ShockPolicy:
@@ -107,6 +120,10 @@ class RiskConfigService:
         # 如果没有指定 window_days，先自动选择最小值
         if window_days is None:
             window_days = await self._get_latest_window_days(account_id)
+
+        state_cache_key = (account_id, window_days)
+        if state_cache_key in self._effective_state_cache:
+            return self._effective_state_cache[state_cache_key]
         
         # 根据 window_days 获取相关标的（只返回该窗口期有数据的标的）
         symbols = list(await self._get_relevant_symbols(account_id, window_days))
@@ -140,7 +157,7 @@ class RiskConfigService:
         limits = EffectiveRiskLimits()
         # 从配置读取交易模式
         trade_mode = TradeMode[settings.TRADE_MODE] if settings.TRADE_MODE in TradeMode.__members__ else TradeMode.DRY_RUN
-        return EffectiveRiskState(
+        state = EffectiveRiskState(
             effective_trade_mode=trade_mode,
             limits=limits,
             global_shock_policy=base_shock,
@@ -151,6 +168,8 @@ class RiskConfigService:
             symbol_behavior_tiers=symbol_behavior_tiers,
             earnings_windows=earnings_windows,
         )
+        self._effective_state_cache[state_cache_key] = state
+        return state
 
     def _behavior_tier(self, stats: Optional[SymbolBehaviorStatsDTO]) -> str:
         if not stats:

@@ -43,6 +43,31 @@ def _safe_float(value: Any) -> float:
         return 0.0
 
 
+def _is_execution_layer_broker_failure(intent: Any) -> bool:
+    """仅统计执行层/券商层失败，避免把策略层 REJECTED 误算为 broker reject。
+
+    历史上 AutonomousExecutionIntent.status=REJECTED 既可能表示风控/熔断/建议模式
+    等策略内拒绝，也可能表示外部执行失败；AI 安全页中的 BROKER_REJECT_SPIKE 只应
+    关注真正发生在下单/券商同步阶段的失败。
+    """
+    status = str(getattr(intent, "status", "") or "").upper()
+    reason = str(getattr(intent, "reason", "") or "").lower()
+
+    if status in {"FAILED", "ERROR"}:
+        return True
+
+    # 仅对少数明确指向券商/执行提交的 REJECTED 保留统计口径。
+    if status == "REJECTED" and (
+        "order-submission-failed" in reason
+        or "broker-" in reason
+        or "order rejected" in reason
+        or "broker rejected" in reason
+    ):
+        return True
+
+    return False
+
+
 class ModelDegradationMonitorService:
     """V10.5.1 M4 — 模型退化监控服务。
 
@@ -281,11 +306,7 @@ class ModelDegradationMonitorService:
         def _reject_rate(items: list[Any]) -> float:
             if not items:
                 return 0.0
-            failed = sum(
-                1
-                for i in items
-                if str(i.status).upper() in {"FAILED", "REJECTED", "ERROR"}
-            )
+            failed = sum(1 for i in items if _is_execution_layer_broker_failure(i))
             return failed / len(items)
 
         recent = [i for i in intents if i.created_at and i.created_at >= recent_since]
@@ -296,7 +317,8 @@ class ModelDegradationMonitorService:
         current = _reject_rate(recent)
         baseline = _reject_rate(prev)
         drift = current - baseline
-        magnitude = abs(drift)
+        # 这是“reject spike”而不是“reject shift”：仅对上升漂移报警。
+        magnitude = max(drift, 0.0)
         return [
             {
                 "strategy_id": None,
@@ -310,10 +332,9 @@ class ModelDegradationMonitorService:
                     "recent_sample": len(recent),
                     "prev_sample": len(prev),
                     "recent_reject_count": sum(
-                        1
-                        for i in recent
-                        if str(i.status).upper() in {"FAILED", "REJECTED", "ERROR"}
+                        1 for i in recent if _is_execution_layer_broker_failure(i)
                     ),
+                    "counting_rule": "execution-layer failures only",
                 },
             }
         ]
