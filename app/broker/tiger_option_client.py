@@ -764,6 +764,13 @@ class TigerOptionClient(OptionBrokerClient):
     async def get_order_status(self, account_id: str, order_id: str) -> dict:
         """获取老虎证券订单状态"""
         try:
+            normalized_order_id = str(order_id or "").strip()
+            if not normalized_order_id or not normalized_order_id.isdigit():
+                return {
+                    "status": "NOT_FOUND",
+                    "message": "Local or non-broker order id; skipped Tiger lookup",
+                }
+
             # 兼容性处理：当前版本的 get_orders 不支持直接传 id 参数
             # 我们获取最近的订单列表并在本地过滤
             orders = await self._run_in_executor(
@@ -778,8 +785,8 @@ class TigerOptionClient(OptionBrokerClient):
             
             # 本地按 ID 过滤
             target_order = None
-            search_ids = [str(order_id)]
-            logger.info(f" Searching for order_id: {order_id} in {len(orders)} recent orders")
+            search_ids = [normalized_order_id]
+            logger.info(f" Searching for order_id: {normalized_order_id} in {len(orders)} recent orders")
             
             for o in orders:
                 # Tiger SDK 的 Order 对象通常有 id 和 order_id，且可能包含外部 ID
@@ -796,7 +803,7 @@ class TigerOptionClient(OptionBrokerClient):
                 debug_info = []
                 for o in orders[:3]:
                     debug_info.append(f"id={getattr(o,'id','?')}, order_id={getattr(o,'order_id','?')}")
-                logger.info(f" Order {order_id} not found. Recent orders: {', '.join(debug_info)}")
+                logger.info(f" Order {normalized_order_id} not found. Recent orders: {', '.join(debug_info)}")
                 return {"status": "NOT_FOUND", "message": "Order not found in recent history"}
             
             status = target_order.status
