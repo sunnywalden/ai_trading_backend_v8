@@ -49,9 +49,6 @@ def _ensure_sqlalchemy_available() -> None:
 
 _ensure_sqlalchemy_available()
 
-from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-
 sys.path.insert(0, ROOT)
 
 from app.core.config import settings  # noqa: E402
@@ -65,6 +62,9 @@ async def run_repair(
     execute: bool,
     account_id: str | None,
 ) -> None:
+    from sqlalchemy.ext.asyncio import (AsyncSession, async_sessionmaker,
+                                        create_async_engine)
+
     engine = create_async_engine(settings.DATABASE_URL, echo=False)
     session_factory = async_sessionmaker(
         engine,
