@@ -1,11 +1,11 @@
+# 产品需求文档 (PRD)
+
 > ⚠️ **V10.4.1 M6 文档拆分通知**
 > 本文档已拆分为模块化子文档，位于 [`docs/product/`](product/README.md)。
 > 本文件保留作为向后兼容入口，正式维护请在 `docs/product/` 目录进行。
-
-# 产品需求文档 (PRD)
-
 > **AI量化交易闭环系统** - 个人美港股智能交易平台  
-> 版本：V10.5.1（已上线）| 更新日期：2026-03-08  
+> 版本：V10.5.3（规划中）| 当前已上线版本：V10.5.1 | 更新日期：2026-03-10  
+> 变更摘要（V10.5.3 规划）：**Profit Engine Upgrade**——下一版本聚焦“收益控制回路”而非继续横向扩页，围绕四条主线推进：**Alpha Truth Engine 2.0**（gross / net / after cost / after turnover 四层真相口径、regime/capacity bucket、shadow false-reject 评估）、**Portfolio Construction 2.1**（Seat Value、Risk Budget Tree、Marginal Alpha/Risk/Turnover/Liquidity 贡献）、**Execution Policy Closed Loop**（Pre-Trade Cost 约束、执行策略对象化、执行反馈回写）、**Research-to-Live Governance Hard Gate**（Discovery / Paper / Shadow Live / Challenger / Production 五阶段证据链与回滚门槛）；目标是在不放宽风险上限的前提下提高净 alpha 质量、减少伪 alpha 与低价值席位占用。  
 > 变更摘要（V10.5.1 交付）：**从“功能完整”走向“机构级交易操作系统”**——下一版本不再以新增页面和策略数量为核心，而聚焦三条机构级主线：**Alpha Truth Stack**（策略净 alpha、信号衰减、影子组合、Purged Walk-Forward、成本后真实表现）、**Portfolio Construction 2.0**（风险预算树、流动性感知仓位、边际风险/alpha/turnover 贡献）、**Execution Policy Engine**（订单紧急度、参与率、滑点预算、预交易成本模型、成交后回放）；同时补齐 **Live Safety & Model Degradation Guard**（模型退化监控、数据新鲜度 kill matrix、自主度自适应降级）与 **Research-to-Live Governance**（shadow live、晋级流水线、实验总账），让平台从“能跑的自主交易系统”升级为“可验证、可控放量、可持续进化的研究与交易一体化系统”。【补丁交付】：事后决策剪析自动化（Post-Mortem Automation）——新增 `post_mortem_jobs.py`，通过 EventBus 订阅 `Topics.POSITION_CLOSED` 实时触发 + 每日 02:00 UTC 岜底 Cron 扫描近 90 天未剪析平仓仓位，幂等排队 `deepseek-reasoner` 生成结构化复盘（`trade_id="position-{id}"`），`_RUNNING_TASKS` 集合防 GC；事件日历数据新鲜度修复——`data_freshness_guard_service.py` 改查 `EventCalendarEntry.updated_at`（原 `created_at`），`event_calendar_service.py` upsert 时对已存在记录刷新 `updated_at`，消除 `event_calendar` 83h 陈旧 WARN。  
 > 变更摘要（V10.4.3）：**风险降低优先执行（Risk-Reducing Priority Execution）**——新增减仓/平仓快速通道：`REDUCE/EXIT` 信号绕过开仓型质量漏斗、熔断期间允许风险降低类订单、减仓/平仓不占用 `MAX_DAILY_TRADES` / `MAX_DAILY_SIGNALS` 配额；`PositionMonitor`止损/止盈信号写入 `force_exit=true`，`AutonomousEngine` 识别后跳过冷却与 Redis 并发锁直接执行；`SignalPositionFilter` 在减仓数量超持仓时自动升级为全平；`OrderExecutor` 以实际持仓数量为准执行 EXIT/REDUCE，并为港股退出保留 odd-lot 平仓能力；`AutonomyPage` 新增“减仓/平仓优先通道”状态卡与快速通道/强制出场徽章。**补充**：开仓型信号新增 `LOW / MEDIUM / HIGH / ELITE` 质量标识，进入漏斗前先按质量排队；其中 `ELITE` 信号可豁免 `SQ_MAX_DAILY_SIGNALS` 日配额上限，但仍必须通过仓位、相关性与 RiskGate。**追加需求**：`/system` 系统监控模块需新增交易生命周期状态监测、系统主要数据流转详细状态、系统主要模块及细粒度服务状态。  
 > 变更摘要（V10.4.4）：**以仓位为中心的生命周期治理 (Position-Centric Lifecycle)**——引入 `positions` 聚合根与 `execution_slices` 执行切片，支持多主题仓位隔离与 Append-Only 生命周期事件审计；`autonomous_execution_intent` 关联仓位与切片，实现从信号到仓位动作的全链路追踪。  
@@ -19,18 +19,45 @@
 > 变更摘要（V10.2-M2~M8）：**事件驱动风控**——EventCalendarService 盈利/FOMC/CPI/NFP 日历同步 + EarningsFenceService 盈利围栏（盈利前1天50%仓位上限）；**动态仓位生命周期**——PositionStateMachine 三引擎（ScaleIn/ScaleOut/TrailingStop）；**信号融合**——SignalFusionEngine 六维加权评分（tech 25%/fundamental 20%/macro 15%/vol 15%/opt 15%/sentiment 10%）+ 体制倍数；**交易归因**——TradeAttributionEngine 三层分析（Alpha源/执行质量/仓位管理）+ AttributionPage 可视化；**AI 进化**——InsightService 自动周报（deepseek-reasoner Sunday 22:00 ET）+ ABTestEngine（scipy t-test p<0.05）+ EvolutionPage；**Copilot Partner**——DeepResearchEngine 多步深度研究 + ProactiveIntelligenceService 主动推送  
 > 变更摘要（V10.2-M1）：**市场体制感知引擎** ——RegimeClassifier 五维评分体系（趋势强度/波动率制度/量价关系/宏观环境/广度指标）、6类体制自动识别（BULL_TREND / BEAR_TREND / HIGH_VOL / MEAN_REVERT / RANGE_BOUND / CRISIS）、3日确认防噪机制、EventBus 异步事件总线（REGIME_CHANGED 事件驱动策略权重自适应切换、VaR 门限动态调整）、StrategyWeightAllocator 体制感知仓位分配、AI 自主交易闭环升级至 **17 阶段**  
 > 变更摘要（V10.1）：**兑现承诺 + 打磨质量 + 扩展边界**——Tiger 真实下单接入（覆盖美股/港股/期权）、FULL 模式完整自主交易闭环、Copilot 操作指令执行落地、Dashboard 所有 TODO 指标真实化、AI 组合级决策升级（结构化 JSON 输出 + 批量组合决策）、ETF 标的池正式支持、港股支持（Tiger API 统一，无需 Futu）、Paper→Live 毕业自动化、Dashboard WebSocket 实时推送；**本版本明确不含 Telegram 通知，FULL 模式具备完全自主交易能力**
-
 > 历史版本：V10.0（2026-02-24）变更摘要见下方历史记录节  
-> 当前交付主线：[V10.4 Release Plan](archived/v10/v10.4/RELEASE_PLAN_V10.4.md)  
-> 下一版本规划：[V10.5.2 Release Plan](archived/v10/v10.5/RELEASE_PLAN_V10.5.2.md)
+> 当前交付主线：[V10.5.1 Release Plan](archived/v10/v10.5/RELEASE_PLAN_V10.5.1.md)  
+> 下一版本规划：[V10.5.3 Release Plan](archived/v10/v10.5/RELEASE_PLAN_V10.5.3.md)
 
 ---
 
-### V10.4 验收标准（规划中）
+## V10.5.3 验收标准（规划中）
+
+> 完整规划详见 [docs/archived/v10/v10.5/RELEASE_PLAN_V10.5.3.md](archived/v10/v10.5/RELEASE_PLAN_V10.5.3.md)
+
+### M1 — Alpha Truth Engine 2.0
+
+- [ ] 所有核心策略同时输出 `gross / net / after_cost / after_turnover` 四层收益口径
+- [ ] `Alpha Lab` 所有研究卡片显式展示 `data_quality`（`REAL / INSUFFICIENT / STALE / PROXY`）
+- [ ] `Shadow Book` 能量化 `false_reject_rate` 与 `protection_benefit`
+
+### M2 — Portfolio Construction 2.1
+
+- [ ] `CapacityArbiter` 基于 `SeatValue` 决定席位保留与替换，而不再只依赖静态质量排序
+- [ ] 组合建议可解释 `marginal_alpha / marginal_var / marginal_turnover / liquidity_usage`
+- [ ] `Risk Budget Tree` 能解释任何 `scaled_down / rejected` 的组合建议
+
+### M3 — Execution Policy Closed Loop
+
+- [ ] 每笔订单执行前生成 `policy snapshot + pre-trade cost estimate`
+- [ ] 执行页展示的算法、预算、参与率与真实下单参数保持一致
+- [ ] 可按 `symbol / urgency / algo_type` 追踪 `realized IS` 与 `budget breach rate`
+
+### M4 — Research-to-Live Governance Hard Gate
+
+- [ ] 策略统一进入 `Discovery → Paper → Shadow Live → Challenger → Production` 五阶段流水线
+- [ ] 进入 `Production` 的策略 100% 具备 evidence chain（backtest / paper / shadow / execution / calibration）
+- [ ] 退化策略可见明确的 `rollback blocker / rollback reason / downgrade suggestion`
+
+## V10.4 验收标准（规划归档）
 
 > 完整规划详见 [docs/archived/v10/v10.4/RELEASE_PLAN_V10.4.md](archived/v10/v10.4/RELEASE_PLAN_V10.4.md)
 
-#### M1 — 数据闭环治理
+### M1 — 数据闭环治理
 
 - [ ] `actual_return` 每日 21:30 ET 自动回填，已平仓信号回填率 ≥ 95%
 - [ ] IC 计算无 hardcoded fallback，所有维度返回 `data_quality` 字段（`REAL`/`INSUFFICIENT`/`STALE`）

@@ -82,15 +82,15 @@
 - **前端重点**：围绕 Alpha Lab、Portfolio Construction Console、Execution Policy Console、Promotion Pipeline Board 做决策级可视化，而非继续横向扩页
 - **★ V10.5.1 补丁（已交付）**：事后决策剖析自动化（`post_mortem_jobs.py` EventBus + Cron) + 事件日历 freshness 修复 + `confirmed=False` 体制修复
 
-### Phase 15: 组合席位竞争与资本配置闭环 🚀 V10.5.2 当前规划
-> 详细规划见：[docs/archived/v10/v10.5/RELEASE_PLAN_V10.5.2.md](../archived/v10/v10.5/RELEASE_PLAN_V10.5.2.md)
+### Phase 15: Profit Engine Upgrade 🚀 V10.5.3 当前规划
+> 详细规划见：[docs/archived/v10/v10.5/RELEASE_PLAN_V10.5.3.md](../archived/v10/v10.5/RELEASE_PLAN_V10.5.3.md)
 
-- **M1 Capacity-Aware Admission & Replacement Engine**：当持仓达到上限时，不再直接拒绝新信号，而是将“当前持仓 + 新信号”统一排序，淘汰末位 N 个对象；若淘汰的是持仓则平仓，若淘汰的是信号则拒绝
-- **M2 Incumbent Quality Governance**：持仓持续参与席位竞争，引入持仓衰减、机会成本、体制适配与替换摩擦成本，不再默认“先入场就一直占位”
-- **M3 Capacity Simulation & What-If Console**：执行前输出替换预演、淘汰名单、风险预算释放与影子替换账本，先 dry-run 后落地
-- **M4 Rotation Orchestrator**：将退出清单、拒绝清单与执行清单纳入同一原子周期，解决“先拒绝后异步减仓”的链路割裂问题
-- **M5 Capacity Observability & Governance**：新增 capacity audit log、replacement attribution、seat utilization、false rejection rate 等治理指标
-- **前端重点**：围绕 Portfolio / Autonomy / Order Book / System Monitor 增加席位竞争、替换解释、容量健康状态可视化，而非新增独立孤岛页面
+- **M1 Alpha Truth Engine 2.0**：建立 `gross / net / after cost / after turnover` 四层 alpha 真相口径，补齐 regime / capacity / decay / shadow false-reject 视图，解决“看起来赚钱”和“净成本后赚钱”之间的偏差
+- **M2 Portfolio Construction 2.1**：以 `Seat Value` 为核心升级 `CapacityArbiter`，加入 Risk Budget Tree、Marginal Alpha/Risk/Turnover/Liquidity 贡献，让资本按边际净收益分配
+- **M3 Execution Policy Closed Loop**：把 Pre-Trade Cost、slippage budget、urgency、participation rate 接入执行前决策，并让执行反馈回写 execution policy profile
+- **M4 Research-to-Live Governance Hard Gate**：统一 `Discovery / Paper / Shadow Live / Challenger / Production` 五阶段晋级管线，以 evidence chain 驱动 promotion / rollback，而不是只看 paper 胜率
+- **前端重点**：强化 `/alpha-lab`、`/portfolio`、`/execution-policy`、`/governance/pipeline` 四个决策工作台，继续坚持“决策级可视化而非页面膨胀”
+- **与 V10.5.2 的关系**：V10.5.2 的席位竞争与容量替换逻辑作为 V10.5.3 的 M2 子模块吸收，不再作为单独主版本推进
 
 ### Phase 16: V11 计划 🔜
 - 期权执行开启（`STOCK,ETF,OPTION` 全模式）
