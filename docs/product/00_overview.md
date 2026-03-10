@@ -3,7 +3,8 @@
 # 产品需求文档 (PRD)
 
 > **AI量化交易闭环系统** - 个人美港股智能交易平台  
-> 版本：V10.5.1（已上线）| 更新日期：2026-03-08  
+> 版本：V10.5.3（规划中）| 当前已上线版本：V10.5.1 | 更新日期：2026-03-10  
+> 变更摘要（V10.5.3 规划）：**Profit Engine Upgrade**——下一版本不再以增加页面数或策略数为导向，而是把 `Alpha Lab / Portfolio / Execution Policy / Governance` 升级为直接影响净收益的控制回路：建立四层 alpha 真相口径、以 `Seat Value` 为核心的组合资本配置、以 Pre-Trade Cost 为约束的执行策略闭环，以及面向 `Discovery / Paper / Shadow Live / Challenger / Production` 的硬门槛晋级治理。  
 > 变更摘要（V10.5.1 交付）：**从“功能完整”走向“机构级交易操作系统”**——规划聚焦五大主线：Alpha Truth Stack / Portfolio Construction 2.0 / Execution Policy Engine / Live Safety & Model Degradation Guard / Research-to-Live Governance。**本版本补丁交付**：**事后决策剪析自动化（Post-Mortem Automation）**——新增 `post_mortem_jobs.py`，EventBus 订阅 `Topics.POSITION_CLOSED` 实时触发 + 每日 02:00 UTC 岜底 Cron 扫描近 90 天未剪析平仓仓位，幂等排队 `deepseek-reasoner` 生成结构化复盘（`trade_id="position-{id}"`）；**事件日历数据新鲜度修复**——`data_freshness_guard_service.py` 改查 `EventCalendarEntry.updated_at`（原 `created_at`），`event_calendar_service.py` upsert 时刷新 `updated_at`，消除 `event_calendar` 83h 陈旧 WARN；**`confirmed=False` 体制分类修复**——`regime_classifier.py` `confirmed=False` 分支同步更新 `classification_date`。  
 > 变更摘要（V10.4.3）：**风险降低优先执行（Risk-Reducing Priority Execution）**——新增减仓/平仓快速通道：`REDUCE/EXIT` 信号绕过开仓型质量漏斗、熔断期间允许风险降低类订单、减仓/平仓不占用 `MAX_DAILY_TRADES` / `MAX_DAILY_SIGNALS` 配额；`PositionMonitor` 止损/止盈信号写入 `force_exit=true`，`AutonomousEngine` 识别后跳过冷却与 Redis 并发锁直接执行；`SignalPositionFilter` 在减仓数量超持仓时自动升级为全平；`OrderExecutor` 以实际持仓数量为准执行 EXIT/REDUCE，并为港股退出保留 odd-lot 平仓能力；`AutonomyPage` 新增“减仓/平仓优先通道”状态卡与快速通道/强制出场徽章。**追加需求**：`/system` 系统监控页需补齐三类可观测能力——交易生命周期状态监测、系统主要数据流转详细状态、主要模块及细粒度服务状态。  
 > 变更摘要（V10.4.1）：**巩固、治理与完整性**——M1 数据闭环治理（actual_return 自动回填 Job + IC 真实化 + 因子快照自动化 + 2026 事件日历 + LLM 降级）；M2 UI 大清洗（47→≤38 页面 + 导航 6→4 组 + 执行三合一 + 双仪表盘合并）；M3 Copilot 全局浮窗（Cmd+K 任意页面唤起 + 页面上下文注入 + 实时系统状态 System Prompt）；M4 自主循环稳定增强（AutonomyHealthMonitor + Job Watchdog + Multi-Agent 真实并发 + 三新熔断 + WebSocket 重连）；M5 移动触达（Dashboard/Alert/Copilot 竖屏可用）；M6 文档重构（PRODUCT.md 拆分为模块化多文件，主文件 ≤300 行）  
@@ -16,12 +17,20 @@
 > 变更摘要（V10.1）：**兑现承诺 + 打磨质量 + 扩展边界**——Tiger 真实下单接入（覆盖美股/港股/期权）、FULL 模式完整自主交易闭环、Copilot 操作指令执行落地、Dashboard 所有 TODO 指标真实化、AI 组合级决策升级（结构化 JSON 输出 + 批量组合决策）、ETF 标的池正式支持、港股支持（Tiger API 统一，无需 Futu）、Paper→Live 毕业自动化、Dashboard WebSocket 实时推送；**本版本明确不含 Telegram 通知，FULL 模式具备完全自主交易能力**
 
 > 历史版本：V10.0（2026-02-24）变更摘要见下方历史记录节  
-> 当前版本：**V10.5.1**（已上线）| 详细规划：[V10.5.1 Release Plan](../archived/v10/v10.5/RELEASE_PLAN_V10.5.1.md)
-
+> 当前已上线版本：**V10.5.1**（已上线）| 详细规划：[V10.5.1 Release Plan](../archived/v10/v10.5/RELEASE_PLAN_V10.5.1.md)  
+> 下一版本规划：**V10.5.3** | 详细规划：[V10.5.3 Release Plan](../archived/v10/v10.5/RELEASE_PLAN_V10.5.3.md)
 
 ---
 
-### V10.5.1 验收标准（当前版本）
+## V10.5.3 验收标准（规划中）
+
+- [ ] `Alpha Lab` 建立 `gross / net / after_cost / after_turnover` 四层 alpha 真相口径
+- [ ] `Portfolio` 支持 `Seat Value / Risk Budget Tree / Marginal Contribution / Liquidity Usage`
+- [ ] `Execution Policy` 从解释视图升级为执行前成本约束与执行后反馈回写闭环
+- [ ] `Governance Pipeline` 建立 `Discovery / Paper / Shadow Live / Challenger / Production` 硬门槛证据链
+- [ ] 核心收益质量指标（Net Alpha Positive Rate / Seat Efficiency / Budget Breach Rate）可观测、可审计、可回溯
+
+## V10.5.1 验收标准（当前已上线版本）
 
 **补丁交付（已完成）**：
 
@@ -31,7 +40,7 @@
 - [x] 事件日历 upsert 刷新：`event_calendar_service.py` 每次扫描时刷新 `updated_at`，消除 83h 陈旧 WARN
 - [x] `confirmed=False` 体制修复：`regime_classifier.py` `confirmed=False` 分支同步更新 `classification_date`
 
-**V10.5.1 M1–M5 主线（规划中）**：
+**V10.5.1 M1–M5 主线（历史规划归档）**：
 
 - [ ] **M1 Alpha Truth Stack**：Strategy Scorecard 2.0 + 信号衰减 + 影子组合 + Purged Walk-Forward
 - [ ] **M2 Portfolio Construction 2.0**：风险预算树 + 流动性感知 sizing + 边际 VaR/ES 贡献

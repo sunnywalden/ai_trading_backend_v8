@@ -44,3 +44,12 @@
 - 事后决策剖析覆盖率 ≥ 95%（平仓后 24h 内生成）
 - 数据新鲜度告警率 < 1%（event_calendar / market_data 等来源无 WARN）
 - 体制分类准确率 ≥ 80%（confirmed 体制与后验吻合）
+
+### 6.4 V10.5.3 收益质量指标（规划中）
+
+- Net Alpha Positive Rate 提升：扣除执行与换手成本后仍为正的策略占比持续提升
+- Seat Efficiency 提升：前 N 个席位贡献的净收益占比提升，减少低价值仓位占位
+- Shadow-to-Live Consistency 改善：Shadow / Paper / Live 的表现偏差收敛
+- Average Realized IS 下降：执行策略升级后，平均 realized IS 持续下降
+- Budget Breach Rate 下降：Pre-Trade Cost / Slippage Budget 超限占比下降
+- Governance Evidence Coverage = 100%：进入 Production 的策略必须具备完整 evidence chain
