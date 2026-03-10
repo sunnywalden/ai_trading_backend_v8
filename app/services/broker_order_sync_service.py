@@ -1,6 +1,7 @@
 """券商订单状态对账服务（含手动撤单回写）。"""
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, cast
 
@@ -16,9 +17,20 @@ from app.models.trading_signal import SignalStatus, TradingSignal
 from app.services.lifecycle_service import lifecycle_service
 
 
+logger = logging.getLogger(__name__)
+
 _BROKER_RECONCILE_ACTIVE_STAGES = frozenset({7, 8})
 _POST_TRADE_STAGE_START = 12
 _STAGE7_STALE_CLOSE_AFTER = timedelta(hours=6)
+
+
+def _is_broker_native_order_id(order_id: Any) -> bool:
+    """仅保留可向 Tiger 查询的真实券商订单号。"""
+    text = str(order_id or "").strip()
+    if not text:
+        return False
+    # Tiger 当前主链路返回的真实 order_id 为纯数字；SIM_/UUID/本地占位单不应打到券商。
+    return text.isdigit()
 
 
 def _is_plan_reconcile_candidate(plan_stage: Optional[int], plan_status: Optional[str]) -> bool:
@@ -270,13 +282,22 @@ async def reconcile_broker_order_status(
         select(distinct(TradingSignal.order_id))
         .where(TradingSignal.account_id == real_account_id)
         .where(TradingSignal.order_id.is_not(None))
+        .where(TradingSignal.created_at >= since)
     )
 
-    candidate_ids = {
+    raw_candidate_ids = {
         str(r[0]) for r in audit_order_rows.fetchall() if r and r[0]
     } | {
         str(r[0]) for r in signal_order_rows.fetchall() if r and r[0]
     }
+
+    candidate_ids = {oid for oid in raw_candidate_ids if _is_broker_native_order_id(oid)}
+    skipped_local_only = len(raw_candidate_ids) - len(candidate_ids)
+    if skipped_local_only > 0:
+        logger.debug(
+            "[BrokerSync] skipped %d local/non-broker order ids during reconcile candidate build",
+            skipped_local_only,
+        )
 
     cancelled_synced = 0
     filled_synced = 0
