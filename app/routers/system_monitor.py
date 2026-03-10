@@ -45,6 +45,7 @@ from app.schemas.system_monitor import (DataFlowDetailResponse,
 from app.services.api_monitoring_service import api_monitor
 from app.services.autonomy_health_monitor import autonomy_health_monitor
 from app.services.lifecycle_service import lifecycle_service
+from app.services.position_query_service import ACTIVE_POSITION_STATUSES
 from app.services.situational_awareness_service import \
     situational_awareness_service
 
@@ -258,23 +259,13 @@ async def _count_positions(db: AsyncSession, mode: str) -> int:
 
         from app.models.position import Position, PositionStatus
 
-        _ACTIVE = {
-            PositionStatus.PENDING.value,
-            PositionStatus.OPENING.value,
-            PositionStatus.ACTIVE.value,
-            PositionStatus.SCALING_IN.value,
-            PositionStatus.SCALING_OUT.value,
-            PositionStatus.CLOSING.value,
-            PositionStatus.PARTIALLY_CLOSED.value,
-            PositionStatus.EXCEPTION.value,
-        }
         if mode == "exception":
             stmt = select(sa_func.count(Position.id)).where(
                 Position.status == PositionStatus.EXCEPTION.value
             )
         else:
             stmt = select(sa_func.count(Position.id)).where(
-                Position.status.in_(list(_ACTIVE))
+                Position.status.in_(tuple(ACTIVE_POSITION_STATUSES))
             )
         result = await db.execute(stmt)
         return result.scalar_one() or 0
