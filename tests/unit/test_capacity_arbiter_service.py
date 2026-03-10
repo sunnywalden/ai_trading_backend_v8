@@ -20,18 +20,15 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from math import isclose
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.services.capacity_arbiter import (
-    CANDIDATE_POSITION,
-    CANDIDATE_SIGNAL,
-    ArbiterDecision,
-    CapacityArbiterService,
-    CapacityCandidate,
-)
+from app.services.capacity_arbiter import (CANDIDATE_POSITION,
+                                           CANDIDATE_SIGNAL, ArbiterDecision,
+                                           CapacityArbiterService,
+                                           CapacityCandidate)
 
 # ─── 共用工具 ─────────────────────────────────────────────────────────────────
 
@@ -507,6 +504,43 @@ def test_feature_disabled_all_signals_pass_through():
     assert len(decision.rejected_signals) == 0
 
 
+def test_seat_value_flag_changes_replacement_ranking():
+    arb = CapacityArbiterService()
+    db = _FakeDB()
+    sig = _make_signal(88, "NVDA")
+    symbol, position = _make_position("INCUMBENT")
+    positions = {symbol: position}
+
+    incumbent = _make_pos_cand("INCUMBENT", 70)
+    incumbent.seat_value = 40.0
+    challenger = _make_sig_cand(sig, 68)
+    challenger.seat_value = 75.0
+
+    with patch(
+        "app.services.signal_quality_config.get_signal_quality_config",
+        return_value=_FakeCfg(),
+    ), patch(
+        "app.services.capacity_arbiter.settings.SEAT_VALUE_ARBITER_ENABLED",
+        True,
+    ):
+        _inject_candidates(arb, [incumbent], [challenger])
+        decision = run_async(
+            arb.evaluate(
+                account_id="DU1",
+                current_positions=positions,
+                entry_signals=[sig],
+                max_positions=1,
+                regime="BULL_TREND",
+                db=cast(Any, db),
+                dry_run=True,
+            )
+        )
+
+    assert decision.positions_to_close == ["INCUMBENT"]
+    assert len(decision.approved_signals) == 1
+    assert decision.rejected_signals == []
+
+
 # ════════════════════════════════════════════════════════════════════════════
 # 8. _position_admission_score 公式验证
 # ════════════════════════════════════════════════════════════════════════════
@@ -558,7 +592,7 @@ def test_position_admission_score_clipped_to_zero():
     score = CapacityArbiterService._position_admission_score(
         overall_score=5.0, hold_minutes=10000.0, unrealized_pnl_pct=-1.0
     )
-    assert score == 0.0
+    assert isclose(score, 0.0, abs_tol=0.0001)
 
 
 def test_position_admission_score_clipped_to_hundred():
@@ -566,7 +600,7 @@ def test_position_admission_score_clipped_to_hundred():
     score = CapacityArbiterService._position_admission_score(
         overall_score=99.0, hold_minutes=0.0, unrealized_pnl_pct=1.0
     )
-    assert score == 100.0
+    assert isclose(score, 100.0, abs_tol=0.0001)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -579,11 +613,19 @@ def test_signal_admission_score_passthrough():
 
 
 def test_signal_admission_score_clamp_high():
-    assert CapacityArbiterService._signal_admission_score(150.0) == 100.0
+    assert isclose(
+        CapacityArbiterService._signal_admission_score(150.0),
+        100.0,
+        abs_tol=0.0001,
+    )
 
 
 def test_signal_admission_score_clamp_low():
-    assert CapacityArbiterService._signal_admission_score(-5.0) == 0.0
+    assert isclose(
+        CapacityArbiterService._signal_admission_score(-5.0),
+        0.0,
+        abs_tol=0.0001,
+    )
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -633,10 +675,54 @@ def test_cycle_id_propagated():
                 entry_signals=signals,
                 max_positions=5,
                 regime="NEUTRAL",
-                db=db,
+                db=cast(Any, db),
                 cycle_id=cid,
                 dry_run=True,
             )
         )
 
     assert decision.cycle_id == cid
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 12. Portfolio Construction 2.1 explainability fields
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def test_build_portfolio_21_metrics_for_signal():
+    metrics = CapacityArbiterService._build_portfolio_21_metrics(
+        candidate_type=CANDIDATE_SIGNAL,
+        raw_score=82.0,
+        admission_score=79.0,
+        source_payload={
+            "quantity_value": 0.2,
+            "suggested_quantity": 150,
+            "suggested_price": 100.0,
+            "adv_usd": 200_000.0,
+        },
+    )
+
+    assert float(metrics["seat_value"]) > 0
+    assert isclose(float(metrics["marginal_alpha"]), 0.82, abs_tol=0.0001)
+    assert metrics["replace_or_hold_reason"] == "REPLACE_CANDIDATE"
+
+
+def test_candidate_snapshot_includes_portfolio_21_fields():
+    candidate = CapacityCandidate(
+        candidate_type=CANDIDATE_POSITION,
+        symbol="MSFT",
+        raw_score=76.0,
+        admission_score=72.0,
+        seat_value=68.4,
+        marginal_alpha=0.76,
+        marginal_risk=0.28,
+        marginal_turnover=0.04,
+        liquidity_usage=0.11,
+        replace_or_hold_reason="HOLD",
+    )
+
+    snapshot = candidate.as_snapshot_dict()
+
+    assert snapshot["seat_value"] == pytest.approx(68.4)
+    assert snapshot["marginal_alpha"] == pytest.approx(0.76)
+    assert snapshot["replace_or_hold_reason"] == "HOLD"

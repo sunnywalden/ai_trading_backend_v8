@@ -437,3 +437,215 @@ engine_trigger_count JSONB          -- 各引擎触发计数 {scale_in: N, scale
 | 决策可解释性 | 每笔执行交易可在 3 次点击内查到完整六维信号来源 | 100% |
 | 订单簿实时性 | 执行状态更新到界面反映的延迟 | < 3s（WebSocket）|
 | 态势感知准确性 | 系统实际状态与 Awareness Bar 展示一致率 | ≥ 99.9% |
+
+
+## 4.Z V10.3.2~V10.3.4 迭代功能详述
+
+### 4.Z.1 V10.3.2 — 幂等执行稳定性 & 市场全量池
+
+**幂等执行稳定性**（V10.3.2 核心）：
+- 同一 `account_id + signal_id + symbol + action` 重复触发时，仅首个 execution intent 入库成功，后续被幂等拒绝，杜绝重复下单
+- 自主执行链路包含完整状态流转：`PENDING → EXECUTING → SUCCESS/FAILED`，以及 `SKIPPED/REJECTED` 分支
+- 风控拒绝可观测：RiskGate/CircuitBreaker 拒绝分支同样写入 `autonomous_execution_intent(status=REJECTED)`
+- `HOLD/qty<=0` 不再标记为 `EXECUTED`，改为 `SKIPPED`，Dashboard 信号管道增加 `skipped_count`
+
+**市场全量池状态视图**：
+- 新增 `/market-universe/status` 视图，展示标的同步进度与数据覆盖率
+- 标的池管理入口（`ETFWatchlistPanel`）支持 ETF 流动性筛选
+- 港股持仓视图升级：Tiger API 统一美股/港股，标的卡显示市场标签（US/HK）
+
+### 4.Z.2 V10.3.3 — 可观测性 2.0 + AI 中枢 2.0 + 指挥室
+
+#### 可观测性 2.0（Observability 2.0）
+
+**Execution Microscope（执行显微镜）**：
+- Implementation Shortfall 四分解：`delay_cost + market_impact_cost + opportunity_cost + timing_cost`，每笔 intent 完成后写入 `execution_quality_log`
+- 执行 Alpha 衡量：到达价 vs 实际成交价偏差，按时段×标的热力图可视化
+- Dashboard 执行质量面板：实时 P95 滑点指标、Fill Rate 时段分布
+
+**Signal Intelligence Observatory（信号情报观察站）**：
+- IC 滚动序列维护：近5/20/60日，推断 `alpha_halflife_days`（alpha 半衰期）
+- 六维因子相关矩阵（滚动60日）；Crowding Score > 0.75 时自动降低该维度融合权重
+- `/signal-watchtower` 路由：漏斗实时流向图、拒绝信号列表、幽灵交易追踪、参数调优面板
+
+**Risk Observability Cluster（风险可观测集群）**：
+- 实时计算五因子敞口（Market / HML / SMB / MOM / QMJ），频率 5分钟/次
+- 期望损失 ES@97.5% 实时仪表；相关性骤升 > `CORRELATION_SPIKE_THRESHOLD=0.65` 触发告警
+
+#### AI 中枢 2.0（AI Hub 2.0）
+
+**Multi-Agent Orchestration（五智能体协作）**：
+- `MarketAnalystAgent / RiskChallengerAgent / ExecutionOptimizerAgent / ResearchAgent / OrchestratorAgent` 协作
+- 结构化 `AgentMessage(agent_id, role, content, confidence, timestamp)` 传递，全量写入 `agent_communication_log`
+- `RiskChallengerAgent` 必须对每个 BUY 信号输出反驳理由（`challenge_points: list[str]`）
+
+**AI Confidence Calibration（置信度校准）**：
+- 每日 08:15 运行：`[confidence_bucket → actual_win_rate]` 映射，计算 Brier Score 和 ECE
+- ECE > 0.12 时自动叠加 `calibration_adjustment_factor`（向 0.5 收敛）
+
+**Adaptive Factor Framework（自适应因子框架）**：
+- Kalman Filter 在线权重更新（Q=0.001, R=0.01），每日收盘后执行
+- 因子动量加成：近20日 IC 前两名 +5%，末位 -5%，权重历史写入 `signal_weight_history`
+
+**Decision Post-Mortem Engine（决策事后剖析）**：
+- 持仓完全平仓后自动触发 `deepseek-reasoner` 生成结构化复盘
+- 包含：`factual_summary / counterfactual_buy / counterfactual_hold / counterfactual_sell / key_lessons / improvement_suggestions`
+- 自动提炼 1 条 LESSON 型洞察推入 `ai_insight_repository`（`source=POST_MORTEM`）
+
+#### 指挥室（War Room Dashboard）
+
+**War Room Mode（全屏六格指挥视图）**：
+- `/war-room` 路由，全屏 6 面板可配置网格（P&L Ticker / Intelligence Feed / Portfolio Heatmap / Risk Gauges / Signal Pulse / Execution Queue）
+- 实时 P&L Ticker（5秒推送）：`total_pnl, pnl_change_1h, top_contributor, vs_spy_alpha`
+- 全局键盘快捷键：`W` 进入 War Room / `Esc` 退出 / 数字键 1-6 聚焦面板
+
+**Intelligence Feed（AI 情报流）**：
+- 聚合 Agent 决策摘要 / 告警 / 事件日历倒计时 / 因子异常 / Copilot 主动推送
+- 按 `urgency_score`（0-100）排序；WebSocket 实时推送新事件
+
+**Smart Alert Center（智能告警）**：
+- AI 分级（CRITICAL/HIGH/MEDIUM/LOW）+ 相似告警聚合（cosine similarity > 0.85 合并）
+- 三种处理状态：READ / IGNORED / ACTION_TAKEN，采纳行动触发 Copilot confirm 流程
+
+### 4.Z.3 V10.3.4 — 冷启动稳态 + 事件日历自动化 + PostMortem 升级
+
+- **冷启动占位视图**：Dashboard / MultiAgentPage / ExecutionMicroscopePage / CalibrationPage 在零数据时展示引导占位，而非空白/404 抖动
+- **PostMortem Page 升级**：从手工输入升级为交易选择驱动——选择历史交易 → 自动触发 LLM 事后剖析
+- **事件日历自动化**：`post_mortem_jobs.py` EventBus + Cron 自动化，修复日历 freshness 丢失问题，去重修复（排除重复展示）
+- **告警面板多账户兼容**：多账户 ID 归因兼容修复
+
+---
+
+## 4.AA V10.4 新增功能详述
+
+### 4.AA.1 V10.4.1 — 数据闭环治理 + Copilot 上下文服务
+
+**数据闭环治理（M1）**：
+- `ReturnBackfillJob`（每日 21:30 ET）：自动回填 `TradingSignal.actual_return`，已平仓信号回填率 ≥ 95%，触发 IC 增量重算
+- IC `data_quality` 字段全覆盖：`REAL / INSUFFICIENT / STALE`，移除 expected_return 代理收益
+- 因子敞口零快照：无持仓时写入 `positions_count=0` 快照，不跳过
+- `LLMCallGuard`（超时30s + 指数退避重试 + 降级返回 `degraded=true`）；`LlmCallLog` 表全量记录 model/latency/tokens/status
+
+**Copilot 上下文服务（M3）**：
+- `GET /api/v1/copilot/context` 返回当前系统快照（体制/持仓/信号/风控状态），供 Copilot 浮层注入上下文
+
+**自主循环稳定（M4）**：
+- `AutonomyHealthMonitorService`（10分钟8项自检）：信号漏斗工作状态、持仓同步、风控门禁可达性等
+- `JobWatchdog`（Job 超时2x触发补跑），防止调度任务静默失败
+
+### 4.AA.2 V10.4.2 — 信号精英化（五层漏斗 + 幽灵交易）
+
+**五层信号漏斗（SignalQualityFunnel）**：
+
+| 层 | 过滤规则 |
+|----|---------|
+| Layer 0 | 宇宙过滤：标的池白名单 + 黑名单检查 |
+| Layer 1 | 体制门控：当前 Regime 是否允许该策略信号 |
+| Layer 2 | 组合预检：MAX_CONCURRENT_POSITIONS / MAX_DAILY_SIGNALS 硬约束 |
+| Layer 3 | 多维共振：tech/fundamental 对立或 CRISIS 做多 → conviction 强制归零 |
+| Layer 4 | 置信度校准门：SignalConvictionScorer 输出 LOW/MEDIUM/HIGH/ELITE 质量标签 |
+
+**SignalConvictionScorer 评分公式**：
+```
+conviction = composite×0.4 + resonance_bonus×0.25 + regime_alignment×0.15 + historical_ic×0.1 + timing_quality×0.1
+```
+
+**幽灵交易（Ghost Trade）**：
+- Layer 3/4 拒绝的信号自动创建虚拟跟踪记录，每日价格更新
+- 计算幽灵胜率 vs 实际胜率对比，量化"拒绝的代价"
+- `ghost_trade_jobs.py` 每日收盘后更新幽灵 PnL；新增 DB 表：`signal_quality_audit_logs / ghost_trades`
+
+**ELITE 信号**：仅豁免 Layer 2 的 `MAX_DAILY_SIGNALS` 检查，不豁免仓位/相关性/RiskGate
+
+### 4.AA.3 V10.4.3 — 风险降低优先执行 + 系统监控增强
+
+**减仓/平仓快速通道**：
+- `RiskGateService.check(..., signal_intent=...)` 识别 `REDUCE/EXIT/STOP_LOSS_EXIT/FORCE_EXIT`，豁免日交易笔数 / VaR / 压力测试检查
+- `ALLOW_CLOSING_DURING_CIRCUIT_BREAKER=true`：熔断期间保留平仓通道
+- `AutonomousEngine` 三种执行路径：`STANDARD / FAST_CLOSE / FORCE_EXIT`；关闭类信号跳过 `SignalQualityFunnel`；`force_exit=true` 进一步跳过冷却与 Redis 锁
+- `SignalPositionFilter`：超持仓的 `REDUCE` 自动升级为 `EXIT`
+- `OrderExecutor`：`EXIT/REDUCE` 使用实际持仓数量，允许港股 odd-lot 退出
+
+**系统监控增强**：
+- `/system` 页新增三大视图：交易生命周期监测（17阶段 Plan/Position FSM）、主要数据流转状态、模块与细粒度服务状态
+- 新增 API：`/api/v1/system-monitor/lifecycle`、`/api/v1/system-monitor/data-flows`、`/api/v1/system-monitor/services`
+
+---
+
+## 4.AB V10.5.1 新增功能详述——机构级研究与交易操作台
+
+> 核心主题：从"功能完整"走向"机构级交易操作系统"——把现有 observability 资产重组为可解释、可审计、可晋级的研究与交易操作台。一级导航仍维持 4 组，信息架构坚持"决策级可视化而非页面膨胀"。
+
+### 4.AB.1 Alpha Truth Stack（/alpha-lab）
+
+**Strategy Scorecard 2.0**：
+- 每个策略展示四层收益口径：Gross Return / Net Return / After-Cost Return / After-Turnover Return
+- 分体制（BULL/BEAR/SIDEWAYS/VOLATILE）的收益分解
+- Shadow False-Reject 视图：可观测由信号漏斗误拒的潜在 alpha
+- IC 来源标注（`REAL / INSUFFICIENT / STALE`），Alpha 衰减曲线按 Regime / Capacity Bucket 分组
+
+### 4.AB.2 Portfolio Construction 2.0（/portfolio）
+
+**Portfolio Construction Console（升级版）**：
+- Risk Budget Tab：各标的风险预算使用率、预算剩余可用量
+- Marginal Contribution Tab：Alpha / Risk / Turnover / Liquidity 四维边际贡献矩阵
+- Liquidity Usage Tab：标的流动性评分、日均成交额与仓位规模匹配度
+
+### 4.AB.3 Execution Policy Engine（/execution-policy）
+
+- **Execution Policy Snapshot**：当前生效的执行策略参数快照（algo / timing / size / urgency）
+- **Pre-Trade Cost 估算**：每笔信号进入 Engine 前计算预估冲击成本
+- **Child-Order Timeline**：大单拆分后子订单执行进度时间轴
+- **Child-Order Replay**：历史执行路径重现与质量评估
+
+### 4.AB.4 Governance Pipeline（/governance/pipeline）
+
+- Discovery → Paper → Shadow Live → Challenger → Production 五阶段证据链
+- 每阶段设定 promotion blockers（最小历史交易笔数、最低胜率、VaR 合规）
+- Rollback Reason 记录，支持追溯策略退级原因
+- Experiment Ledger：记录每个策略的全生命周期实验历史
+
+### 4.AB.5 Live Safety & Model Degradation Guard
+
+- LLM 降级检测：`degraded=true` 累计超阈值时，自动降低自主度至 ADVISORY
+- 数据源切换告警：Tiger API 降级至 yfinance 时推送警告
+- 决策延迟监控：AI 决策耗时 P95 告警，防止超时 stale 决策执行
+
+---
+
+## 4.AC V10.5.2 新增功能详述——组合席位竞争引擎
+
+> 核心升级：持仓上限从刚性拒绝规则升级为动态席位分配机制。
+
+### 4.AC.1 Unified Candidate Pool & 准入评分
+
+- 当前持仓 + 新信号统一纳入候选池进行席位竞争
+- **统一准入评分公式**：
+  ```
+  admission_score = alpha_quality - replacement_friction - risk_penalty + regime_fit
+  ```
+- 满仓时按分数淘汰末位 N 个对象：持仓 → `EXIT/FORCE_EXIT`，信号 → `REJECTED_BY_CAPACITY_REPLACEMENT`
+
+### 4.AC.2 替换保护机制（防止过度翻仓）
+
+| 参数 | 说明 |
+|------|------|
+| `MIN_REPLACEMENT_EDGE_BPS` | 最小替换优势（基点），低于则不替换 |
+| `MAX_REPLACEMENTS_PER_CYCLE` | 每轮最多替换数量 |
+| `MIN_HOLD_MINUTES_BEFORE_REPLACEMENT` | 持仓最短持有时间门槛 |
+| `REPLACEMENT_COOLDOWN_MINUTES` | 同标的替换冷却期 |
+
+**Incumbent Decay Model**：持仓持续参与席位竞争，质量衰减由 `PositionScoringService` 动态评估
+
+### 4.AC.3 审计与治理
+
+- `capacity_decision_audit_log` 表：全量记录候选评分、淘汰原因、保护带触发结果
+- `CAPACITY_REPLACEMENT_DRY_RUN` 模式：先观测排名变化，不实际执行替换
+- Feature flags：`CAPACITY_REPLACEMENT_ENABLED / DRY_RUN / MAX_PER_CYCLE / MIN_EDGE`
+
+### 4.AC.4 前端可视化
+
+- `/portfolio` 新增席位竞争看板 Tab（候选排名列表、淘汰清单、评分拆解 tooltip）
+- `/autonomy` 新增 CapacityArbiter 状态卡（本轮候选数、触发次数、替换成功/拒绝计数、dry-run 徽章）
+- `/order-book` 新增 `REJECTED_BY_CAPACITY_REPLACEMENT` 拒绝原因详情抽屉
+- `/capacity-arbiter` 新路由：Preview 模拟面板 + Audit Log 历史 + Config 治理参数面板

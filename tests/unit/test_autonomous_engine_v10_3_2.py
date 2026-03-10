@@ -1,11 +1,17 @@
+import asyncio
+from math import isclose
+from types import SimpleNamespace
+from typing import Any, cast
+from unittest.mock import AsyncMock, patch
+
 import pytest
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import configure_mappers
 
-from app.services.autonomous_engine import AutonomousEngine
 from app.models.execution_intent import AutonomousExecutionIntent
-from app.models.trading_signal import TradingSignal  # noqa: F401
 from app.models.strategy import Strategy, StrategyRun  # noqa: F401
+from app.models.trading_signal import TradingSignal  # noqa: F401
+from app.services.autonomous_engine import AutonomousEngine
 
 configure_mappers()
 
@@ -13,7 +19,7 @@ configure_mappers()
 @pytest.mark.asyncio
 async def test_execution_intent_idempotency_key_unique_enforced():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", future=True)
-    Session = async_sessionmaker(engine, expire_on_commit=False)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
     async with engine.begin() as conn:
         await conn.run_sync(AutonomousExecutionIntent.__table__.create)
@@ -22,7 +28,7 @@ async def test_execution_intent_idempotency_key_unique_enforced():
     signal = {"id": 1, "signal_id": "sig-001", "symbol": "AAPL"}
     decision = {"symbol": "AAPL", "action": "BUY", "qty": 10}
 
-    async with Session() as session:
+    async with session_factory() as session:
         first = await ae._create_execution_intent(
             db=session,
             account_id="acc-1",
@@ -47,11 +53,19 @@ async def test_execution_intent_idempotency_key_unique_enforced():
 
 
 @pytest.mark.asyncio
-async def test_ai_decide_abs_shares_mode_fallback_uses_absolute_quantity(monkeypatch):
+async def test_ai_decide_abs_shares_mode_fallback_uses_absolute_quantity(
+    monkeypatch,
+):
     ae = AutonomousEngine()
 
     async def _fake_call_ai(*args, **kwargs):
-        return {"action": "HOLD", "symbol": "AAPL", "qty": 0, "reasoning": "mock hold"}
+        await asyncio.sleep(0)
+        return {
+            "action": "HOLD",
+            "symbol": "AAPL",
+            "qty": 0,
+            "reasoning": "mock hold",
+        }
 
     monkeypatch.setattr(ae, "_call_ai", _fake_call_ai)
 
@@ -69,7 +83,73 @@ async def test_ai_decide_abs_shares_mode_fallback_uses_absolute_quantity(monkeyp
         "AAPL": {"market_price": 100.0}
     }
 
-    decision = await ae._ai_decide(signal=signal, positions=positions, equity=100000.0)
+    decision = await ae._ai_decide(
+        signal=signal,
+        positions=positions,
+        equity=100000.0,
+    )
 
     assert decision["action"] == "BUY"
-    assert float(decision["qty"]) == 12.0
+    assert float(decision["qty"]) == pytest.approx(12.0)
+
+
+@pytest.mark.asyncio
+async def test_execute_order_uses_hard_control_payload(monkeypatch):
+    ae = AutonomousEngine()
+    captured: dict[str, Any] = {}
+
+    class _FakeOrderService:
+        def __init__(self, _session):
+            self._session = _session
+
+        async def submit_order(self, account_id: str, payload: dict):
+            await asyncio.sleep(0)
+            captured["account_id"] = account_id
+            captured["payload"] = payload
+            return SimpleNamespace(order_id="ord-hard-1")
+
+    monkeypatch.setattr(
+        "app.services.order_service.OrderService",
+        _FakeOrderService,
+    )
+    monkeypatch.setattr(
+        "app.core.market_hours.is_symbol_market_active",
+        lambda _symbol: True,
+    )
+
+    with patch(
+        (
+            "app.services.execution_policy_service.execution_policy_service."
+            "build_live_execution_controls_with_feedback"
+        ),
+        AsyncMock(return_value={
+            "control_state": {"enabled": True, "mode": "HARD_CONTROL"},
+            "policy": {
+                "urgency": "LOW",
+                "algo_type": "LIMIT",
+            },
+            "pretrade_cost": {"total_expected_cost_bps": 22.0},
+            "requested_algo": "MARKET",
+            "effective_algo": "LIMIT",
+            "broker_order_type": "LMT",
+            "limit_price": 123.45,
+            "budget_breached": True,
+        }),
+    ):
+        order_id = await ae._execute_order(
+            "acc-1",
+            {
+                "symbol": "AAPL",
+                "action": "BUY",
+                "qty": 10,
+                "algo": "MARKET",
+                "ref_price": 123.0,
+            },
+            cast(Any, SimpleNamespace()),
+        )
+
+    assert order_id == "ord-hard-1"
+    assert captured["account_id"] == "acc-1"
+    assert captured["payload"]["order_type"] == "LMT"
+    assert isclose(captured["payload"]["limit_price"], 123.45, rel_tol=1e-9)
+    assert captured["payload"]["execution_control_mode"] == "HARD_CONTROL"

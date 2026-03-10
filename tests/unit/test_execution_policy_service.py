@@ -1,10 +1,15 @@
 import asyncio
+from datetime import datetime
 from math import isclose
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import patch
 
 import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.models.execution_policy_profile import ExecutionPolicyProfile
 from app.services.execution_policy_service import ExecutionPolicyService
 
 
@@ -14,6 +19,17 @@ class _FakeScalarResult:
 
     def all(self):
         return self._items
+
+    def first(self):
+        return self._items[0] if self._items else None
+
+    def one_or_none(self):
+        return self.first()
+
+    def one(self):
+        if not self._items:
+            raise AssertionError("Expected one item but result was empty")
+        return self._items[0]
 
 
 class _FakeExecuteResult:
@@ -47,7 +63,11 @@ def test_derive_policy_snapshot_prefers_closing_market_path():
         total_is_bps=9.2,
     )
 
-    policy = ExecutionPolicyService._derive_policy_snapshot(intent, log)
+    derive_policy_snapshot = getattr(
+        ExecutionPolicyService,
+        "_derive_policy_snapshot",
+    )
+    policy = derive_policy_snapshot(intent, log)
 
     assert policy["urgency"] == "FORCED"
     assert policy["algo_type"] == "MARKET"
@@ -63,7 +83,11 @@ def test_derive_pretrade_cost_uses_logged_components_when_present():
         timing_cost_bps=1.7,
     )
 
-    pretrade = ExecutionPolicyService._derive_pretrade_cost(intent, log)
+    derive_pretrade_cost = getattr(
+        ExecutionPolicyService,
+        "_derive_pretrade_cost",
+    )
+    pretrade = derive_pretrade_cost(intent, log)
 
     assert isclose(pretrade["total_expected_cost_bps"], 12.4, rel_tol=1e-9)
     assert isclose(pretrade["market_impact_bps"], 5.4, rel_tol=1e-9)
@@ -74,11 +98,237 @@ def test_build_exceptions_flags_slippage_breach_and_fill_rate():
     log = SimpleNamespace(total_is_bps=26.0, fill_rate=0.52)
     policy = {"slippage_budget_bps": 18.0}
 
-    exceptions = ExecutionPolicyService._build_exceptions(intent, log, policy)
+    build_exceptions = getattr(ExecutionPolicyService, "_build_exceptions")
+    exceptions = build_exceptions(intent, log, policy)
 
     kinds = {item["type"] for item in exceptions}
     assert "SLIPPAGE_BUDGET_BREACH" in kinds
     assert "LOW_FILL_RATE" in kinds
+
+
+def test_hard_control_state_reflects_feature_flag():
+    with patch(
+        (
+            "app.services.execution_policy_service.settings."
+            "EXECUTION_POLICY_HARD_CONTROL_ENABLED"
+        ),
+        True,
+    ):
+        hard_control_state = getattr(
+            ExecutionPolicyService,
+            "_hard_control_state",
+        )
+        state = hard_control_state()
+
+    assert state["enabled"] is True
+    assert state["mode"] == "HARD_CONTROL"
+
+
+def test_build_live_execution_controls_keeps_requested_algo_when_disabled():
+    with patch(
+        (
+            "app.services.execution_policy_service.settings."
+            "EXECUTION_POLICY_HARD_CONTROL_ENABLED"
+        ),
+        False,
+    ):
+        controls = ExecutionPolicyService.build_live_execution_controls(
+            {
+                "action": "BUY",
+                "qty": 80,
+                "algo": "VWAP",
+                "ref_price": 100.0,
+            }
+        )
+
+    assert controls["requested_algo"] == "VWAP"
+    assert controls["effective_algo"] == "VWAP"
+    assert controls["broker_order_type"] == "VWAP"
+
+
+def test_build_live_execution_controls_enforces_limit_on_budget_breach():
+    with patch(
+        (
+            "app.services.execution_policy_service.settings."
+            "EXECUTION_POLICY_HARD_CONTROL_ENABLED"
+        ),
+        True,
+    ):
+        controls = ExecutionPolicyService.build_live_execution_controls(
+            {
+                "action": "BUY",
+                "qty": 600,
+                "algo": "MARKET",
+                "ref_price": 100.0,
+            }
+        )
+
+    assert controls["control_state"]["mode"] == "HARD_CONTROL"
+    assert controls["budget_breached"] is True
+    assert controls["effective_algo"] == "LIMIT"
+    assert controls["broker_order_type"] == "LMT"
+    assert isclose(controls["limit_price"], 100.025, rel_tol=1e-9)
+
+
+@pytest.mark.asyncio
+async def test_feedback_applies_defensive_bias():
+    service = ExecutionPolicyService()
+    db = _FakeSession(
+        [
+            [
+                SimpleNamespace(
+                    total_is_bps=22.0,
+                    fill_rate=0.68,
+                    quality_score=61.0,
+                    created_at=None,
+                ),
+                SimpleNamespace(
+                    total_is_bps=19.0,
+                    fill_rate=0.74,
+                    quality_score=66.0,
+                    created_at=None,
+                ),
+                SimpleNamespace(
+                    total_is_bps=18.0,
+                    fill_rate=0.79,
+                    quality_score=69.0,
+                    created_at=None,
+                ),
+            ],
+            [],  # _safe_load_profile returns no persistent profile
+        ]
+    )
+
+    with patch(
+        (
+            "app.services.execution_policy_service.settings."
+            "EXECUTION_POLICY_HARD_CONTROL_ENABLED"
+        ),
+        True,
+    ):
+        controls = await service.build_live_execution_controls_with_feedback(
+            cast(Any, db),
+            "acc-1",
+            {
+                "symbol": "AAPL",
+                "action": "BUY",
+                "qty": 80,
+                "algo": "MARKET",
+                "ref_price": 100.0,
+            },
+        )
+
+    assert controls["feedback_profile"]["sample_size"] == 3
+    assert controls["feedback_profile"]["feedback_bias"] == "DEFENSIVE"
+    assert controls["effective_algo"] == "LIMIT"
+    assert controls["policy"]["feedback_bias"] == "DEFENSIVE"
+    assert controls["policy"]["max_participation_rate"] < 0.4
+
+
+@pytest.mark.asyncio
+async def test_update_persistent_feedback_profile_tracks_running_averages():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", future=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(ExecutionPolicyProfile.__table__.create)
+
+    service = ExecutionPolicyService()
+    intent = SimpleNamespace(action="BUY", qty=120, reason=None, symbol="AAPL")
+
+    async with session_factory() as session:
+        await service.update_persistent_feedback_profile_from_execution(
+            session,
+            account_id="acc-1",
+            symbol="AAPL",
+            intent=intent,
+            log=SimpleNamespace(
+                total_is_bps=20.0,
+                fill_rate=0.7,
+                quality_score=60.0,
+                algo_type="LIMIT",
+                created_at=datetime(2026, 3, 10, 10, 0, 0),
+            ),
+        )
+        await service.update_persistent_feedback_profile_from_execution(
+            session,
+            account_id="acc-1",
+            symbol="AAPL",
+            intent=intent,
+            log=SimpleNamespace(
+                total_is_bps=10.0,
+                fill_rate=0.9,
+                quality_score=80.0,
+                algo_type="LIMIT",
+                created_at=datetime(2026, 3, 10, 11, 0, 0),
+            ),
+        )
+        profile = (
+            await session.execute(select(ExecutionPolicyProfile))
+        ).scalars().one()
+
+    await engine.dispose()
+
+    assert profile.sample_size == 2
+    assert profile.avg_total_is_bps == pytest.approx(15.0)
+    assert profile.avg_fill_rate == pytest.approx(0.8)
+    assert profile.avg_quality_score == pytest.approx(70.0)
+    assert profile.last_total_is_bps == pytest.approx(10.0)
+
+
+@pytest.mark.asyncio
+async def test_feedback_uses_persistent_profile_when_logs_missing():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", future=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(ExecutionPolicyProfile.__table__.create)
+
+    service = ExecutionPolicyService()
+    intent = SimpleNamespace(action="BUY", qty=180, reason=None, symbol="AAPL")
+
+    with patch(
+        (
+            "app.services.execution_policy_service.settings."
+            "EXECUTION_POLICY_HARD_CONTROL_ENABLED"
+        ),
+        True,
+    ):
+        async with session_factory() as session:
+            await service.update_persistent_feedback_profile_from_execution(
+                session,
+                account_id="acc-1",
+                symbol="AAPL",
+                intent=intent,
+                log=SimpleNamespace(
+                    total_is_bps=21.0,
+                    fill_rate=0.72,
+                    quality_score=63.0,
+                    algo_type="LIMIT",
+                    created_at=datetime(2026, 3, 10, 12, 0, 0),
+                ),
+            )
+            controls = await (
+                service.build_live_execution_controls_with_feedback(
+                    session,
+                    "acc-1",
+                    {
+                        "symbol": "AAPL",
+                        "action": "BUY",
+                        "qty": 180,
+                        "algo": "MARKET",
+                        "ref_price": 100.0,
+                    },
+                )
+            )
+
+    await engine.dispose()
+
+    assert controls["feedback_profile"]["source"] == "persistent_profile"
+    assert controls["feedback_profile"]["feedback_bias"] == "DEFENSIVE"
+    assert controls["persistent_profile"] is not None
+    assert controls["persistent_profile"]["sample_size"] == 1
+    assert controls["effective_algo"] == "LIMIT"
 
 
 @pytest.mark.asyncio
@@ -100,6 +350,26 @@ async def test_get_policy_overview_includes_broker_order_id():
                 )
             ],
             [],
+            [
+                SimpleNamespace(
+                    id=91,
+                    account_id="acc-1",
+                    symbol="AAPL",
+                    side="BUY",
+                    urgency_bucket="LOW",
+                    algo_type="LIMIT",
+                    sample_size=4,
+                    avg_total_is_bps=11.2,
+                    avg_fill_rate=0.91,
+                    avg_quality_score=82.0,
+                    feedback_bias="NEUTRAL",
+                    recommended_algo=None,
+                    limit_offset_bps=2.5,
+                    participation_rate_multiplier=1.0,
+                    pressure_high=False,
+                    last_feedback_at=None,
+                )
+            ],
         ]
     )
 
@@ -111,7 +381,13 @@ async def test_get_policy_overview_includes_broker_order_id():
     )
 
     assert overview["policies"][0]["order_id"] == "broker-007"
+    assert overview["policies"][0]["persistent_profile"] is not None
     assert overview["lookup"]["match_mode"] == "order_id"
+    assert overview["summary"]["persistent_profile_matches"] == 1
+    assert overview["control_state"]["mode"] in {
+        "OBSERVE_ONLY",
+        "HARD_CONTROL",
+    }
 
 
 @pytest.mark.asyncio
@@ -134,6 +410,7 @@ async def test_get_policy_overview_falls_back_when_order_id_misses():
                 )
             ],
             [],
+            [],
         ]
     )
 
@@ -149,3 +426,67 @@ async def test_get_policy_overview_falls_back_when_order_id_misses():
     assert overview["policies"][0]["intent_key"] == "intent-008"
     assert overview["lookup"]["requested_order_id"] == "missing-order"
     assert overview["lookup"]["match_mode"] == "fallback_filters"
+
+
+@pytest.mark.asyncio
+async def test_get_policy_detail_exposes_persistent_profile():
+    service = ExecutionPolicyService()
+    db = _FakeSession(
+        [
+            [
+                SimpleNamespace(
+                    id=11,
+                    intent_id="intent-011",
+                    idempotency_key="idem-011",
+                    symbol="AAPL",
+                    action="BUY",
+                    status="SUCCESS",
+                    qty=180,
+                    order_id="broker-011",
+                    reason="unit test",
+                    created_at=datetime(2026, 3, 10, 12, 0, 0),
+                    updated_at=datetime(2026, 3, 10, 12, 5, 0),
+                )
+            ],
+            [],
+            [
+                SimpleNamespace(
+                    id=101,
+                    account_id="acc-1",
+                    symbol="AAPL",
+                    side="BUY",
+                    urgency_bucket="LOW",
+                    algo_type="LIMIT",
+                    sample_size=3,
+                    avg_total_is_bps=18.0,
+                    avg_fill_rate=0.74,
+                    avg_quality_score=65.0,
+                    feedback_bias="DEFENSIVE",
+                    recommended_algo="LIMIT",
+                    limit_offset_bps=3.5,
+                    participation_rate_multiplier=0.75,
+                    pressure_high=True,
+                    last_feedback_at=datetime(2026, 3, 10, 11, 55, 0),
+                )
+            ],
+        ]
+    )
+
+    with patch(
+        (
+            "app.services.execution_policy_service.settings."
+            "EXECUTION_POLICY_HARD_CONTROL_ENABLED"
+        ),
+        True,
+    ):
+        detail = await service.get_policy_detail(
+            cast(Any, db),
+            "acc-1",
+            11,
+        )
+
+    assert detail is not None
+    assert detail["persistent_profile"] is not None
+    assert detail["persistent_profile"]["feedback_bias"] == "DEFENSIVE"
+    assert detail["feedback_profile"]["source"] == "persistent_profile"
+    assert detail["feedback_profile"]["recommended_algo"] == "LIMIT"

@@ -81,6 +81,15 @@
 - **M5 Research-to-Live Governance**：shadow live、策略晋级流水线、实验总账、上线/回滚证据链，确保策略和参数变更能被审计、验证、回溯
 - **前端重点**：围绕 Alpha Lab、Portfolio Construction Console、Execution Policy Console、Promotion Pipeline Board 做决策级可视化，而非继续横向扩页
 - **★ V10.5.1 补丁（已交付）**：事后决策剖析自动化（`post_mortem_jobs.py` EventBus + Cron) + 事件日历 freshness 修复 + `confirmed=False` 体制修复
+### Phase 14.5: 组合席位竞争引擎 ✅ V10.5.2 已发布
+> 详细规划见：[docs/archived/v10/v10.5/RELEASE_PLAN_V10.5.2.md](../archived/v10/v10.5/RELEASE_PLAN_V10.5.2.md)
+
+- **M1 Capacity-Aware Admission & Replacement Engine**：统一候选池（当前持仓 + 新信号）+ 统一准入评分 \dmission_score\，满仓时淘汰末位对象（持仓到EXIT、信号到REJECTED_BY_CAPACITY_REPLACEMENT）
+- **M2 Position Decay & Incumbent Quality Governance**：Incumbent Decay Model 让持仓持续参与席位竞争，加入 Replacement Friction Penalty 防止频繁翻仓
+- **M3 Capacity Simulation & What-If Console**：执行前输出替换预览、替换归因报表与 Shadow Replacement Book
+- **M4 Execution Coordination for Seat Rotation**：Rotation Orchestrator 原子化席位替换编排，确保先释放风险预算再开新仓
+- **M5 Observability & Governance**：\capacity_decision_audit_log\ 全量审计 + \CAPACITY_REPLACEMENT_DRY_RUN\ 治理开关
+- **前端重点**：\/portfolio\、\/autonomy\、\/order-book\ 增加席位竞争结果、保护带说明与替换归因可视化
 
 ### Phase 15: Profit Engine Upgrade 🚀 V10.5.3 当前规划
 > 详细规划见：[docs/archived/v10/v10.5/RELEASE_PLAN_V10.5.3.md](../archived/v10/v10.5/RELEASE_PLAN_V10.5.3.md)
@@ -90,7 +99,7 @@
 - **M3 Execution Policy Closed Loop**：把 Pre-Trade Cost、slippage budget、urgency、participation rate 接入执行前决策，并让执行反馈回写 execution policy profile
 - **M4 Research-to-Live Governance Hard Gate**：统一 `Discovery / Paper / Shadow Live / Challenger / Production` 五阶段晋级管线，以 evidence chain 驱动 promotion / rollback，而不是只看 paper 胜率
 - **前端重点**：强化 `/alpha-lab`、`/portfolio`、`/execution-policy`、`/governance/pipeline` 四个决策工作台，继续坚持“决策级可视化而非页面膨胀”
-- **与 V10.5.2 的关系**：V10.5.2 的席位竞争与容量替换逻辑作为 V10.5.3 的 M2 子模块吸收，不再作为单独主版本推进
+- **与 V10.5.2 的关系**：V10.5.2 已作为独立版本正式发布，其席位竞争引擎（`CapacityArbiter` 基础版）已落地；V10.5.3 M2 将在此基础上升级为以 `SeatValue` 为核心的完整仲裁机制
 
 ### Phase 16: V11 计划 🔜
 - 期权执行开启（`STOCK,ETF,OPTION` 全模式）

@@ -122,6 +122,7 @@ async def ensure_mysql_tables() -> None:
     import app.models.equity_snapshot  # noqa: F401
     import app.models.etf_watchlist  # V10.1: ETF自选池
     import app.models.execution_intent  # V10.3.2: 执行幂等意图
+    import app.models.execution_policy_profile  # V10.5.3: 执行反馈画像
     import app.models.execution_slice  # V10.4.4: 执行切片
     import app.models.fsm_transition_log  # V10.3: FSM事件日志
     import app.models.market_universe_symbol  # 机会扫描本地全量股票池

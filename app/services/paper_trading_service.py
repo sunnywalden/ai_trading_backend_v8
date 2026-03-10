@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.engine.backtest.runner import backtest_runner
 from app.models.paper_account import PaperAccount
+from app.services.v1051_research_service import v1051_research_service
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +189,7 @@ class PaperTradingService:
         start = end - timedelta(days=30)
 
         try:
+            await self.get_or_create_account(account_id, db)
             result = await backtest_runner.run(
                 strategy_name=strategy_name,
                 symbols=symbols,
@@ -196,19 +198,72 @@ class PaperTradingService:
                 initial_capital=settings.PAPER_INITIAL_CAPITAL,
             )
             eligible = result.get("graduation_eligible", False)
+            governance_gate = self._build_governance_gate(result)
+            if settings.GOVERNANCE_HARD_GATE_ENABLED:
+                eligible = eligible and governance_gate["eligible"]
+
             return {
                 "eligible": eligible,
                 "strategy": strategy_name,
                 "metrics": result,
+                "governance_gate": governance_gate,
                 "criteria": {
                     "sharpe_required": 1.0,
                     "max_drawdown_limit": 0.20,
                     "win_rate_required": 0.50,
                 },
-                "message": "满足毕业条件，建议升级至实盘" if eligible else "暂未满足毕业条件，继续验证",
+                "message": (
+                    "满足毕业条件，建议升级至实盘"
+                    if eligible
+                    else "暂未满足毕业条件，继续验证"
+                ),
             }
         except Exception as e:
             return {"eligible": False, "error": str(e)}
+
+    @staticmethod
+    def _build_governance_gate(result: dict) -> dict:
+        sample_size = int(result.get("total_trades", 0) or 0)
+        hit_rate = float(result.get("win_rate", 0.0) or 0.0)
+        status = "SUCCESS" if result.get("graduation_eligible") else "FAILED"
+        avg_signal_strength = float(result.get("sharpe", 0.0) or 0.0)
+
+        compute_stage = getattr(
+            v1051_research_service,
+            "_compute_governance_stage",
+        )
+        build_evidence = getattr(
+            v1051_research_service,
+            "_build_governance_evidence",
+        )
+        build_blockers = getattr(
+            v1051_research_service,
+            "_build_governance_blockers",
+        )
+        build_rollback = getattr(
+            v1051_research_service,
+            "_build_rollback_suggestion",
+        )
+
+        stage = compute_stage(False, status, hit_rate, sample_size)
+        evidence_chain = build_evidence(
+            active=False,
+            last_status=status,
+            sample_size=sample_size,
+            hit_rate=hit_rate,
+            avg_signal_strength=avg_signal_strength,
+        )
+        blockers = build_blockers(evidence_chain, hit_rate, status)
+        eligible = stage in {"CHALLENGER", "PRODUCTION"} and not blockers
+
+        return {
+            "gate_applied": bool(settings.GOVERNANCE_HARD_GATE_ENABLED),
+            "stage": stage,
+            "eligible": eligible,
+            "evidence_chain": evidence_chain,
+            "promotion_blockers": blockers,
+            "rollback_suggestion": build_rollback(stage, blockers),
+        }
 
     async def reset(self, account_id: str, db: AsyncSession) -> dict:
         """重置模拟账户"""

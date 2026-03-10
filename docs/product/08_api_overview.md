@@ -159,6 +159,66 @@ GET  /api/v1/system-monitor/services/{service_name}    — 单服务健康详情
 
 ---
 
+### 8.14 信号质量漏斗与幽灵交易（V10.4.2 新增）
+```
+GET  /api/v1/signals/quality-config               — 查看信号质量参数（含运行时覆盖值）
+PATCH /api/v1/signals/quality-config              — 热更新质量参数（无需重启）
+GET  /api/v1/signals/audit-log                    — 信号质量漏斗全量决策日志（分层结果 + conviction 评分）
+GET  /api/v1/signals/funnel-stats                 — 漏斗各层统计（通过率 / 拒绝原因分布 / ELITE 占比）
+GET  /api/v1/signals/ghost-trades                 — 幽灵交易列表（Layer 3/4 拒绝信号的虚拟跟踪）
+GET  /api/v1/signals/ghost-trades/analysis        — 幽灵胜率 vs 实际胜率对比（量化"拒绝成本"）
+```
+
+### 8.15 Alpha Truth Stack（V10.5.1 M1）
+```
+GET  /api/v1/alpha-lab/strategies                 — 全策略 Scorecard 2.0（四层口径 + 分体制收益分解）
+GET  /api/v1/alpha-lab/strategies/{id}/ic         — 单策略 IC 曲线（近5/20/60日，按 Regime/Capacity Bucket）
+GET  /api/v1/alpha-lab/shadow-rejects             — Shadow False-Reject 列表（被漏斗误拒的潜在 alpha）
+GET  /api/v1/alpha-lab/signal-decay               — Alpha 衰减曲线（半衰期趋势）
+```
+
+### 8.16 Portfolio Construction 2.0（V10.5.1 M2）
+```
+GET  /api/v1/portfolio/construction/risk-budget   — 各标的风险预算使用率与剩余容量
+GET  /api/v1/portfolio/construction/marginal      — Alpha/Risk/Turnover/Liquidity 四维边际贡献矩阵
+GET  /api/v1/portfolio/construction/liquidity     — 标的流动性评分与日均成交额匹配度
+```
+
+### 8.17 Execution Policy Engine（V10.5.1 M3）
+```
+GET  /api/v1/execution-policy/snapshot            — 当前生效的执行策略参数快照
+GET  /api/v1/execution-policy/pre-trade-cost/{signal_id} — 单笔信号预估冲击成本
+GET  /api/v1/execution-policy/child-orders        — 子订单执行进度列表（大单拆分）
+GET  /api/v1/execution-policy/child-orders/{id}/replay — 单次执行路径重现与质量评估
+```
+
+### 8.18 Research-to-Live Governance（V10.5.1 M4）
+```
+GET  /api/v1/governance/pipeline                  — 策略晋级流水线状态（五阶段证据链）
+GET  /api/v1/governance/pipeline/{strategy_id}    — 单策略完整证据链（含 promotion blockers / rollback reasons）
+GET  /api/v1/governance/experiments               — Experiment Ledger（策略全生命周期实验历史）
+POST /api/v1/governance/experiments/{id}/promote  — 手动触发策略晋级（需通过 blocker 检查）
+```
+
+### 8.19 Live Safety & Model Degradation（V10.5.1 M5）
+```
+GET  /api/v1/live-safety/status                   — 实盘安全状态（LLM 降级状态 / 数据源健康 / 决策延迟 P95）
+GET  /api/v1/live-safety/degradation-events       — 模型降级事件历史（含触发条件与恢复时间）
+POST /api/v1/live-safety/acknowledge/{event_id}   — 确认已处理降级告警
+```
+
+### 8.20 席位竞争仲裁（V10.5.2 新增）
+```
+GET  /api/v1/capacity/config                      — 查看当前容量仲裁参数（含运行时覆盖值）
+PATCH /api/v1/capacity/config                     — 热更新仲裁参数（重启后恢复默认）
+POST /api/v1/capacity/preview                     — Dry-run 仲裁预演（返回候选排序与淘汰清单，不实际执行）
+GET  /api/v1/capacity/logs                        — 仲裁决策日志列表（支持 dry_run / 时间范围 / 触发来源过滤）
+GET  /api/v1/capacity/logs/{log_id}               — 单条仲裁日志详情（含候选评分明细）
+GET  /api/v1/capacity/stats                       — 仲裁指标摘要（触发次数、替换成功率、保护带命中率）
+```
+
+---
+
 ## 附录
 
 ### A. 术语表
@@ -205,7 +265,7 @@ GET  /api/v1/system-monitor/services/{service_name}    — 单服务健康详情
 
 ### B. 参考文档
 
-- API.md - 接口文档（V10.3 已含所有端点）
-- BACKEND_DESIGN.md - 后端架构设计（V10.3）
-- FRONTEND_DESIGN.md - 前端 UI/UX 设计（V10.3.4）
-- docs/RELEASE_NOTES_V10.3.md - V10.3 完整发布说明
+- API.md - 接口文档（V10.5.2 已含所有端点，含 capacity-arbiter）
+- BACKEND_DESIGN.md - 后端架构设计（V10.5.2）
+- FRONTEND_DESIGN.md - 前端 UI/UX 设计（V10.5.2）
+- docs/archived/v10/v10.5/RELEASE_PLAN_V10.5.2.md - V10.5.2 完整发布说明

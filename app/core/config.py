@@ -268,6 +268,13 @@ class Settings(BaseSettings):
     MACRO_CAUTIOUS_CASH_BUFFER_MIN: float = 0.10
     MACRO_CAUTIOUS_CASH_BUFFER_MAX: float = 0.20
 
+    # ==================== V10.5.3: Profit Engine Upgrade
+    # Feature Flags ====================
+    ALPHA_TRUTH_V2_ENABLED: bool = True
+    SEAT_VALUE_ARBITER_ENABLED: bool = False
+    EXECUTION_POLICY_HARD_CONTROL_ENABLED: bool = False
+    GOVERNANCE_HARD_GATE_ENABLED: bool = False
+
     model_config = SettingsConfigDict(
         env_file=str(ENV_FILE) if ENV_FILE else ".env",
         env_file_encoding="utf-8",
@@ -275,7 +282,11 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    @field_validator("STRATEGY_EXECUTE_USERS", "STRATEGY_MANAGE_USERS", mode="before")
+    @field_validator(
+        "STRATEGY_EXECUTE_USERS",
+        "STRATEGY_MANAGE_USERS",
+        mode="before",
+    )
     @classmethod
     def _parse_user_list(cls, v: Any) -> list[str]:
         if isinstance(v, str):
@@ -296,7 +307,9 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _validate_auth_settings(self) -> "Settings":
         if self.AUTH_ENABLED and not (self.ADMIN_PASSWORD or "").strip():
-            raise ValueError("ADMIN_PASSWORD must be set when AUTH_ENABLED=true")
+            raise ValueError(
+                "ADMIN_PASSWORD must be set when AUTH_ENABLED=true"
+            )
         return self
 
 

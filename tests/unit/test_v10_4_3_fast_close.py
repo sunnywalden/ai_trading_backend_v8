@@ -1,18 +1,19 @@
-import pytest
+import asyncio
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
+
+import pytest
 
 from app.engine.order_executor import OrderExecutor
 from app.engine.signal_position_filter import Position, SignalPositionFilter
 from app.models.trading_signal import SignalType
 from app.services.autonomous_engine import AutonomousEngine
 from app.services.risk_gate_service import RiskGateService
-from app.services.signal_quality_funnel import (
-    SignalFunnelInput,
-    SignalQualityFunnel,
-    SignalQualityProfile,
-    SignalQualityTier,
-)
+from app.services.signal_quality_funnel import (SignalFunnelInput,
+                                                SignalQualityFunnel,
+                                                SignalQualityProfile,
+                                                SignalQualityTier)
 
 
 @pytest.mark.asyncio
@@ -212,10 +213,12 @@ async def test_order_executor_uses_actual_position_for_exit_and_flips_direction(
     executor = object.__new__(OrderExecutor)
 
     class _MarketProvider:
-        async def get_current_price(self, symbol: str) -> float:
+        async def get_current_price(self, _symbol: str) -> float:
+            await asyncio.sleep(0)
             return 100.0
 
-        async def get_lot_size(self, symbol: str) -> int:
+        async def get_lot_size(self, _symbol: str) -> int:
+            await asyncio.sleep(0)
             return 100
 
     executor.market_provider = cast(Any, _MarketProvider())
@@ -237,7 +240,47 @@ async def test_order_executor_uses_actual_position_for_exit_and_flips_direction(
         },
     )
 
-    params = await OrderExecutor._calculate_order_params(executor, cast(Any, signal), 100000)
+    params = await OrderExecutor._calculate_order_params(
+        executor,
+        cast(Any, signal),
+        100000,
+    )
 
     assert params["quantity"] == 137
     assert params["direction"] == "SHORT"
+
+
+def test_order_executor_builds_execution_feedback_payload_for_exit_signal():
+    signal = SimpleNamespace(
+        account_id="acc-1",
+        symbol="AAPL",
+        direction="LONG",
+        signal_type=SignalType.EXIT,
+        suggested_price=100.0,
+        suggested_quantity=50.0,
+        executed_price=99.5,
+        executed_quantity=50.0,
+        created_at=datetime.now() - timedelta(seconds=2),
+    )
+    intent = SimpleNamespace(
+        id=7,
+        created_at=datetime.now() - timedelta(seconds=3),
+    )
+    resp = {
+        "avg_fill_price": 99.4,
+        "filled_quantity": 50.0,
+        "order_type": "LIMIT",
+    }
+
+    payload = OrderExecutor._build_execution_feedback_payload(
+        cast(Any, signal),
+        intent,
+        resp,
+    )
+
+    assert payload["intent_id"] == 7
+    assert payload["direction"] == "SELL"
+    assert payload["arrival_price"] == pytest.approx(100.0)
+    assert payload["fill_price"] == pytest.approx(99.4)
+    assert payload["algo_type"] == "LIMIT"
+    assert payload["time_to_fill_ms"] > 0

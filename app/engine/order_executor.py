@@ -12,22 +12,21 @@
 import asyncio
 import logging
 from datetime import datetime
-from typing import List, Optional, Dict, Any
-from uuid import uuid4
 from decimal import Decimal
+from typing import Any, Dict, List, Optional
+from uuid import uuid4
 
-from sqlalchemy import select, and_
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.trading_signal import TradingSignal, SignalStatus, SignalType
-from app.models.execution_slice import ExecutionSlice, SliceStatus
 from app.broker.factory import make_option_broker_client
+from app.core.config import settings
+from app.core.trade_mode import TradeMode
+from app.models.execution_slice import ExecutionSlice, SliceStatus
+from app.models.trading_signal import SignalStatus, SignalType, TradingSignal
+from app.providers.market_data_provider import MarketDataProvider
 from app.services.account_service import AccountService
 from app.services.risk_event_logger import log_risk_event
-from app.providers.market_data_provider import MarketDataProvider
-from app.core.trade_mode import TradeMode
-from app.core.config import settings
-
 
 logger = logging.getLogger(__name__)
 
@@ -407,6 +406,124 @@ class OrderExecutor:
             )
         except Exception as e:
             print(f"[OrderExecutor] Failed to create journal entry: {e}")
+
+    @staticmethod
+    def _resolve_execution_side(signal: TradingSignal) -> str:
+        direction = str(signal.direction or "LONG").upper()
+        if signal.signal_type in {SignalType.EXIT, SignalType.REDUCE}:
+            return "SELL" if direction == "LONG" else "BUY"
+        return "BUY" if direction in {"LONG", "BUY"} else "SELL"
+
+    @staticmethod
+    def _estimate_time_to_fill_ms(
+        signal: TradingSignal,
+        intent: Any | None,
+    ) -> int:
+        reference_time = getattr(intent, "created_at", None) or getattr(
+            signal,
+            "created_at",
+            None,
+        )
+        if not isinstance(reference_time, datetime):
+            return 1000
+        if reference_time.tzinfo is not None:
+            now = datetime.now(reference_time.tzinfo)
+        else:
+            now = datetime.now()
+        delta = max((now - reference_time).total_seconds(), 0.0)
+        return max(int(delta * 1000), 1)
+
+    @classmethod
+    def _build_execution_feedback_payload(
+        cls,
+        signal: TradingSignal,
+        intent: Any | None,
+        resp: dict[str, Any],
+    ) -> dict[str, Any]:
+        filled_quantity = float(
+            resp.get("filled_quantity")
+            or signal.executed_quantity
+            or signal.suggested_quantity
+            or 0.0
+        )
+        ordered_quantity = float(
+            signal.suggested_quantity
+            or filled_quantity
+            or getattr(intent, "qty", 0.0)
+            or 0.0
+        )
+        arrival_price = float(
+            signal.suggested_price
+            or signal.executed_price
+            or resp.get("avg_fill_price")
+            or 0.0
+        )
+        fill_price = float(
+            resp.get("avg_fill_price")
+            or signal.executed_price
+            or arrival_price
+            or 0.0
+        )
+        reference_price = arrival_price or fill_price or 100.0
+        return {
+            "intent_id": int(getattr(intent, "id", 0) or 0),
+            "account_id": signal.account_id,
+            "symbol": signal.symbol,
+            "direction": cls._resolve_execution_side(signal),
+            "arrival_price": reference_price,
+            "fill_price": fill_price or reference_price,
+            "mid_at_order": reference_price,
+            "vwap": reference_price,
+            "quantity_ordered": ordered_quantity or filled_quantity,
+            "quantity_filled": filled_quantity or ordered_quantity,
+            "time_to_fill_ms": cls._estimate_time_to_fill_ms(signal, intent),
+            "algo_type": str(resp.get("order_type") or "MARKET").upper(),
+        }
+
+    async def _record_execution_feedback(
+        self,
+        signal: TradingSignal,
+        intent: Any | None,
+        resp: dict[str, Any],
+    ) -> None:
+        if intent is None or getattr(intent, "id", None) is None:
+            return
+        from app.models.execution_quality_log import ExecutionQualityLog
+        from app.services.execution_microscope_service import \
+            execution_microscope_service
+
+        existing_stmt = select(ExecutionQualityLog.id).where(
+            ExecutionQualityLog.intent_id == int(intent.id)
+        ).limit(1)
+        existing = (
+            await self.session.execute(existing_stmt)
+        ).scalars().first()
+        if existing is not None:
+            return
+
+        payload = self._build_execution_feedback_payload(signal, intent, resp)
+        if payload["intent_id"] <= 0 or payload["quantity_filled"] <= 0:
+            return
+
+        execution_log = await (
+            execution_microscope_service.record_execution_quality(
+                self.session,
+                **payload,
+            )
+        )
+        from app.services.execution_policy_service import \
+            execution_policy_service
+
+        await (
+            execution_policy_service
+            .update_persistent_feedback_profile_from_execution(
+                self.session,
+                account_id=signal.account_id,
+                symbol=signal.symbol,
+                intent=intent,
+                log=execution_log,
+            )
+        )
     
     async def monitor_order_status(
         self,
@@ -422,12 +539,16 @@ class OrderExecutor:
         # 1. 从券商获取最新状态
         print(f"[OrderExecutor] Checking status for order {order_id}")
         resp = await self.broker.get_order_status(account_id, order_id)
-        status = resp.get("status")  # FILLED, CANCELLED, REJECTED, PENDING, EXECUTING
+        status = resp.get("status")
+        intent = None
         
         # 2. 更新关联的信号状态
         from app.models.execution_intent import AutonomousExecutionIntent
+
         # 精确匹配 order_id (string)
-        stmt = select(TradingSignal).where(TradingSignal.order_id == str(order_id))
+        stmt = select(TradingSignal).where(
+            TradingSignal.order_id == str(order_id)
+        )
         result = await self.session.execute(stmt)
         signal = result.scalars().first()
 
@@ -435,7 +556,10 @@ class OrderExecutor:
             intent_stmt = (
                 select(AutonomousExecutionIntent)
                 .where(AutonomousExecutionIntent.order_id == str(order_id))
-                .order_by(AutonomousExecutionIntent.updated_at.desc(), AutonomousExecutionIntent.id.desc())
+                .order_by(
+                    AutonomousExecutionIntent.updated_at.desc(),
+                    AutonomousExecutionIntent.id.desc(),
+                )
             )
             intent_result = await self.session.execute(intent_stmt)
             intent = intent_result.scalars().first()
@@ -443,22 +567,38 @@ class OrderExecutor:
             if intent is not None:
                 if intent.signal_db_id is not None:
                     signal_by_dbid = await self.session.execute(
-                        select(TradingSignal).where(TradingSignal.id == intent.signal_db_id)
+                        select(TradingSignal).where(
+                            TradingSignal.id == intent.signal_db_id
+                        )
                     )
                     signal = signal_by_dbid.scalars().first()
 
                 if signal is None and intent.signal_id:
                     signal_by_sid = await self.session.execute(
-                        select(TradingSignal).where(TradingSignal.signal_id == str(intent.signal_id))
+                        select(TradingSignal).where(
+                            TradingSignal.signal_id == str(intent.signal_id)
+                        )
                     )
                     signal = signal_by_sid.scalars().first()
+        else:
+            intent_stmt = (
+                select(AutonomousExecutionIntent)
+                .where(AutonomousExecutionIntent.order_id == str(order_id))
+                .order_by(
+                    AutonomousExecutionIntent.updated_at.desc(),
+                    AutonomousExecutionIntent.id.desc(),
+                )
+                .limit(1)
+            )
+            intent_result = await self.session.execute(intent_stmt)
+            intent = intent_result.scalars().first()
         if signal:
             # 状态映射
             if status == "FILLED":
                 signal.status = SignalStatus.EXECUTED
                 signal.executed_price = resp.get("avg_fill_price")
                 signal.executed_quantity = resp.get("filled_quantity")
-                signal.executed_at = datetime.utcnow()
+                signal.executed_at = datetime.now()
             elif status == "CANCELLED":
                 signal.status = SignalStatus.CANCELLED
                 signal.order_id = None
@@ -474,7 +614,13 @@ class OrderExecutor:
                 avg_fill_price=resp.get("avg_fill_price"),
                 filled_quantity=resp.get("filled_quantity"),
             )
-            print(f"[OrderExecutor] Updated signal {signal.signal_id} ({signal.symbol}) status to {signal.status.value}. Broker status: {status}")
+            if status == "FILLED":
+                await self._record_execution_feedback(signal, intent, resp)
+            print(
+                "[OrderExecutor] Updated signal "
+                f"{signal.signal_id} ({signal.symbol}) status to "
+                f"{signal.status.value}. Broker status: {status}"
+            )
 
             # 3. 如果已成交或失败，更新交易日志
             try:
@@ -491,17 +637,26 @@ class OrderExecutor:
                 elif status == "CANCELLED":
                     updates = {
                         "journal_status": "FAILED",
-                        "lesson_learned": f"交易已撤销 (Broker CANCELLED): {resp.get('message') or ''}"
+                        "lesson_learned": (
+                            "交易已撤销 (Broker CANCELLED): "
+                            f"{resp.get('message') or ''}"
+                        ),
                     }
                 elif status == "REJECTED":
                     updates = {
                         "journal_status": "FAILED",
-                        "lesson_learned": f"交易被拒绝 (Broker REJECTED): {resp.get('message') or ''}"
+                        "lesson_learned": (
+                            "交易被拒绝 (Broker REJECTED): "
+                            f"{resp.get('message') or ''}"
+                        ),
                     }
                 
                 if updates:
                     # 先尝试更新现有日志
-                    updated = await journal_svc.update_journal_by_signal(signal.signal_id, updates)
+                    updated = await journal_svc.update_journal_by_signal(
+                        signal.signal_id,
+                        updates,
+                    )
                     # 如果不存在（如被风控拒绝前未记录），则创建新日志
                     if not updated and (status in ["CANCELLED", "REJECTED"]):
                         await journal_svc.create_from_execution(
@@ -513,11 +668,21 @@ class OrderExecutor:
                             signal_id=signal.signal_id
                         )
                         # 创建后再更新一次状态以填入失败理由
-                        await journal_svc.update_journal_by_signal(signal.signal_id, updates)
+                        await journal_svc.update_journal_by_signal(
+                            signal.signal_id,
+                            updates,
+                        )
             except Exception as e:
-                print(f"[OrderExecutor] Failed to update journal for signal {signal.signal_id}: {e}")
+                print(
+                    "[OrderExecutor] Failed to update journal for signal "
+                    f"{signal.signal_id}: {e}"
+                )
         else:
-            logger.debug("[OrderExecutor] No signal found matching order_id=%s during status sync", order_id)
+            logger.debug(
+                "[OrderExecutor] No signal found matching order_id=%s "
+                "during status sync",
+                order_id,
+            )
         
         return resp
 
@@ -535,7 +700,8 @@ class OrderExecutor:
         关键目的：避免订单在券商侧已 FILLED，但 Position 仍停留在 CLOSING / OPENING。
         """
         from app.models.execution_intent import AutonomousExecutionIntent
-        from app.services.position_lifecycle_manager import PositionLifecycleManager
+        from app.services.position_lifecycle_manager import \
+            PositionLifecycleManager
 
         intent = (
             await self.session.execute(
@@ -553,7 +719,9 @@ class OrderExecutor:
 
         slice_row = (
             await self.session.execute(
-                select(ExecutionSlice).where(ExecutionSlice.id == intent.execution_slice_id)
+                select(ExecutionSlice).where(
+                    ExecutionSlice.id == intent.execution_slice_id
+                )
             )
         ).scalars().first()
         if slice_row is None:
@@ -619,7 +787,9 @@ class OrderExecutor:
     async def cancel_signal(self, signal_id: str) -> bool:
         """取消信号(如果还未执行)"""
         
-        stmt = select(TradingSignal).where(TradingSignal.signal_id == signal_id)
+        stmt = select(TradingSignal).where(
+            TradingSignal.signal_id == signal_id
+        )
         result = await self.session.execute(stmt)
         signal = result.scalars().first()
         
@@ -645,8 +815,8 @@ class OrderExecutor:
 
     async def sync_executing_orders(self, account_id: str) -> Dict[str, Any]:
         """批量同步执行中订单的状态"""
-        from app.models.trading_signal import TradingSignal, SignalStatus
-        
+        from app.models.trading_signal import SignalStatus, TradingSignal
+
         # 1. 查找所有处理中的信号
         stmt = select(TradingSignal).where(
             and_(

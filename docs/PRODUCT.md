@@ -4,8 +4,9 @@
 > 本文档已拆分为模块化子文档，位于 [`docs/product/`](product/README.md)。
 > 本文件保留作为向后兼容入口，正式维护请在 `docs/product/` 目录进行。
 > **AI量化交易闭环系统** - 个人美港股智能交易平台  
-> 版本：V10.5.3（规划中）| 当前已上线版本：V10.5.1 | 更新日期：2026-03-10  
+> 版本：V10.5.3（实施中）| 当前已上线版本：V10.5.2 | 更新日期：2026-03-10  
 > 变更摘要（V10.5.3 规划）：**Profit Engine Upgrade**——下一版本聚焦“收益控制回路”而非继续横向扩页，围绕四条主线推进：**Alpha Truth Engine 2.0**（gross / net / after cost / after turnover 四层真相口径、regime/capacity bucket、shadow false-reject 评估）、**Portfolio Construction 2.1**（Seat Value、Risk Budget Tree、Marginal Alpha/Risk/Turnover/Liquidity 贡献）、**Execution Policy Closed Loop**（Pre-Trade Cost 约束、执行策略对象化、执行反馈回写）、**Research-to-Live Governance Hard Gate**（Discovery / Paper / Shadow Live / Challenger / Production 五阶段证据链与回滚门槛）；目标是在不放宽风险上限的前提下提高净 alpha 质量、减少伪 alpha 与低价值席位占用。  
+> 变更摘要（V10.5.2 交付）：**组合席位竞争引擎（Capacity-Aware Admission & Replacement Engine）**——把「持仓上限」从刚性拒绝规则升级为动态席位分配机制：新增 **Unified Candidate Pool**（当前持仓 + 新信号统一候选池）+ **统一准入评分** `admission_score = alpha_quality - replacement_friction - risk_penalty + regime_fit`，满仓时按分数淘汰末位 N 个对象（持仓→EXIT、信号→REJECTED_BY_CAPACITY_REPLACEMENT）；引入替换保护带（`MIN_REPLACEMENT_EDGE_BPS / MAX_REPLACEMENTS_PER_CYCLE / MIN_HOLD_MINUTES / REPLACEMENT_COOLDOWN_MINUTES`）防止过度翻仓；**Incumbent Decay Model** 让持仓持续参与席位竞争（alpha 衰减 + 体制适配 + 机会成本）；新增 `capacity_decision_audit_log` 全量审计；支持 `CAPACITY_REPLACEMENT_DRY_RUN` 先观测再放量；前端 `/portfolio`、`/autonomy`、`/order-book` 增加「席位竞争结果」可视化。  
 > 变更摘要（V10.5.1 交付）：**从“功能完整”走向“机构级交易操作系统”**——下一版本不再以新增页面和策略数量为核心，而聚焦三条机构级主线：**Alpha Truth Stack**（策略净 alpha、信号衰减、影子组合、Purged Walk-Forward、成本后真实表现）、**Portfolio Construction 2.0**（风险预算树、流动性感知仓位、边际风险/alpha/turnover 贡献）、**Execution Policy Engine**（订单紧急度、参与率、滑点预算、预交易成本模型、成交后回放）；同时补齐 **Live Safety & Model Degradation Guard**（模型退化监控、数据新鲜度 kill matrix、自主度自适应降级）与 **Research-to-Live Governance**（shadow live、晋级流水线、实验总账），让平台从“能跑的自主交易系统”升级为“可验证、可控放量、可持续进化的研究与交易一体化系统”。【补丁交付】：事后决策剪析自动化（Post-Mortem Automation）——新增 `post_mortem_jobs.py`，通过 EventBus 订阅 `Topics.POSITION_CLOSED` 实时触发 + 每日 02:00 UTC 岜底 Cron 扫描近 90 天未剪析平仓仓位，幂等排队 `deepseek-reasoner` 生成结构化复盘（`trade_id="position-{id}"`），`_RUNNING_TASKS` 集合防 GC；事件日历数据新鲜度修复——`data_freshness_guard_service.py` 改查 `EventCalendarEntry.updated_at`（原 `created_at`），`event_calendar_service.py` upsert 时对已存在记录刷新 `updated_at`，消除 `event_calendar` 83h 陈旧 WARN。  
 > 变更摘要（V10.4.3）：**风险降低优先执行（Risk-Reducing Priority Execution）**——新增减仓/平仓快速通道：`REDUCE/EXIT` 信号绕过开仓型质量漏斗、熔断期间允许风险降低类订单、减仓/平仓不占用 `MAX_DAILY_TRADES` / `MAX_DAILY_SIGNALS` 配额；`PositionMonitor`止损/止盈信号写入 `force_exit=true`，`AutonomousEngine` 识别后跳过冷却与 Redis 并发锁直接执行；`SignalPositionFilter` 在减仓数量超持仓时自动升级为全平；`OrderExecutor` 以实际持仓数量为准执行 EXIT/REDUCE，并为港股退出保留 odd-lot 平仓能力；`AutonomyPage` 新增“减仓/平仓优先通道”状态卡与快速通道/强制出场徽章。**补充**：开仓型信号新增 `LOW / MEDIUM / HIGH / ELITE` 质量标识，进入漏斗前先按质量排队；其中 `ELITE` 信号可豁免 `SQ_MAX_DAILY_SIGNALS` 日配额上限，但仍必须通过仓位、相关性与 RiskGate。**追加需求**：`/system` 系统监控模块需新增交易生命周期状态监测、系统主要数据流转详细状态、系统主要模块及细粒度服务状态。  
 > 变更摘要（V10.4.4）：**以仓位为中心的生命周期治理 (Position-Centric Lifecycle)**——引入 `positions` 聚合根与 `execution_slices` 执行切片，支持多主题仓位隔离与 Append-Only 生命周期事件审计；`autonomous_execution_intent` 关联仓位与切片，实现从信号到仓位动作的全链路追踪。  
@@ -20,14 +21,58 @@
 > 变更摘要（V10.2-M1）：**市场体制感知引擎** ——RegimeClassifier 五维评分体系（趋势强度/波动率制度/量价关系/宏观环境/广度指标）、6类体制自动识别（BULL_TREND / BEAR_TREND / HIGH_VOL / MEAN_REVERT / RANGE_BOUND / CRISIS）、3日确认防噪机制、EventBus 异步事件总线（REGIME_CHANGED 事件驱动策略权重自适应切换、VaR 门限动态调整）、StrategyWeightAllocator 体制感知仓位分配、AI 自主交易闭环升级至 **17 阶段**  
 > 变更摘要（V10.1）：**兑现承诺 + 打磨质量 + 扩展边界**——Tiger 真实下单接入（覆盖美股/港股/期权）、FULL 模式完整自主交易闭环、Copilot 操作指令执行落地、Dashboard 所有 TODO 指标真实化、AI 组合级决策升级（结构化 JSON 输出 + 批量组合决策）、ETF 标的池正式支持、港股支持（Tiger API 统一，无需 Futu）、Paper→Live 毕业自动化、Dashboard WebSocket 实时推送；**本版本明确不含 Telegram 通知，FULL 模式具备完全自主交易能力**
 > 历史版本：V10.0（2026-02-24）变更摘要见下方历史记录节  
-> 当前交付主线：[V10.5.1 Release Plan](archived/v10/v10.5/RELEASE_PLAN_V10.5.1.md)  
-> 下一版本规划：[V10.5.3 Release Plan](archived/v10/v10.5/RELEASE_PLAN_V10.5.3.md)
+> 当前已上线版本：**V10.5.2**（已发布）| 详细规划：[V10.5.2 Release Plan](archived/v10/v10.5/RELEASE_PLAN_V10.5.2.md)  
+> 下一版本规划：**V10.5.3** | 详细规划：[V10.5.3 Release Plan](archived/v10/v10.5/RELEASE_PLAN_V10.5.3.md)
+
+---
+
+## V10.5.2 验收标准（已发布）
+
+> 完整规划详见 [docs/archived/v10/v10.5/RELEASE_PLAN_V10.5.2.md](archived/v10/v10.5/RELEASE_PLAN_V10.5.2.md)
+
+### P0 核心验收（已完成）
+
+- [x] 当 `current_positions + incoming_signals > max_positions` 时，系统不再直接因满仓拒绝全部新信号
+- [x] 系统可对当前持仓+新信号生成统一排序结果与 overflow 淘汰清单
+- [x] 被淘汰持仓自动进入 `EXIT/FORCE_EXIT` 编排；被淘汰信号进入容量拒绝状态（`REJECTED_BY_CAPACITY_REPLACEMENT`）
+- [x] 审计日志可展示每个对象的 `admission_score`、淘汰原因和保护带结果
+- [x] 支持 `CAPACITY_REPLACEMENT_DRY_RUN` 模式，可先只观测不执行
+
+### P1 验收（已完成）
+
+- [x] 保护带、冷却期、每轮替换上限可通过环境变量配置
+- [x] 前端 `/portfolio`、`/autonomy`、`/order-book` 可展示席位竞争结果与约束说明
+- [x] `capacity_decision_audit_log` 全量落库，每次满仓准入决策可完整回放
 
 ---
 
 ## V10.5.3 验收标准（规划中）
 
 > 完整规划详见 [docs/archived/v10/v10.5/RELEASE_PLAN_V10.5.3.md](archived/v10/v10.5/RELEASE_PLAN_V10.5.3.md)
+
+### V10.5.3 开发流程（定稿）
+
+- **第 1 阶段：文档对齐** —— `PRODUCT.md / FRONTEND_DESIGN.md / BACKEND_DESIGN.md / API.md` 四份主文档先统一字段口径、路由契约、feature flags 与验收矩阵。
+- **第 2 阶段：后端阻塞项** —— 先完成 `Alpha Truth Engine 2.0`、`Portfolio Construction 2.1`、`Execution Policy Closed Loop`、`Governance Hard Gate` 的模型、服务与接口，且全部支持 flag-gated rollout。
+- **第 3 阶段：前端工作台升级** —— 仅升级现有四个工作台（`/alpha-lab`、`/portfolio`、`/execution-policy`、`/governance/pipeline`），不新增导航分组。
+- **第 4 阶段：测试与联调** —— 单元测试、集成测试、Cypress E2E 与产品验收并行推进，所有新能力必须同时给出“结果值 + 解释字段 + data_quality”。
+- **第 5 阶段：渐进放量** —— 按 `Observe → Shadow Control → Semi → Full` 分四阶段放量，不允许 V10.5.3 直接默认硬切 live 链路。
+
+### V10.5.3 Feature Flags（定稿）
+
+- `ALPHA_TRUTH_V2_ENABLED`：控制 Alpha Truth 四层口径、data quality 与 Shadow False-Reject 指标是否对外暴露。
+- `SEAT_VALUE_ARBITER_ENABLED`：控制 `CapacityArbiter` 是否从静态质量排序切换到 `SeatValue` 仲裁。
+- `EXECUTION_POLICY_HARD_CONTROL_ENABLED`：控制 pre-trade cost / policy snapshot 是否进入真实执行决策，而不仅是观测视图。
+- `GOVERNANCE_HARD_GATE_ENABLED`：控制五阶段晋级与回滚门是否参与真实策略放量。
+
+### V10.5.3 Rollout 策略（定稿）
+
+| 阶段 | 目标 | 规则 |
+|------|------|------|
+| Observe | 只观测，不接管 | 计算新指标、写快照、前端可读，但不改变 live 行为 |
+| Shadow Control | 影子接管 | 只在 shadow / paper 路径启用新逻辑，记录与旧逻辑差异 |
+| Semi | 半接管 | 对有限真实链路启用 SeatValue / Policy / Gate，并保留人工审计与快速回退 |
+| Full | 全接管 | 新逻辑成为默认链路，但保留 feature flags 级回退能力 |
 
 ### M1 — Alpha Truth Engine 2.0
 

@@ -3,8 +3,9 @@
 # 产品需求文档 (PRD)
 
 > **AI量化交易闭环系统** - 个人美港股智能交易平台  
-> 版本：V10.5.3（规划中）| 当前已上线版本：V10.5.1 | 更新日期：2026-03-10  
+> 版本：V10.5.3（实施中）| 当前已上线版本：V10.5.2 | 更新日期：2026-03-10  
 > 变更摘要（V10.5.3 规划）：**Profit Engine Upgrade**——下一版本不再以增加页面数或策略数为导向，而是把 `Alpha Lab / Portfolio / Execution Policy / Governance` 升级为直接影响净收益的控制回路：建立四层 alpha 真相口径、以 `Seat Value` 为核心的组合资本配置、以 Pre-Trade Cost 为约束的执行策略闭环，以及面向 `Discovery / Paper / Shadow Live / Challenger / Production` 的硬门槛晋级治理。  
+> 变更摘要（V10.5.2 交付）：**组合席位竞争引擎（Capacity-Aware Admission & Replacement Engine）**——把持仓上限从刚性拒绝规则升级为动态席位分配机制：新增 Unified Candidate Pool（当前持仓 + 新信号统一候选池）+ 统一准入评分 admission_score = alpha_quality - replacement_friction - risk_penalty + regime_fit，满仓时按分数淘汰末位 N 个对象（持仓到EXIT、信号到REJECTED_BY_CAPACITY_REPLACEMENT）；引入替换保护带（MIN_REPLACEMENT_EDGE_BPS / MAX_REPLACEMENTS_PER_CYCLE / MIN_HOLD_MINUTES / REPLACEMENT_COOLDOWN_MINUTES）防止过度翻仓；Incumbent Decay Model 让持仓持续参与席位竞争；新增 capacity_decision_audit_log 全量审计；支持 CAPACITY_REPLACEMENT_DRY_RUN 先观测再放量；前端 /portfolio、/autonomy、/order-book 增加席位竞争结果可视化。  
 > 变更摘要（V10.5.1 交付）：**从“功能完整”走向“机构级交易操作系统”**——规划聚焦五大主线：Alpha Truth Stack / Portfolio Construction 2.0 / Execution Policy Engine / Live Safety & Model Degradation Guard / Research-to-Live Governance。**本版本补丁交付**：**事后决策剪析自动化（Post-Mortem Automation）**——新增 `post_mortem_jobs.py`，EventBus 订阅 `Topics.POSITION_CLOSED` 实时触发 + 每日 02:00 UTC 岜底 Cron 扫描近 90 天未剪析平仓仓位，幂等排队 `deepseek-reasoner` 生成结构化复盘（`trade_id="position-{id}"`）；**事件日历数据新鲜度修复**——`data_freshness_guard_service.py` 改查 `EventCalendarEntry.updated_at`（原 `created_at`），`event_calendar_service.py` upsert 时刷新 `updated_at`，消除 `event_calendar` 83h 陈旧 WARN；**`confirmed=False` 体制分类修复**——`regime_classifier.py` `confirmed=False` 分支同步更新 `classification_date`。  
 > 变更摘要（V10.4.3）：**风险降低优先执行（Risk-Reducing Priority Execution）**——新增减仓/平仓快速通道：`REDUCE/EXIT` 信号绕过开仓型质量漏斗、熔断期间允许风险降低类订单、减仓/平仓不占用 `MAX_DAILY_TRADES` / `MAX_DAILY_SIGNALS` 配额；`PositionMonitor` 止损/止盈信号写入 `force_exit=true`，`AutonomousEngine` 识别后跳过冷却与 Redis 并发锁直接执行；`SignalPositionFilter` 在减仓数量超持仓时自动升级为全平；`OrderExecutor` 以实际持仓数量为准执行 EXIT/REDUCE，并为港股退出保留 odd-lot 平仓能力；`AutonomyPage` 新增“减仓/平仓优先通道”状态卡与快速通道/强制出场徽章。**追加需求**：`/system` 系统监控页需补齐三类可观测能力——交易生命周期状态监测、系统主要数据流转详细状态、主要模块及细粒度服务状态。  
 > 变更摘要（V10.4.1）：**巩固、治理与完整性**——M1 数据闭环治理（actual_return 自动回填 Job + IC 真实化 + 因子快照自动化 + 2026 事件日历 + LLM 降级）；M2 UI 大清洗（47→≤38 页面 + 导航 6→4 组 + 执行三合一 + 双仪表盘合并）；M3 Copilot 全局浮窗（Cmd+K 任意页面唤起 + 页面上下文注入 + 实时系统状态 System Prompt）；M4 自主循环稳定增强（AutonomyHealthMonitor + Job Watchdog + Multi-Agent 真实并发 + 三新熔断 + WebSocket 重连）；M5 移动触达（Dashboard/Alert/Copilot 竖屏可用）；M6 文档重构（PRODUCT.md 拆分为模块化多文件，主文件 ≤300 行）  
@@ -17,8 +18,28 @@
 > 变更摘要（V10.1）：**兑现承诺 + 打磨质量 + 扩展边界**——Tiger 真实下单接入（覆盖美股/港股/期权）、FULL 模式完整自主交易闭环、Copilot 操作指令执行落地、Dashboard 所有 TODO 指标真实化、AI 组合级决策升级（结构化 JSON 输出 + 批量组合决策）、ETF 标的池正式支持、港股支持（Tiger API 统一，无需 Futu）、Paper→Live 毕业自动化、Dashboard WebSocket 实时推送；**本版本明确不含 Telegram 通知，FULL 模式具备完全自主交易能力**
 
 > 历史版本：V10.0（2026-02-24）变更摘要见下方历史记录节  
-> 当前已上线版本：**V10.5.1**（已上线）| 详细规划：[V10.5.1 Release Plan](../archived/v10/v10.5/RELEASE_PLAN_V10.5.1.md)  
+> 当前已上线版本：**V10.5.2**（已发布）| 详细规划：[V10.5.2 Release Plan](../archived/v10/v10.5/RELEASE_PLAN_V10.5.2.md)  
 > 下一版本规划：**V10.5.3** | 详细规划：[V10.5.3 Release Plan](../archived/v10/v10.5/RELEASE_PLAN_V10.5.3.md)
+
+---
+
+## V10.5.2 验收标准（已发布 ✅）
+
+> 完整规划详见 [docs/archived/v10/v10.5/RELEASE_PLAN_V10.5.2.md](../archived/v10/v10.5/RELEASE_PLAN_V10.5.2.md)
+
+**P0 核心验收（已完成）**：
+
+- [x] 当 `current_positions + incoming_signals > max_positions` 时，系统不再直接因满仓拒绝全部新信号
+- [x] 系统可对当前持仓 + 新信号生成统一排序结果与 overflow 淘汰清单
+- [x] 被淘汰持仓自动进入 `EXIT/FORCE_EXIT` 编排；被淘汰信号进入容量拒绝状态（`REJECTED_BY_CAPACITY_REPLACEMENT`）
+- [x] 审计日志可展示每个对象的 `admission_score`、淘汰原因和保护带结果
+- [x] 支持 `CAPACITY_REPLACEMENT_DRY_RUN` 模式，可先只观测不执行
+
+**P1 验收（已完成）**：
+
+- [x] 保护带、冷却期、每轮替换上限可通过环境变量配置
+- [x] 前端 `/portfolio`、`/autonomy`、`/order-book` 可展示席位竞争结果与约束说明
+- [x] `capacity_decision_audit_log` 全量落库，每次满仓准入决策可完整回放
 
 ---
 
@@ -30,7 +51,14 @@
 - [ ] `Governance Pipeline` 建立 `Discovery / Paper / Shadow Live / Challenger / Production` 硬门槛证据链
 - [ ] 核心收益质量指标（Net Alpha Positive Rate / Seat Efficiency / Budget Breach Rate）可观测、可审计、可回溯
 
-## V10.5.1 验收标准（当前已上线版本）
+### V10.5.3 Feature Flags（定稿）
+
+- `ALPHA_TRUTH_V2_ENABLED`：控制四层 alpha 真相口径与 `data_quality` 是否对外暴露
+- `SEAT_VALUE_ARBITER_ENABLED`：控制 `CapacityArbiter` 是否从 `admission_score` 切换到 `Seat Value` 仲裁
+- `EXECUTION_POLICY_HARD_CONTROL_ENABLED`：控制执行策略是否从观察视图进入真实下单约束
+- `GOVERNANCE_HARD_GATE_ENABLED`：控制 `Paper → Live` 与策略晋级是否受五阶段硬门槛治理
+
+## V10.5.1 验收标准（已归档）
 
 **补丁交付（已完成）**：
 

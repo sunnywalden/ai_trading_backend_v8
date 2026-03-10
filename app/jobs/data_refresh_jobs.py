@@ -33,6 +33,28 @@ from app.services.market_universe_service import MarketUniverseService
 logger = logging.getLogger(__name__)
 
 
+async def _collect_symbols_for_technical_refresh(
+    session: AsyncSession,
+    extra_symbols: list,
+) -> list[str]:
+    """从 DB active TradingPlan + extra_symbols 中收集、合并并规范化标的列表。
+
+    返回值：去重、大写、排序后的 symbol 列表，过滤空字符串和 None。
+    """
+    stmt = select(TradingPlan.symbol).distinct()
+    result = await session.execute(stmt)
+    db_symbols: list = [row.symbol for row in result.all()]
+
+    seen: set[str] = set()
+    for s in db_symbols + list(extra_symbols):
+        if s is None:
+            continue
+        clean = str(s).strip().upper()
+        if clean:
+            seen.add(clean)
+    return sorted(seen)
+
+
 # 延迟导入get_session避免循环依赖
 def _get_session():
     from app.models.db import SessionLocal
@@ -50,7 +72,8 @@ async def refresh_technical_indicators_job():
         logger.info("Starting technical indicators refresh job")
         start_time = datetime.now()
 
-        from app.services.quote_freshness_service import refresh_quote_freshness
+        from app.services.quote_freshness_service import \
+            refresh_quote_freshness
 
         async with _get_session() as session:
             refresh_result = await refresh_quote_freshness(
@@ -99,7 +122,8 @@ async def refresh_fundamental_data_job():
         error_count = 0
 
         # 调用FundamentalAnalysisService刷新基本面数据
-        from app.services.fundamental_analysis_service import FundamentalAnalysisService
+        from app.services.fundamental_analysis_service import \
+            FundamentalAnalysisService
 
         fundamental_service = FundamentalAnalysisService()
 
