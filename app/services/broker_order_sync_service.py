@@ -17,6 +17,7 @@ from app.models.execution_slice import ExecutionSlice, SliceAction, SliceStatus
 from app.models.position import Position, PositionStatus
 from app.models.trading_signal import SignalStatus, TradingSignal
 from app.services.position_lifecycle_manager import PositionLifecycleManager
+from app.services.portfolio_cache_service import invalidate_portfolio_view_caches
 from app.services.lifecycle_service import lifecycle_service
 
 
@@ -255,7 +256,7 @@ async def _close_stale_closing_positions(
     session: AsyncSession,
     account_id: str,
     live_position_symbols: set[str],
-) -> int:
+) -> list[dict[str, Any]]:
     """兜底收口：券商已无持仓但 Position 仍卡在 CLOSING 时，自动推进到 CLOSED。"""
     rows = (
         await session.execute(
@@ -269,7 +270,7 @@ async def _close_stale_closing_positions(
         )
     ).scalars().all()
 
-    closed = 0
+    closed: list[dict[str, Any]] = []
     plm = PositionLifecycleManager(session)
     for pos in rows:
         if pos.symbol in live_position_symbols:
@@ -313,9 +314,44 @@ async def _close_stale_closing_positions(
             avg_price=avg_price,
             partial=False,
         )
-        closed += 1
+        closed.append(
+            {
+                "position_id": pos.id,
+                "symbol": pos.symbol,
+                "filled_qty": remaining_qty,
+                "avg_price": avg_price,
+                "slice_id": slice_row.id,
+            }
+        )
 
     return closed
+
+
+async def reconcile_stale_closing_positions(
+    session: AsyncSession,
+    account_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """手动收口已无真实持仓但仍停留在 CLOSING 的 Position。"""
+    broker = make_option_broker_client()
+    real_account_id = str(account_id or await broker.get_account_id())
+
+    try:
+        raw_positions = await broker.list_underlying_positions(real_account_id)
+    except Exception:
+        raw_positions = []
+    live_position_symbols = _extract_live_position_symbols(list(raw_positions or []))
+
+    closed_positions = await _close_stale_closing_positions(
+        session,
+        real_account_id,
+        live_position_symbols,
+    )
+    await invalidate_portfolio_view_caches(real_account_id)
+    return {
+        "account_id": real_account_id,
+        "closed_count": len(closed_positions),
+        "positions": closed_positions,
+    }
 
 
 async def reconcile_broker_order_status(
@@ -620,7 +656,8 @@ async def reconcile_broker_order_status(
         },
         "cancelled_synced": cancelled_synced,
         "filled_synced": filled_synced,
-        "positions_force_closed": positions_force_closed,
+        "positions_force_closed": len(positions_force_closed),
+        "positions_force_closed_detail": positions_force_closed,
         "plans_reconciled": plan_reconciled,
         "orphan_signals_fixed": orphan_fixed,
         "journal_entries_created": journal_created,
