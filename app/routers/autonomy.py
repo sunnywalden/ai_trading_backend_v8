@@ -599,7 +599,7 @@ async def get_signal_pipeline(
     from app.models.signal_quality_audit_log import SignalQualityAuditLog
     funnel_map: dict = {}
     if signals:
-        signal_ids_int = [s.signal_id for s in signals if s.signal_id is not None]
+        signal_ids_int = [s.id for s in signals if s.id is not None]
         if signal_ids_int:
             latest_subq = (
                 select(
@@ -616,14 +616,16 @@ async def get_signal_pipeline(
                     SignalQualityAuditLog.funnel_result,
                     SignalQualityAuditLog.rejected_at_layer,
                     SignalQualityAuditLog.rejection_reason,
+                    SignalQualityAuditLog.rejection_detail,
                 ).join(latest_subq, SignalQualityAuditLog.id == latest_subq.c.max_id)
             )
-            for sid, fresult, layer, reason in funnel_rows:
+            for sid, fresult, layer, reason, detail in funnel_rows:
                 if sid is not None:
-                    funnel_map[sid] = {
+                    funnel_map[int(sid)] = {
                         "funnel_result": fresult,
                         "funnel_rejected_at_layer": layer,
                         "funnel_rejection_reason": reason,
+                        "funnel_rejection_detail": detail,
                     }
 
     return {
@@ -640,7 +642,21 @@ async def get_signal_pipeline(
                 "quantity_value": s.quantity_value,
                 "strength": round(s.confidence, 4) if s.confidence is not None else 0.0,  # 修复置信度显示：保留4位精度(前端*100后含2位小数)
                 "priority": s.priority,
-                "notes": intent_map.get(s.signal_id) or s.notes,
+                "notes": (
+                    intent_map.get(s.signal_id)
+                    or s.notes
+                    or (
+                        (s.extra_metadata or {}).get("watchtower_reason_detail")
+                        if isinstance(s.extra_metadata, dict)
+                        else None
+                    )
+                    or (
+                        (s.extra_metadata or {}).get("funnel_rejection_detail")
+                        if isinstance(s.extra_metadata, dict)
+                        else None
+                    )
+                    or funnel_map.get(s.id, {}).get("funnel_rejection_detail")
+                ),
                 "order_id": s.order_id,
                 "execution_path": (
                     (s.extra_metadata or {}).get("execution_path")
@@ -735,9 +751,16 @@ async def get_signal_pipeline(
                 ),
                 "executed_at": s.executed_at.isoformat() if s.executed_at else None,
                 "created_at": s.created_at.isoformat() if s.created_at else None,
-                "funnel_result": funnel_map.get(s.signal_id, {}).get("funnel_result"),
-                "funnel_rejected_at_layer": funnel_map.get(s.signal_id, {}).get("funnel_rejected_at_layer"),
-                "funnel_rejection_reason": funnel_map.get(s.signal_id, {}).get("funnel_rejection_reason"),
+                "funnel_result": funnel_map.get(s.id, {}).get("funnel_result"),
+                "funnel_rejected_at_layer": funnel_map.get(s.id, {}).get("funnel_rejected_at_layer"),
+                "funnel_rejection_reason": (
+                    funnel_map.get(s.id, {}).get("funnel_rejection_reason")
+                    or (
+                        (s.extra_metadata or {}).get("funnel_rejection_reason")
+                        if isinstance(s.extra_metadata, dict)
+                        else None
+                    )
+                ),
                 "rejection_stage": (
                     (s.extra_metadata or {}).get("watchtower_stage")
                     if isinstance(s.extra_metadata, dict)
@@ -747,7 +770,13 @@ async def get_signal_pipeline(
                     (s.extra_metadata or {}).get("watchtower_reason_detail")
                     if isinstance(s.extra_metadata, dict)
                     else None
-                ),
+                )
+                or (
+                    (s.extra_metadata or {}).get("funnel_rejection_detail")
+                    if isinstance(s.extra_metadata, dict)
+                    else None
+                )
+                or funnel_map.get(s.id, {}).get("funnel_rejection_detail"),
                 **_build_signal_quality_snapshot(s),
             }
             for s in signals
