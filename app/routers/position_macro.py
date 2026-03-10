@@ -15,6 +15,7 @@ from app.core.cache import cache
 from app.core.config import settings
 from app.jobs.scheduler import add_job
 from app.models.db import SessionLocal
+from app.models.db import redis_client
 from app.providers.market_data_provider import MarketDataProvider
 from app.schemas.macro_risk import MacroRiskOverviewResponse
 from app.schemas.position_assessment import (FundamentalAnalysisResponse,
@@ -120,6 +121,19 @@ async def get_session():
         yield session
 
 
+async def _invalidate_positions_assessment_cache(account_id: str) -> None:
+    """清理持仓评估缓存，避免刷新后继续命中过期汇总。"""
+    if not account_id or not redis_client:
+        return
+
+    try:
+        keys = await redis_client.keys(f"{cache.prefix}positions_assessment:{account_id}:*")
+        if keys:
+            await redis_client.delete(*keys)
+    except Exception:
+        pass
+
+
 @router.get("/positions/assessment", response_model=PositionsAssessmentResponse)
 async def get_positions_assessment(
     window_days: int = Query(7, description="窗口期（天）"),
@@ -176,26 +190,26 @@ async def get_positions_assessment(
         active_symbols = [
             str(p.get("symbol")) for p in active_positions_ds if p.get("symbol")
         ]
+        live_symbols = [p.symbol for p in stock_positions if getattr(p, "symbol", None)]
+        live_symbols.extend(option_by_underlying.keys())
+        symbols = list(dict.fromkeys(live_symbols))
 
-        # 生命周期仓位是主口径；仅在没有真实仓位时回退到 broker 持仓
-        if active_symbols:
+        # 持仓评估以券商实时仓位为主口径；仅在实时仓位完全为空时回退生命周期仓位
+        if not symbols and active_symbols:
             symbols = list(dict.fromkeys(active_symbols))
-        else:
-            all_symbols = set([p.symbol for p in stock_positions])
-            all_symbols.update(option_by_underlying.keys())
-            if not all_symbols:
-                return PositionsAssessmentResponse(
-                    positions=[],
-                    summary={
-                        "total_positions": 0,
-                        "total_value": 0.0,
-                        "total_pnl": 0.0,
-                        "avg_score": 0.0,
-                        "high_risk_count": 0,
-                        "buy_recommendation_count": 0,
-                    },
-                )
-            symbols = list(all_symbols)
+
+        if not symbols:
+            return PositionsAssessmentResponse(
+                positions=[],
+                summary={
+                    "total_positions": 0,
+                    "total_value": 0.0,
+                    "total_pnl": 0.0,
+                    "avg_score": 0.0,
+                    "high_risk_count": 0,
+                    "buy_recommendation_count": 0,
+                },
+            )
 
         # 批量计算评分
         scoring_service = PositionScoringService()
@@ -901,6 +915,7 @@ async def refresh_positions_assessment(
             }
 
         results = await _do_refresh(symbols, account_id, force)
+        await _invalidate_positions_assessment_cache(account_id)
 
         return {
             "message": "Refresh completed",

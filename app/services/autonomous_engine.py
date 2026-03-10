@@ -2622,7 +2622,7 @@ class AutonomousEngine:
     async def _update_signal_status(
         self,
         db: AsyncSession,
-        signal_db_id: int,
+        signal_db_id: Optional[int],
         new_status: Any,
     ) -> None:
         """
@@ -2630,6 +2630,9 @@ class AutonomousEngine:
         每次 UPDATE 后立即 commit，避免行锁悬挂导致并发事务 Lock wait timeout。
         遇到锁超时自动重试一次（等待 1s）。
         """
+        if not signal_db_id:
+            return
+
         import asyncio
         # 如果状态变为 EXECUTED，同步写入 executed_at
         from datetime import datetime as _dt
