@@ -255,6 +255,9 @@ def test_overflow_best_signal_wins_over_worst_position():
     with patch(
         "app.services.signal_quality_config.get_signal_quality_config",
         return_value=_FakeCfg(),
+    ), patch(
+        "app.services.capacity_arbiter.settings.SEAT_VALUE_ARBITER_ENABLED",
+        False,
     ):
         _inject_candidates(arb, pos_cands, sig_cands)
         decision = run_async(
@@ -397,6 +400,9 @@ def test_dry_run_creates_no_exit_signals():
     with patch(
         "app.services.signal_quality_config.get_signal_quality_config",
         return_value=_FakeCfg(CAPACITY_REPLACEMENT_DRY_RUN=True),
+    ), patch(
+        "app.services.capacity_arbiter.settings.SEAT_VALUE_ARBITER_ENABLED",
+        False,
     ):
         _inject_candidates(arb, pos_cands, sig_cands)
         decision = run_async(
@@ -453,6 +459,9 @@ def test_max_replacements_cap_rejects_extra_signals():
     with patch(
         "app.services.signal_quality_config.get_signal_quality_config",
         return_value=cfg,
+    ), patch(
+        "app.services.capacity_arbiter.settings.SEAT_VALUE_ARBITER_ENABLED",
+        False,
     ):
         _inject_candidates(arb, pos_cands, sig_cands)
         decision = run_async(
