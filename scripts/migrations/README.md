@@ -55,6 +55,9 @@ python scripts/migrations/version_manager.py --record v3.1.1 \
 
 | 版本 | 发布日期 | 主要变更 | 脚本 |
 |------|---------|---------|------|
+| v10.5.3 | 2026-03 | 新增 execution_policy_profiles 执行策略长期反馈画像 | upgrade_to_v10_5_3.py |
+| v10.5.2 | 2026-03 | 新增 capacity_decision_logs 席位竞争仲裁审计日志 | upgrade_to_v10_5_2.py |
+| v10.5.1 | 2026-03 | 新增研究/执行/治理 10 张机构级表 | upgrade_to_v10_5_1.py |
 | v10.3.4 | 2026-03 | 新增 market_universe_symbols（全量股票池） | upgrade_to_v10_3_4.py |
 | v10.3.3 | 2026-02 | 新增6张分析表：执行质量/因子敞口/多智能体/置信校准/决策剖析/权重历史 | upgrade_to_v10_3_3.py |
 | v10.3   | 2025-12 | trading_plan 新增10列 + fsm_transition_log 表 | upgrade_to_v10_3.py |
@@ -232,6 +235,11 @@ A: 是的，v3.1.1 新增的通知记录和性能数据会丢失
 3. 创建回滚脚本 `rollback_from_vX.X.X.py`
 4. 更新本 README
 5. 更新 `docs/DATABASE_MIGRATIONS.md`
+
+### V10.5.3 附加脚本
+
+- `backfill_execution_policy_profiles.py`：从历史 `execution_quality_log + autonomous_execution_intent` 全量重建执行画像。
+- `../maintenance/repair_execution_policy_profiles.py`：校验并修复 stale / orphan / missing / duplicate 画像记录。
 
 ### 脚本命名规范
 
