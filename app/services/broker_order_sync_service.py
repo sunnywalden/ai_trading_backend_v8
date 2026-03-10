@@ -13,7 +13,10 @@ from app.broker.factory import make_option_broker_client
 from app.engine.order_executor import OrderExecutor
 from app.models.autonomy_audit_log import AutonomyAuditLog
 from app.models.execution_intent import AutonomousExecutionIntent
+from app.models.execution_slice import ExecutionSlice, SliceAction, SliceStatus
+from app.models.position import Position, PositionStatus
 from app.models.trading_signal import SignalStatus, TradingSignal
+from app.services.position_lifecycle_manager import PositionLifecycleManager
 from app.services.lifecycle_service import lifecycle_service
 
 
@@ -248,6 +251,73 @@ async def _derive_plan_resolution(
     return None, None, None, None
 
 
+async def _close_stale_closing_positions(
+    session: AsyncSession,
+    account_id: str,
+    live_position_symbols: set[str],
+) -> int:
+    """兜底收口：券商已无持仓但 Position 仍卡在 CLOSING 时，自动推进到 CLOSED。"""
+    rows = (
+        await session.execute(
+            select(Position)
+            .where(
+                Position.account_id == account_id,
+                Position.status == PositionStatus.CLOSING.value,
+                Position.open_qty > 0,
+            )
+            .order_by(desc(Position.updated_at), desc(Position.id))
+        )
+    ).scalars().all()
+
+    closed = 0
+    plm = PositionLifecycleManager(session)
+    for pos in rows:
+        if pos.symbol in live_position_symbols:
+            continue
+
+        slice_row = (
+            await session.execute(
+                select(ExecutionSlice)
+                .where(
+                    ExecutionSlice.position_id == pos.id,
+                    ExecutionSlice.action.in_([
+                        SliceAction.REDUCE.value,
+                        SliceAction.CLOSE.value,
+                    ]),
+                    ExecutionSlice.status.in_([
+                        SliceStatus.PENDING.value,
+                        SliceStatus.SUBMITTED.value,
+                        SliceStatus.PARTIALLY_FILLED.value,
+                    ]),
+                )
+                .order_by(desc(ExecutionSlice.updated_at), desc(ExecutionSlice.id))
+                .limit(1)
+            )
+        ).scalars().first()
+        if slice_row is None:
+            continue
+
+        remaining_qty = float(pos.open_qty or slice_row.requested_qty or 0.0)
+        if remaining_qty <= 0:
+            continue
+
+        avg_price = float(
+            pos.avg_close_price
+            or slice_row.avg_fill_price
+            or pos.avg_entry_price
+            or 0.0
+        )
+        await plm.on_slice_filled(
+            slice_id=slice_row.id,
+            filled_qty=remaining_qty,
+            avg_price=avg_price,
+            partial=False,
+        )
+        closed += 1
+
+    return closed
+
+
 async def reconcile_broker_order_status(
     session: AsyncSession,
     account_id: Optional[str] = None,
@@ -351,6 +421,12 @@ async def reconcile_broker_order_status(
     except Exception:
         raw_positions = []
     live_position_symbols = _extract_live_position_symbols(list(raw_positions or []))
+
+    positions_force_closed = await _close_stale_closing_positions(
+        session,
+        real_account_id,
+        live_position_symbols,
+    )
 
     plan_reconciled = 0
 
@@ -544,6 +620,7 @@ async def reconcile_broker_order_status(
         },
         "cancelled_synced": cancelled_synced,
         "filled_synced": filled_synced,
+        "positions_force_closed": positions_force_closed,
         "plans_reconciled": plan_reconciled,
         "orphan_signals_fixed": orphan_fixed,
         "journal_entries_created": journal_created,

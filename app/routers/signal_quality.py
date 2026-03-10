@@ -28,6 +28,7 @@ from app.models.trading_signal import (
     SignalType,
     TradingSignal,
 )
+from app.services.position_query_service import ACTIVE_POSITION_STATUSES
 from app.services.ghost_trade_service import ghost_trade_service
 from app.services.regime_classifier import RegimeClassifier
 from app.services.signal_audit_log_service import signal_audit_log_service
@@ -186,7 +187,9 @@ async def get_funnel_stats(
     - layer_stats: 每层被拒数量
     - rejection_breakdown: 按拒绝原因统计
     - daily_trend: 近 N 天每日精英率趋势
-    - current_positions_count: 当前 HELD 持仓数量
+    - current_positions_count: 当前容量占用 HELD 持仓数量（兼容旧字段）
+    - capacity_positions_count: 当前占用容量的 HELD 持仓数量
+    - lifecycle_active_positions_count: 生命周期活跃持仓数（与持仓评估/战情室/早间简报口径一致）
     - max_concurrent_positions_cfg: 基础配置的最大并发仓位
     - effective_max_concurrent_positions: 当前体制下生效的最大并发仓位
     - current_regime: 当前体制
@@ -195,7 +198,8 @@ async def get_funnel_stats(
     """
     stats = await signal_audit_log_service.get_funnel_stats(db, since_days=since_days)
 
-    # 实时注入当前持仓数与配置上限，帮助解释 L2 (MAX_POSITIONS_REACHED) 拦截原因
+    # 实时注入当前持仓数与配置上限，帮助解释 L2 (MAX_POSITIONS_REACHED) 拦截原因。
+    # 保留 capacity 口径（HELD）用于解释名额占用，同时补充 lifecycle_active 口径供页面解释与其他模块对齐。
     # V10.4.4+: 查 positions 表（ACTIVE/SCALING_IN/SCALING_OUT/PARTIALLY_CLOSED 均为实际持仓）
     _held_statuses = [
         PositionStatus.ACTIVE.value,
@@ -211,6 +215,14 @@ async def get_funnel_stats(
     current_positions_count = (
         await db.execute(held_count_stmt)
     ).scalar_one_or_none() or 0
+    lifecycle_active_count_stmt = (
+        select(func.count())
+        .select_from(Position)
+        .where(Position.status.in_(tuple(ACTIVE_POSITION_STATUSES)))
+    )
+    lifecycle_active_positions_count = (
+        await db.execute(lifecycle_active_count_stmt)
+    ).scalar_one_or_none() or 0
 
     cfg = get_signal_quality_config()
     current_regime = await RegimeClassifier.get_current_regime(db)
@@ -218,6 +230,9 @@ async def get_funnel_stats(
     effective_cfg = get_regime_adjusted_config(regime_name) if regime_name else {}
 
     stats["current_positions_count"] = current_positions_count
+    stats["capacity_positions_count"] = current_positions_count
+    stats["lifecycle_active_positions_count"] = lifecycle_active_positions_count
+    stats["current_positions_count_scope"] = "capacity_held"
     stats["max_concurrent_positions_cfg"] = cfg.MAX_CONCURRENT_POSITIONS
     stats["effective_max_concurrent_positions"] = int(
         effective_cfg.get("MAX_CONCURRENT_POSITIONS", cfg.MAX_CONCURRENT_POSITIONS)

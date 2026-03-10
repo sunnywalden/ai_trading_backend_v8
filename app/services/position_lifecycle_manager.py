@@ -41,6 +41,7 @@ from app.core.event_bus import Topics, event_bus
 from app.models.execution_slice import ExecutionSlice, SliceAction, SliceStatus
 from app.models.position import ClosingReason, ExecutionPath, Position, PositionStatus
 from app.models.position_lifecycle_event import EventKind, PositionLifecycleEvent
+from app.services.portfolio_cache_service import invalidate_portfolio_view_caches
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +183,7 @@ class PositionLifecycleManager:
             },
         )
 
-        await self._session.commit()
+        await self._commit_and_invalidate(pos.account_id)
         logger.info(
             "[PLM] Created Position %d + OPEN Slice %d for %s/%s",
             pos.id,
@@ -264,7 +265,7 @@ class PositionLifecycleManager:
                 "qty": requested_qty,
             },
         )
-        await self._session.commit()
+        await self._commit_and_invalidate(pos.account_id)
         return slc
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -357,7 +358,7 @@ class PositionLifecycleManager:
                 "closing_reason": closing_reason,
             },
         )
-        await self._session.commit()
+        await self._commit_and_invalidate(pos.account_id)
         return slc
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -500,7 +501,7 @@ class PositionLifecycleManager:
             },
         )
 
-        await self._session.commit()
+        await self._commit_and_invalidate(pos.account_id)
         return pos
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -569,7 +570,7 @@ class PositionLifecycleManager:
                 "error": error_message,
             },
         )
-        await self._session.commit()
+        await self._commit_and_invalidate(pos.account_id)
         return pos
 
     async def on_slice_stuck(
@@ -621,7 +622,7 @@ class PositionLifecycleManager:
                 "elapsed_seconds": elapsed_seconds,
             },
         )
-        await self._session.commit()
+        await self._commit_and_invalidate(pos.account_id)
         return pos
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -656,7 +657,7 @@ class PositionLifecycleManager:
             actor=actor,
             meta={"note": note},
         )
-        await self._session.commit()
+        await self._commit_and_invalidate(pos.account_id)
         return slc
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -698,7 +699,7 @@ class PositionLifecycleManager:
                 "reason": reason,
             },
         )
-        await self._session.commit()
+        await self._commit_and_invalidate(pos.account_id)
         return pos
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -859,6 +860,11 @@ class PositionLifecycleManager:
         )
         self._session.add(event)
         await self._session.flush()
+
+    async def _commit_and_invalidate(self, account_id: Optional[str]) -> None:
+        await self._session.commit()
+        if account_id:
+            await invalidate_portfolio_view_caches(str(account_id))
 
     @staticmethod
     async def _emit(topic: Topics, payload: dict) -> None:

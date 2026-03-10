@@ -27,6 +27,7 @@ from app.services.fundamental_analysis_service import \
 from app.services.geopolitical_events_service import GeopoliticalEventsService
 from app.services.macro_indicators_service import MacroIndicatorsService
 from app.services.macro_risk_scoring_service import MacroRiskScoringService
+from app.services.portfolio_cache_service import invalidate_positions_assessment_cache
 from app.services.position_scoring_service import PositionScoringService
 from app.services.technical_analysis_service import TechnicalAnalysisService
 
@@ -119,19 +120,6 @@ async def get_session():
 
     async with SessionLocal() as session:
         yield session
-
-
-async def _invalidate_positions_assessment_cache(account_id: str) -> None:
-    """清理持仓评估缓存，避免刷新后继续命中过期汇总。"""
-    if not account_id or not redis_client:
-        return
-
-    try:
-        keys = await redis_client.keys(f"{cache.prefix}positions_assessment:{account_id}:*")
-        if keys:
-            await redis_client.delete(*keys)
-    except Exception:
-        pass
 
 
 @router.get("/positions/assessment", response_model=PositionsAssessmentResponse)
@@ -915,7 +903,7 @@ async def refresh_positions_assessment(
             }
 
         results = await _do_refresh(symbols, account_id, force)
-        await _invalidate_positions_assessment_cache(account_id)
+        await invalidate_positions_assessment_cache(account_id)
 
         return {
             "message": "Refresh completed",

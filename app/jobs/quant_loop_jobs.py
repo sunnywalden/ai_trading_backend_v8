@@ -16,6 +16,7 @@ from app.core.config import settings
 from app.core.market_hours import is_any_market_active
 from app.engine.quant_trading_loop import QuantTradingLoop
 from app.models.db import SessionLocal
+from app.services.portfolio_cache_service import invalidate_portfolio_view_caches
 from app.services.regime_classifier import RegimeClassifier
 from app.services.signal_quality_config import (get_regime_adjusted_config,
                                                 get_signal_quality_config)
@@ -221,6 +222,7 @@ async def run_position_exit_scan():
                         f"pnl={d.get('pnl_pct', 0):.2%} "
                         f"days={d.get('holding_days')}"
                     )
+            await invalidate_portfolio_view_caches(account_id)
         except Exception as e:
             logger.error(f"[quant_jobs] Position exit scan FAILED: {e}", exc_info=True)
 
@@ -256,6 +258,7 @@ async def run_position_rebalance_scan():
                         f"  ↳ {d['symbol']} score={d.get('score')} "
                         f"rec={d.get('recommendation')} signal={d.get('signal_created')}"
                     )
+            await invalidate_portfolio_view_caches(account_id)
         except Exception as e:
             logger.error(f"[quant_jobs] Position rebalance scan FAILED: {e}", exc_info=True)
 
@@ -306,6 +309,7 @@ async def run_position_capacity_guard():
                         f"rec={d.get('recommendation')} risk={d.get('risk_level')} "
                         f"signal={d.get('signal_created')}"
                     )
+            await invalidate_portfolio_view_caches(account_id)
         except Exception as e:
             logger.error(f"[quant_jobs] Position capacity guard FAILED: {e}", exc_info=True)
 
@@ -337,6 +341,7 @@ async def run_broker_order_reconcile():
                 f"filled_synced={result.get('filled_synced', 0)} "
                 f"remaining_EXECUTING={result.get('remaining_EXECUTING', 0)}"
             )
+            await invalidate_portfolio_view_caches(account_id)
         except Exception as e:
             logger.error(f"[quant_jobs] Broker order reconcile FAILED: {e}", exc_info=True)
 

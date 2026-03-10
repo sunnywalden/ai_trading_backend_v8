@@ -22,6 +22,7 @@ from app.models.trading_signal import TradingSignal, SignalStatus
 from app.models.autonomy_audit_log import AutonomyAuditLog
 from app.models.strategy import Strategy, StrategyRun, HistoricalStrategyRun
 from app.services.autonomous_engine import autonomous_engine
+from app.services.portfolio_cache_service import invalidate_portfolio_view_caches
 from app.services.signal_quality_funnel import signal_quality_funnel, SignalQualityTier
 
 router = APIRouter(prefix="/autonomy", tags=["V10-Autonomy"])
@@ -794,6 +795,7 @@ async def trigger_rebalance_scan(
     from app.engine.position_rebalance_monitor import PositionRebalanceMonitor
     monitor = PositionRebalanceMonitor(session)
     result = await monitor.scan(account_id=account_id)
+    await invalidate_portfolio_view_caches(account_id)
     return {"success": True, "result": result}
 
 
@@ -820,6 +822,7 @@ async def trigger_capacity_guard(
         max_positions=max_positions,
         force_refresh_scores=True,
     )
+    await invalidate_portfolio_view_caches(account_id)
     return {
         "success": True,
         "account_id": account_id,

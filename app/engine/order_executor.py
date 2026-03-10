@@ -20,6 +20,7 @@ from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.trading_signal import TradingSignal, SignalStatus, SignalType
+from app.models.execution_slice import ExecutionSlice, SliceStatus
 from app.broker.factory import make_option_broker_client
 from app.services.account_service import AccountService
 from app.services.risk_event_logger import log_risk_event
@@ -424,7 +425,6 @@ class OrderExecutor:
         status = resp.get("status")  # FILLED, CANCELLED, REJECTED, PENDING, EXECUTING
         
         # 2. 更新关联的信号状态
-        from app.models.trading_signal import TradingSignal, SignalStatus
         from app.models.execution_intent import AutonomousExecutionIntent
         # 精确匹配 order_id (string)
         stmt = select(TradingSignal).where(TradingSignal.order_id == str(order_id))
@@ -467,6 +467,13 @@ class OrderExecutor:
                 signal.order_id = None
             
             await self.session.commit()
+            await self._sync_position_lifecycle_from_order_status(
+                order_id=str(order_id),
+                broker_status=str(status or ""),
+                broker_message=resp.get("message"),
+                avg_fill_price=resp.get("avg_fill_price"),
+                filled_quantity=resp.get("filled_quantity"),
+            )
             print(f"[OrderExecutor] Updated signal {signal.signal_id} ({signal.symbol}) status to {signal.status.value}. Broker status: {status}")
 
             # 3. 如果已成交或失败，更新交易日志
@@ -513,6 +520,101 @@ class OrderExecutor:
             logger.debug("[OrderExecutor] No signal found matching order_id=%s during status sync", order_id)
         
         return resp
+
+    async def _sync_position_lifecycle_from_order_status(
+        self,
+        *,
+        order_id: str,
+        broker_status: str,
+        broker_message: Optional[str],
+        avg_fill_price: Any,
+        filled_quantity: Any,
+    ) -> None:
+        """将券商订单状态同步到 ExecutionSlice / Position 生命周期。
+
+        关键目的：避免订单在券商侧已 FILLED，但 Position 仍停留在 CLOSING / OPENING。
+        """
+        from app.models.execution_intent import AutonomousExecutionIntent
+        from app.services.position_lifecycle_manager import PositionLifecycleManager
+
+        intent = (
+            await self.session.execute(
+                select(AutonomousExecutionIntent)
+                .where(AutonomousExecutionIntent.order_id == str(order_id))
+                .order_by(
+                    AutonomousExecutionIntent.updated_at.desc(),
+                    AutonomousExecutionIntent.id.desc(),
+                )
+                .limit(1)
+            )
+        ).scalars().first()
+        if intent is None or intent.execution_slice_id is None:
+            return
+
+        slice_row = (
+            await self.session.execute(
+                select(ExecutionSlice).where(ExecutionSlice.id == intent.execution_slice_id)
+            )
+        ).scalars().first()
+        if slice_row is None:
+            return
+
+        normalized_status = str(broker_status or "").upper()
+        if normalized_status == "FILLED":
+            if slice_row.status == SliceStatus.FILLED.value:
+                return
+
+            resolved_qty_raw = (
+                filled_quantity
+                if filled_quantity not in (None, "")
+                else slice_row.requested_qty
+            )
+            try:
+                resolved_qty = float(resolved_qty_raw)
+            except (TypeError, ValueError):
+                resolved_qty = float(slice_row.requested_qty or 0.0)
+
+            resolved_avg_price_raw = (
+                avg_fill_price
+                if avg_fill_price not in (None, "")
+                else (
+                    slice_row.avg_fill_price
+                    if slice_row.avg_fill_price is not None
+                    else 0.0
+                )
+            )
+            try:
+                resolved_avg_price = float(resolved_avg_price_raw)
+            except (TypeError, ValueError):
+                resolved_avg_price = float(slice_row.avg_fill_price or 0.0)
+
+            if resolved_qty <= 0:
+                resolved_qty = float(slice_row.requested_qty or 0.0)
+
+            partial = resolved_qty < float(slice_row.requested_qty or 0.0)
+            plm = PositionLifecycleManager(self.session)
+            await plm.on_slice_filled(
+                slice_id=slice_row.id,
+                filled_qty=resolved_qty,
+                avg_price=resolved_avg_price,
+                partial=partial,
+            )
+            return
+
+        if normalized_status in {"CANCELLED", "REJECTED"}:
+            if slice_row.status in {
+                SliceStatus.FAILED.value,
+                SliceStatus.CANCELLED.value,
+                SliceStatus.FILLED.value,
+            }:
+                return
+
+            plm = PositionLifecycleManager(self.session)
+            await plm.on_slice_failed(
+                slice_id=slice_row.id,
+                error_message=str(broker_message or normalized_status),
+                actor="broker_sync",
+            )
     
     async def cancel_signal(self, signal_id: str) -> bool:
         """取消信号(如果还未执行)"""

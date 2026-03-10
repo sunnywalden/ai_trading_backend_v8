@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
@@ -14,6 +15,7 @@ from app.models.db import get_session
 from app.models.trading_plan import TradingPlan
 from app.models.trading_signal import TradingSignal
 from app.services.copilot_service import copilot_service
+from app.services.position_query_service import PositionQueryService
 
 # 无独立 ORM 模型的辅助表，使用模块级常量集中管理
 _ALERT_RECORDS_TABLE = "alert_records"
@@ -157,8 +159,6 @@ async def get_copilot_context(
     - LLM 提供商健康状态
     - 最新宏观风险评分
     """
-    from sqlalchemy import text
-
     from app.services.ai_client_manager import get_circuit_breaker_status
 
     ctx: Dict[str, Any] = {
@@ -168,15 +168,10 @@ async def get_copilot_context(
 
     # ─── 活跃持仓 ───
     try:
-        r = await session.execute(
-            text(
-                f"SELECT COUNT(*) FROM {TradingPlan.__tablename__} "
-                "WHERE account_id=:aid "
-                "AND UPPER(plan_status) IN ('ACTIVE','PARTIAL')"
-            ),
-            {"aid": current_user},
-        )
-        ctx["active_positions"] = r.scalar() or 0
+        context_account_id = await copilot_service._resolve_context_account_id(current_user)
+        position_query = PositionQueryService(session)
+        portfolio_summary = await position_query.get_portfolio_summary(context_account_id)
+        ctx["active_positions"] = int(portfolio_summary.get("active_positions") or 0)
     except Exception:
         ctx["active_positions"] = None
 
