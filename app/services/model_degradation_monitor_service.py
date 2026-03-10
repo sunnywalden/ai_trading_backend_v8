@@ -230,15 +230,21 @@ class ModelDegradationMonitorService:
         now: datetime,
     ) -> list[dict[str, Any]]:
         from app.models.execution_quality_log import ExecutionQualityLog
+        from app.models.execution_intent import AutonomousExecutionIntent
 
         recent_since = now - timedelta(days=7)
         prev_since = now - timedelta(days=21)
 
         stmt = (
             select(ExecutionQualityLog)
+            .join(
+                AutonomousExecutionIntent,
+                AutonomousExecutionIntent.id == ExecutionQualityLog.intent_id,
+            )
             .where(
                 ExecutionQualityLog.account_id.in_(keys),
                 ExecutionQualityLog.created_at >= prev_since,
+                AutonomousExecutionIntent.status == "SUCCESS",
             )
             .order_by(desc(ExecutionQualityLog.created_at))
             .limit(500)
@@ -273,6 +279,7 @@ class ModelDegradationMonitorService:
                     "recent_sample": len(recent_logs),
                     "prev_sample": len(prev_logs),
                     "unit": "bps",
+                    "counting_rule": "successful executions only",
                 },
             }
         ]

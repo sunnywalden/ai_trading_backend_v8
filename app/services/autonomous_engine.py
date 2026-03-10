@@ -1168,6 +1168,45 @@ class AutonomousEngine:
                         )
                         continue
 
+                if is_closing and not is_force_exit:
+                    has_outstanding_close, outstanding_reason = await self._has_outstanding_closing_order(
+                        db=db,
+                        account_id=account_id,
+                        symbol=str(decision.get("symbol") or ""),
+                        exclude_signal_db_id=int(signal.get("id") or 0) or None,
+                    )
+                    if has_outstanding_close:
+                        await self._update_signal_status(db, signal["id"], _SS.REJECTED)
+                        await self._update_execution_intent(
+                            db,
+                            execution_intent_id,
+                            status="REJECTED",
+                            reason=f"outstanding-close-order({outstanding_reason})",
+                        )
+                        logger.warning(
+                            "[AutonomousEngine] Skip duplicate closing order for %s: %s, signal=%s",
+                            decision.get("symbol"),
+                            outstanding_reason,
+                            signal["id"],
+                        )
+                        results.append(
+                            {
+                                "signal_id": signal["id"],
+                                "decision": decision,
+                                "gate_passed": True,
+                                "order_id": None,
+                                "execution_intent_id": execution_intent_id,
+                                "execution_path": execution_path,
+                                "signal_quality_tier": signal.get("signal_quality_tier"),
+                                "signal_quality_score": signal.get("signal_quality_score"),
+                                "signal_quality_quota_exempt": bool(
+                                    signal.get("signal_quality_quota_exempt")
+                                ),
+                                "reason": f"outstanding-close-order({outstanding_reason})",
+                            }
+                        )
+                        continue
+
                 if level == "ADVISORY":
                     await self._notify_suggestion(account_id, decision)
                     await self._update_signal_status(
@@ -1987,6 +2026,80 @@ class AutonomousEngine:
         except Exception as e:
             logger.warning(f"[AutonomousEngine] Acquire Redis order lock failed: {e}")
             return "NO_REDIS"
+
+    async def _has_outstanding_closing_order(
+        self,
+        db: AsyncSession,
+        account_id: str,
+        symbol: str,
+        exclude_signal_db_id: int | None = None,
+    ) -> tuple[bool, str | None]:
+        """检查同标的是否已有未完成的平仓/减仓券商订单。"""
+        if not symbol:
+            return False, None
+
+        from sqlalchemy import and_
+        from sqlalchemy import desc as sa_desc
+        from sqlalchemy import select as sa_select
+
+        from app.broker.factory import make_option_broker_client
+        from app.models.trading_signal import SignalStatus, SignalType, TradingSignal
+
+        cutoff = datetime.utcnow() - timedelta(days=3)
+        stmt = (
+            sa_select(TradingSignal)
+            .where(
+                and_(
+                    TradingSignal.account_id == account_id,
+                    TradingSignal.symbol == symbol,
+                    TradingSignal.order_id.is_not(None),
+                    TradingSignal.created_at >= cutoff,
+                    TradingSignal.signal_type.in_([SignalType.EXIT, SignalType.REDUCE]),
+                    TradingSignal.status.in_(
+                        [
+                            SignalStatus.GENERATED,
+                            SignalStatus.VALIDATED,
+                            SignalStatus.QUEUED,
+                            SignalStatus.EXECUTING,
+                            SignalStatus.EXECUTED,
+                        ]
+                    ),
+                )
+            )
+            .order_by(sa_desc(TradingSignal.created_at), sa_desc(TradingSignal.id))
+            .limit(10)
+        )
+        if exclude_signal_db_id is not None:
+            stmt = stmt.where(TradingSignal.id != exclude_signal_db_id)
+
+        recent_close_signals = list((await db.execute(stmt)).scalars().all())
+        if not recent_close_signals:
+            return False, None
+
+        broker = make_option_broker_client()
+        for sig in recent_close_signals:
+            existing_order_id = str(sig.order_id or "").strip()
+            if not existing_order_id or not existing_order_id.isdigit():
+                continue
+            try:
+                status_resp = await broker.get_order_status(account_id, existing_order_id)
+                broker_status = str(status_resp.get("status") or "").upper()
+            except Exception as exc:
+                logger.debug(
+                    "[AutonomousEngine] Outstanding close order check failed for %s/%s: %s",
+                    symbol,
+                    existing_order_id,
+                    exc,
+                )
+                continue
+
+            if broker_status in {"PENDING", "EXECUTING"}:
+                return (
+                    True,
+                    f"existing close order still {broker_status.lower()} order_id={existing_order_id}",
+                )
+
+        return False, None
 
     async def _release_symbol_order_lock(self, lock_key: Optional[str]) -> None:
         """释放 Redis 下单锁（仅对真实 key 生效）。"""
