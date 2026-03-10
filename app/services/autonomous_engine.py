@@ -2315,26 +2315,36 @@ class AutonomousEngine:
                     account_id, symbol, thesis_key
                 )
                 if existing is not None:
-                    if sig_type == "STOP_LOSS_EXIT":
-                        cr = ClosingReason.STOP_LOSS
-                    elif sig_type == "TAKE_PROFIT_EXIT":
-                        cr = ClosingReason.TAKE_PROFIT
+                    from app.models.position import PositionStatus
+
+                    if existing.status == PositionStatus.CLOSING.value:
+                        logger.debug(
+                            "[AutonomousEngine] Position %s for %s already CLOSING, skip duplicate lifecycle close integration",
+                            existing.id,
+                            symbol,
+                        )
+                        _pos_id = existing.id
                     else:
-                        cr = ClosingReason.VOLITIONAL
-                    slc = await plm.reduce_position(
-                        position_id=existing.id,
-                        requested_qty=qty if qty > 0 else float(existing.open_qty or 0),
-                        closing_reason=cr,
-                        signal_id=str(
-                            signal.get("signal_id") or signal.get("id") or ""
-                        ),
-                        signal_db_id=int(signal.get("id") or 0) or None,
-                        intent_id=execution_intent_id,
-                        execution_path=execution_path,
-                        order_id=order_id,
-                    )
-                    _pos_id = existing.id
-                    _slc_id = slc.id
+                        if sig_type == "STOP_LOSS_EXIT":
+                            cr = ClosingReason.STOP_LOSS
+                        elif sig_type == "TAKE_PROFIT_EXIT":
+                            cr = ClosingReason.TAKE_PROFIT
+                        else:
+                            cr = ClosingReason.VOLITIONAL
+                        slc = await plm.reduce_position(
+                            position_id=existing.id,
+                            requested_qty=qty if qty > 0 else float(existing.open_qty or 0),
+                            closing_reason=cr,
+                            signal_id=str(
+                                signal.get("signal_id") or signal.get("id") or ""
+                            ),
+                            signal_db_id=int(signal.get("id") or 0) or None,
+                            intent_id=execution_intent_id,
+                            execution_path=execution_path,
+                            order_id=order_id,
+                        )
+                        _pos_id = existing.id
+                        _slc_id = slc.id
 
             # Back-link execution_intent → position / slice
             if _pos_id and execution_intent_id:

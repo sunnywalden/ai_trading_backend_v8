@@ -6,6 +6,7 @@ import logging
 import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
+from urllib3 import PoolManager
 
 from tigeropen.tiger_open_config import get_client_config
 from tigeropen.trade.trade_client import TradeClient
@@ -18,6 +19,8 @@ from .models import OptionPosition, UnderlyingPosition, OptionContract, Greeks
 from app.core.cache import cache
 
 logger = logging.getLogger(__name__)
+
+_TIGER_HTTP_POOL_PATCHED = False
 
 class TigerOptionClient(OptionBrokerClient):
     """老虎证券期权敞口客户端（基于官方 tigeropen SDK）
@@ -38,6 +41,7 @@ class TigerOptionClient(OptionBrokerClient):
             account: 交易账户号
         """
         self.account = account
+        self._ensure_http_pool_capacity()
         # 使用官方 SDK 配置
         self.client_config = get_client_config(
             private_key_path=private_key_path,
@@ -52,6 +56,22 @@ class TigerOptionClient(OptionBrokerClient):
         self._pos_cache_ttl = 300 # 5分钟缓存
         self._equity_cache_ttl = 300 # 5分钟缓存
         self._cache_prefix = "broker_pos:"
+
+    @staticmethod
+    def _ensure_http_pool_capacity() -> None:
+        """放大 tigeropen 默认 urllib3 连接池，减少并发轮询时的 pool full 噪音。"""
+        global _TIGER_HTTP_POOL_PATCHED
+        if _TIGER_HTTP_POOL_PATCHED:
+            return
+
+        try:
+            from tigeropen.common.util import web_utils
+
+            web_utils.http_pool = PoolManager(num_pools=8, maxsize=8, block=False)
+            _TIGER_HTTP_POOL_PATCHED = True
+            logger.info("[TigerOptionClient] Expanded tigeropen HTTP pool: num_pools=8 maxsize=8")
+        except Exception as exc:
+            logger.debug("[TigerOptionClient] Failed to expand tigeropen HTTP pool: %s", exc)
     
     async def _get_cached_data(self, key: str) -> Optional[Any]:
         """尝试从 Redis 获取缓存数据"""
