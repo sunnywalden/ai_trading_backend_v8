@@ -19,13 +19,41 @@ import asyncio
 import os
 import sys
 
-from sqlalchemy import text
+ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
+
+
+def _venv_python_path() -> str:
+    scripts_dir = "Scripts" if os.name == "nt" else "bin"
+    exe_name = "python.exe" if os.name == "nt" else "python"
+    return os.path.join(ROOT, ".venv", scripts_dir, exe_name)
+
+
+def _ensure_sqlalchemy_available() -> None:
+    try:
+        import sqlalchemy  # noqa: F401
+    except ModuleNotFoundError as exc:
+        if exc.name != "sqlalchemy":
+            raise
+
+        venv_python = _venv_python_path()
+        same_python = os.path.abspath(sys.executable) == os.path.abspath(
+            venv_python
+        )
+        if os.path.exists(venv_python) and not same_python:
+            os.execv(venv_python, [venv_python, *sys.argv])
+
+        raise SystemExit(
+            "sqlalchemy 未安装。请先激活 .venv，或使用 .venv\\Scripts\\python.exe 运行该脚本。"
+        ) from exc
+
+
+_ensure_sqlalchemy_available()
 
 sys.path.insert(
     0,
-    os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    ),
+    ROOT,
 )
 
 MYSQL_UP = "\n".join(
@@ -116,6 +144,8 @@ DROP TABLE IF EXISTS execution_policy_profiles;
 
 
 async def run_upgrade() -> None:
+    from sqlalchemy import text
+
     from app.models.db import engine
 
     try:
@@ -131,6 +161,8 @@ async def run_upgrade() -> None:
 
 
 async def run_rollback() -> None:
+    from sqlalchemy import text
+
     from app.models.db import engine
 
     try:
@@ -143,6 +175,8 @@ async def run_rollback() -> None:
 
 
 async def run_check() -> None:
+    from sqlalchemy import text
+
     from app.models.db import engine
 
     try:
@@ -183,6 +217,9 @@ def main() -> None:
     else:
         asyncio.run(run_upgrade())
 
+
+if __name__ == "__main__":
+    main()
 
 if __name__ == "__main__":
     main()

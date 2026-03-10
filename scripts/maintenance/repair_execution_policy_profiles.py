@@ -16,10 +16,40 @@ import asyncio
 import os
 import sys
 
-from sqlalchemy.ext.asyncio import (AsyncSession, async_sessionmaker,
-                                    create_async_engine)
+ROOT = os.path.join(os.path.dirname(__file__), "..", "..")
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+
+def _venv_python_path() -> str:
+    scripts_dir = "Scripts" if os.name == "nt" else "bin"
+    exe_name = "python.exe" if os.name == "nt" else "python"
+    return os.path.abspath(os.path.join(ROOT, ".venv", scripts_dir, exe_name))
+
+
+def _ensure_sqlalchemy_available() -> None:
+    try:
+        import sqlalchemy  # noqa: F401
+    except ModuleNotFoundError as exc:
+        if exc.name != "sqlalchemy":
+            raise
+
+        venv_python = _venv_python_path()
+        same_python = os.path.abspath(sys.executable) == os.path.abspath(
+            venv_python
+        )
+        if os.path.exists(venv_python) and not same_python:
+            os.execv(venv_python, [venv_python, *sys.argv])
+
+        raise SystemExit(
+            "sqlalchemy 未安装。请先激活 .venv，或使用 .venv\\Scripts\\python.exe 运行该脚本。"
+        ) from exc
+
+
+_ensure_sqlalchemy_available()
+
+from sqlalchemy.ext.asyncio import (AsyncSession,  # noqa: E402
+                                    async_sessionmaker, create_async_engine)
+
+sys.path.insert(0, ROOT)
 
 from app.core.config import settings  # noqa: E402
 from scripts.maintenance.execution_policy_profile_common import (  # noqa: E402
