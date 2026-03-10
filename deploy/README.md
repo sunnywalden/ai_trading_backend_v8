@@ -174,6 +174,8 @@ GOVERNANCE_HARD_GATE_ENABLED=false
 python scripts/migrations/upgrade_to_v10_5_3.py --check
 ```
 
+> Windows 提示：如果 `python` 指向 `C:\Users\<you>\AppData\Local\Microsoft\WindowsApps\python.exe`，优先使用项目虚拟环境解释器：` .venv\Scripts\python.exe scripts/migrations/upgrade_to_v10_5_3.py --check `。V10.5.3 相关脚本已尝试自动切换到 `.venv`，但显式使用 `.venv` 仍然最稳妥。
+
 若目标表不存在，再执行：
 
 ```bash

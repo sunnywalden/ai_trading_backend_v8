@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.util
 import os
 import sys
 
@@ -26,12 +27,10 @@ def _venv_python_path() -> str:
 
 
 def _ensure_sqlalchemy_available() -> None:
-    try:
-        import sqlalchemy  # noqa: F401
-    except ModuleNotFoundError as exc:
-        if exc.name != "sqlalchemy":
-            raise
+    if importlib.util.find_spec("sqlalchemy") is not None:
+        return
 
+    try:
         venv_python = _venv_python_path()
         same_python = os.path.abspath(sys.executable) == os.path.abspath(
             venv_python
@@ -41,13 +40,17 @@ def _ensure_sqlalchemy_available() -> None:
 
         raise SystemExit(
             "sqlalchemy 未安装。请先激活 .venv，或使用 .venv\\Scripts\\python.exe 运行该脚本。"
+        )
+    except OSError as exc:
+        raise SystemExit(
+            f"无法切换到项目 .venv 解释器：{exc}"
         ) from exc
 
 
 _ensure_sqlalchemy_available()
 
-from sqlalchemy.ext.asyncio import (AsyncSession,  # noqa: E402
-                                    async_sessionmaker, create_async_engine)
+from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 sys.path.insert(0, ROOT)
 
