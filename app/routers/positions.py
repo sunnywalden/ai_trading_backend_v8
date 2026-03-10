@@ -24,6 +24,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.db import get_session
+from app.services.broker_order_sync_service import reconcile_stale_closing_positions
 from app.services.position_lifecycle_manager import PositionLifecycleManager
 from app.services.position_query_service import PositionQueryService
 
@@ -94,6 +95,15 @@ async def portfolio_summary(
     """活跃仓位、异常仓位、卡单数量摘要，供仪表盘小组件使用。"""
     svc = PositionQueryService(db)
     return await svc.get_portfolio_summary(account_id)
+
+
+@router.post("/reconcile-stale-closing", summary="手动收口卡在平仓中的仓位")
+async def reconcile_closing_positions(
+    account_id: str = Query(..., description="账户 ID"),
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """将券商已无真实持仓、但 Position 仍停留在 CLOSING 的仓位手动收口到 CLOSED。"""
+    return await reconcile_stale_closing_positions(db, account_id=account_id)
 
 
 # ---------------------------------------------------------------------------
