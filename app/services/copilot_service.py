@@ -1,12 +1,16 @@
 """V10: CopilotService — 对话式 AI 助理（Trading Copilot）"""
+
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
-import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime
+from datetime import time as dt_time
+from datetime import timedelta
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -16,6 +20,10 @@ from app.models.copilot_message import CopilotMessage
 from app.models.trading_plan import TradingPlan
 
 logger = logging.getLogger(__name__)
+
+_MORNING_BRIEF_SLOT_TZ = ZoneInfo("Asia/Shanghai")
+_MORNING_BRIEF_CONTEXT_TTL = 120
+_ACCOUNT_RESOLVE_CACHE_TTL = 300
 
 # 操作意图关键词映射
 INTENT_PATTERNS = [
@@ -30,6 +38,11 @@ INTENT_PATTERNS = [
 
 class CopilotService:
     """对话式 AI，支持自然语言查询 + 操作意图识别"""
+
+    def __init__(self) -> None:
+        self._resolved_account_cache: dict[str, tuple[str, datetime]] = {}
+        self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._morning_brief_inflight: set[str] = set()
 
     @staticmethod
     def _morning_brief_cache_looks_stale(cached: dict[str, Any]) -> bool:
@@ -50,17 +63,87 @@ class CopilotService:
         )
         has_top_signals = bool(cached.get("top_signals"))
         return positions_count == 0 and (
-            has_top_signals or any(marker in summary for marker in false_empty_markers)
+            has_top_signals
+            or any(marker in summary for marker in false_empty_markers)
         )
+
+    @staticmethod
+    def _build_morning_brief_cache_key(
+        context_account_id: str,
+        day: str,
+    ) -> str:
+        return f"morning_brief:{context_account_id}:{day}"
+
+    @staticmethod
+    def _build_copilot_context_cache_key(
+        context_account_id: str,
+        day: str,
+    ) -> str:
+        return f"copilot_context:{context_account_id}:{day}"
+
+    @staticmethod
+    def _get_morning_brief_slot(
+        now: Optional[datetime] = None,
+    ) -> tuple[str, datetime, datetime]:
+        """按北京时间 08:00 切分早间简报所属交易日。"""
+        if now is None:
+            local_now = datetime.now(_MORNING_BRIEF_SLOT_TZ)
+        elif now.tzinfo is None:
+            local_now = now.replace(tzinfo=_MORNING_BRIEF_SLOT_TZ)
+        else:
+            local_now = now.astimezone(_MORNING_BRIEF_SLOT_TZ)
+
+        slot_start = datetime.combine(
+            local_now.date(),
+            dt_time(
+                hour=settings.SCHEDULER_MORNING_BRIEF_HOUR,
+                minute=settings.SCHEDULER_MORNING_BRIEF_MINUTE,
+            ),
+            tzinfo=_MORNING_BRIEF_SLOT_TZ,
+        )
+        if local_now < slot_start:
+            slot_start -= timedelta(days=1)
+        slot_end = slot_start + timedelta(
+            hours=settings.MORNING_BRIEF_CACHE_TTL_HOURS
+        )
+        return slot_start.date().isoformat(), slot_start, slot_end
+
+    @staticmethod
+    def _compute_morning_brief_expire_seconds(
+        slot_end: datetime,
+        now: Optional[datetime] = None,
+    ) -> int:
+        if now is None:
+            local_now = datetime.now(_MORNING_BRIEF_SLOT_TZ)
+        elif now.tzinfo is None:
+            local_now = now.replace(tzinfo=_MORNING_BRIEF_SLOT_TZ)
+        else:
+            local_now = now.astimezone(_MORNING_BRIEF_SLOT_TZ)
+
+        ttl = int((slot_end - local_now).total_seconds())
+        return max(ttl, 60)
+
+    def _track_background_task(self, task: asyncio.Task[Any]) -> None:
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     async def _resolve_context_account_id(self, account_id: str) -> str:
         """将登录用户标识解析为真实 broker account_id。"""
+        cached = self._resolved_account_cache.get(account_id)
+        if cached and cached[1] > datetime.now():
+            return cached[0]
+
         try:
             from app.broker.factory import make_option_broker_client
 
             broker = make_option_broker_client()
             real_account_id = await broker.get_account_id()
-            return str(real_account_id or account_id)
+            resolved = str(real_account_id or account_id)
+            self._resolved_account_cache[account_id] = (
+                resolved,
+                datetime.now() + timedelta(seconds=_ACCOUNT_RESOLVE_CACHE_TTL),
+            )
+            return resolved
         except Exception as exc:
             logger.debug(
                 "Copilot broker account resolve failed for %s: %s",
@@ -68,6 +151,239 @@ class CopilotService:
                 exc,
             )
             return account_id
+
+    def _build_quick_morning_brief(
+        self,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        market_regime = context.get("market_regime") or "UNKNOWN"
+        quick = self._build_morning_brief_fallback(
+            context,
+            market_regime,
+            "基于实时持仓与信号快照生成",
+        )
+        return self._normalize_morning_brief_result(quick, context)
+
+    def _build_morning_brief_prompt(self, context: dict[str, Any]) -> str:
+        pnl_info = context.get("pnl_ticker") or {}
+        positions_count = context.get("positions_count") or 0
+        factor = context.get("factor_exposure") or {}
+        signals_count = len(context.get("top_signals") or [])
+        factor_info = (
+            factor.get("factor_exposures")
+            or factor.get("factors")
+            or {
+                "Beta": factor.get("beta", "N/A"),
+                "MOM": factor.get("mom", "N/A"),
+            }
+        )
+        factor_str = json.dumps(factor_info, ensure_ascii=False)
+        positions_preview_str = json.dumps(
+            context.get("positions_preview") or [],
+            ensure_ascii=False,
+        )
+        signals_str = json.dumps(
+            context.get("top_signals") or [],
+            ensure_ascii=False,
+        )
+        today_date = context.get("date", "YYYY-MM-DD")
+        market_regime = context.get("market_regime", "UNKNOWN")
+
+        return f"""你是顶级私募量化系统专业 AI，请基于以下账户与市场快照生成今日盘前简报。
+
+【账户快照】
+- 持仓数: {positions_count}
+- 未实现盈亏: {pnl_info.get('unrealized_pnl_pct', 'N/A')}%
+  已实现盈亏: {pnl_info.get('realized_pnl', 'N/A')}
+- 市场体制: {market_regime}
+  自主模式: {context.get('autonomy_level', 'N/A')}
+- 五因子暴露: {factor_str}
+- 活跃信号数: {signals_count}
+- 持仓预览: {positions_preview_str}
+- 信号列表: {signals_str}
+
+【生成要求】
+1. summary: 2-3 句精炼账户状态（盈亏/仓位/主要驱动/核心风险），≤100字，风格简洁专业。
+2. market_outlook: 1-2 句当日市场展望与操作建议方向，≤60字。
+3. key_themes: 精选 2-4 条当日核心关注点（因子异常/集中度/机会/尾部风险等），每条≤30字。
+4. portfolio_snapshot: 从数据中提取结构化指标（若数据缺失填 null）。
+5. top_signals: 严格来自真实信号列表；无信号时推荐 1-2 个适合当前体制的对冲/套利标的，
+   action 用 MONITOR_FOR_HEDGE；禁止 A 股。
+6. risk_alerts: 2-4 条具体风险提示，优先相关性集中度、单边敞口、因子异动，每条≤40字。
+
+请严格按以下 JSON 格式输出（仅输出 JSON，不含其他文字）：
+{{
+  "date": "{today_date}",
+  "market_regime": "{market_regime}",
+  "summary": "2-3句精炼账户状态",
+  "market_outlook": "市场展望与方向建议",
+  "portfolio_snapshot": {{
+    "positions_count": {positions_count},
+    "unrealized_pnl_pct": null,
+    "top_contributor": null,
+    "beta_exposure": null,
+    "mom_exposure": null
+  }},
+  "key_themes": ["关注点1", "关注点2"],
+  "top_signals": [
+    {{"symbol": "AAPL", "action": "BUY", "reason": "核心逻辑", "confidence": 0.75}}
+  ],
+  "risk_alerts": ["风险提示1", "风险提示2"]
+}}"""
+
+    def _parse_morning_brief_result(
+        self,
+        raw_response: str,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        market_regime = context.get("market_regime") or "UNKNOWN"
+        try:
+            match = re.search(r"(\{.*\})", raw_response, re.DOTALL)
+            if match:
+                parsed = json.loads(match.group(1))
+                return self._normalize_morning_brief_result(parsed, context)
+        except Exception as exc:
+            logger.debug("Morning brief JSON parse failed: %s", exc)
+
+        fallback = self._build_morning_brief_fallback(
+            context,
+            market_regime,
+            raw_response or "解析摘要失败，请刷新重试",
+        )
+        return self._normalize_morning_brief_result(fallback, context)
+
+    async def _generate_morning_brief_with_ai(
+        self,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        prompt = self._build_morning_brief_prompt(context)
+        messages = [{"role": "user", "content": prompt}]
+        raw_response, _, _ = await self._call_ai(
+            messages,
+            "lightweight",
+            caller="copilot_morning_brief",
+        )
+        return self._parse_morning_brief_result(raw_response, context)
+
+    def _schedule_morning_brief_refresh(
+        self,
+        cache_key: str,
+        context: dict[str, Any],
+        slot_end: Optional[datetime] = None,
+    ) -> None:
+        if cache_key in self._morning_brief_inflight:
+            return
+
+        self._morning_brief_inflight.add(cache_key)
+
+        async def _runner() -> None:
+            try:
+                result = await self._generate_morning_brief_with_ai(context)
+                effective_slot_end = slot_end or self._get_morning_brief_slot()[2]
+                expire = self._compute_morning_brief_expire_seconds(
+                    effective_slot_end
+                )
+                await cache.set(
+                    cache_key,
+                    result,
+                    expire=expire,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "Morning brief background refresh failed for %s: %s",
+                    cache_key,
+                    exc,
+                )
+            finally:
+                self._morning_brief_inflight.discard(cache_key)
+
+        self._track_background_task(asyncio.create_task(_runner()))
+
+    async def _repair_stale_morning_brief(
+        self,
+        cached: dict[str, Any],
+        account_id: str,
+        context_account_id: str,
+        cache_key: str,
+    ) -> dict[str, Any]:
+        context = await self._build_context(
+            account_id,
+            context_account_id=context_account_id,
+        )
+        if int(context.get("positions_count") or 0) <= 0:
+            return cached
+
+        normalized = self._normalize_morning_brief_result(
+            dict(cached),
+            context,
+        )
+        _, _, slot_end = self._get_morning_brief_slot()
+        await cache.set(
+            cache_key,
+            normalized,
+            expire=self._compute_morning_brief_expire_seconds(slot_end),
+        )
+        self._schedule_morning_brief_refresh(
+            cache_key,
+            context,
+            slot_end=slot_end,
+        )
+        return normalized
+
+    async def generate_and_cache_morning_brief(
+        self,
+        account_id: str,
+        *,
+        force_refresh: bool = False,
+        prefer_quick: bool = False,
+        reference_time: Optional[datetime] = None,
+    ) -> dict[str, Any]:
+        """生成并缓存当前早间简报时段的结果。
+
+        - 调度任务使用 `prefer_quick=False`，允许在后台窗口内同步跑 AI。
+        - 在线请求使用 `prefer_quick=True`，保证接口快速返回。
+        """
+        slot_day, _, slot_end = self._get_morning_brief_slot(reference_time)
+        context_account_id = await self._resolve_context_account_id(account_id)
+        cache_key = self._build_morning_brief_cache_key(
+            context_account_id,
+            slot_day,
+        )
+
+        if not force_refresh:
+            cached = await cache.get(cache_key)
+            if cached and not self._morning_brief_cache_looks_stale(cached):
+                return cached
+
+        context = await self._build_context(
+            account_id,
+            context_account_id=context_account_id,
+        )
+        if prefer_quick:
+            result = self._build_quick_morning_brief(context)
+        else:
+            try:
+                result = await self._generate_morning_brief_with_ai(context)
+            except Exception as exc:
+                logger.debug(
+                    (
+                        "Morning brief AI generation failed for %s, "
+                        "fallback to quick brief: %s"
+                    ),
+                    account_id,
+                    exc,
+                )
+                result = self._build_quick_morning_brief(context)
+
+        await cache.set(
+            cache_key,
+            result,
+            expire=self._compute_morning_brief_expire_seconds(
+                slot_end,
+                now=reference_time,
+            ),
+        )
+        return result
 
     def _build_morning_brief_fallback(
         self,
@@ -78,7 +394,11 @@ class CopilotService:
         positions_count = int(context.get("positions_count") or 0)
         positions_preview = context.get("positions_preview") or []
         pnl_info = context.get("pnl_ticker") or {}
-        preview_symbols = [str(item.get("symbol")) for item in positions_preview[:3] if item.get("symbol")]
+        preview_symbols = [
+            str(item.get("symbol"))
+            for item in positions_preview[:3]
+            if item.get("symbol")
+        ]
         symbol_text = "、".join(preview_symbols) if preview_symbols else "当前持仓"
         unrealized_pct = pnl_info.get("unrealized_pnl_pct")
         unrealized_text = (
@@ -143,14 +463,24 @@ class CopilotService:
             snapshot["mom_exposure"] = factor_exposure.get("beta_mom")
 
         summary = str(result.get("summary") or "")
-        false_empty_markers = ("空仓", "无持仓", "持仓 0", "持仓0", "positions_count: 0")
-        if positions_count > 0 and any(marker in summary for marker in false_empty_markers):
+        false_empty_markers = (
+            "空仓",
+            "无持仓",
+            "持仓 0",
+            "持仓0",
+            "positions_count: 0",
+        )
+        if positions_count > 0 and any(
+            marker in summary for marker in false_empty_markers
+        ):
             preview_symbols = [
                 str(item.get("symbol"))
                 for item in positions_preview[:3]
                 if item.get("symbol")
             ]
-            symbol_text = "、".join(preview_symbols) if preview_symbols else "当前持仓"
+            symbol_text = (
+                "、".join(preview_symbols) if preview_symbols else "当前持仓"
+            )
             unrealized_pct = pnl_info.get("unrealized_pnl_pct")
             unrealized_text = (
                 f"未实现盈亏约 {unrealized_pct}%"
@@ -166,7 +496,9 @@ class CopilotService:
             if not isinstance(risk_alerts, list):
                 risk_alerts = []
             risk_alerts = [
-                item for item in risk_alerts if all(marker not in str(item) for marker in false_empty_markers)
+                item
+                for item in risk_alerts
+                if all(marker not in str(item) for marker in false_empty_markers)
             ]
             if not risk_alerts:
                 risk_alerts = [
@@ -201,13 +533,20 @@ class CopilotService:
         missing_words = ("缺失", "未知", "暂无", "没有", "未生成")
 
         if has_factor_snapshot:
+
             def _is_false_missing_text(text: str) -> bool:
                 return any(m in text for m in missing_factor_markers) and any(
                     w in text for w in missing_words
                 )
 
-            key_themes = [item for item in key_themes if not _is_false_missing_text(item)]
-            risk_alerts = [item for item in risk_alerts if not _is_false_missing_text(item)]
+            key_themes = [
+                item for item in key_themes if not _is_false_missing_text(item)
+            ]
+            risk_alerts = [
+                item
+                for item in risk_alerts
+                if not _is_false_missing_text(item)
+            ]
 
             max_corr = factor_exposure.get("max_pairwise_corr")
             portfolio_beta = factor_exposure.get("portfolio_beta")
@@ -260,14 +599,25 @@ class CopilotService:
         messages.append({"role": "user", "content": message})
 
         # 调用 AI
-        raw_response, model_used, tokens = await self._call_ai(messages, model_type, caller="copilot_chat")
+        raw_response, model_used, tokens = await self._call_ai(
+            messages, model_type, caller="copilot_chat"
+        )
 
         # 意图检测
         action_intent = self._detect_intent(message, raw_response)
 
         # 持久化
         if db:
-            await self._save_messages(db, account_id, session_id, message, raw_response, model_used, action_intent, tokens)
+            await self._save_messages(
+                db,
+                account_id,
+                session_id,
+                message,
+                raw_response,
+                model_used,
+                action_intent,
+                tokens,
+            )
 
         response = {
             "message": raw_response,
@@ -279,11 +629,18 @@ class CopilotService:
         }
         return response
 
-    async def morning_brief(self, account_id: str, force_refresh: bool = False) -> dict:
-        """每日生成盘前摘要 (V10 structured) - 已优化性能"""
-        today_str = date.today().isoformat()
+    async def morning_brief(
+        self,
+        account_id: str,
+        force_refresh: bool = False,
+    ) -> dict:
+        """每日生成盘前摘要（北京时间 08:00 预生成，请求时优先直返缓存）。"""
         context_account_id = await self._resolve_context_account_id(account_id)
-        cache_key = f"morning_brief:{context_account_id}:{today_str}"
+        slot_day, _, slot_end = self._get_morning_brief_slot()
+        cache_key = self._build_morning_brief_cache_key(
+            context_account_id,
+            slot_day,
+        )
 
         if not force_refresh:
             cached = await cache.get(cache_key)
@@ -291,102 +648,39 @@ class CopilotService:
                 if not self._morning_brief_cache_looks_stale(cached):
                     return cached
 
-                context = await self._build_context(account_id)
-                if int(context.get("positions_count") or 0) > 0:
-                    normalized_cached = self._normalize_morning_brief_result(
-                        dict(cached), context
-                    )
-                    await cache.set(cache_key, normalized_cached, expire=3600 * 4)
-                    return normalized_cached
-                return cached
-
-        context = await self._build_context(account_id)
-
-        # 提取关键数据用于精简 prompt
-        pnl_info = context.get("pnl_ticker") or {}
-        positions_count = context.get("positions_count") or 0
-        factor = context.get("factor_exposure") or {}
-        signals_count = len(context.get("top_signals") or [])
-        factor_info = (
-            factor.get("factor_exposures")
-            or factor.get("factors")
-            or {"Beta": factor.get("beta", "N/A"), "MOM": factor.get("mom", "N/A")}
-        )
-        factor_str = json.dumps(factor_info, ensure_ascii=False)
-        positions_preview_str = json.dumps(context.get("positions_preview") or [], ensure_ascii=False)
-        signals_str = json.dumps(context.get("top_signals") or [], ensure_ascii=False)
-        today_date = context.get("date", "YYYY-MM-DD")
-        market_regime = context.get("market_regime", "UNKNOWN")
-
-        prompt = f"""你是顶级私募量化系统专业 AI，请基于以下账户与市场快照生成今日盘前简报。
-
-【账户快照】
-- 持仓数: {positions_count}
-- 未实现盈亏: {pnl_info.get('unrealized_pnl_pct', 'N/A')}%  已实现盈亏: {pnl_info.get('realized_pnl', 'N/A')}
-- 市场体制: {market_regime}  自主模式: {context.get('autonomy_level', 'N/A')}
-- 五因子暴露: {factor_str}
-- 活跃信号数: {signals_count}
-- 持仓预览: {positions_preview_str}
-- 信号列表: {signals_str}
-
-【生成要求】
-1. summary: 2-3 句精炼账户状态（盈亏/仓位/主要驱动/核心风险），≤100字，风格简洁专业。
-2. market_outlook: 1-2 句当日市场展望与操作建议方向，≤60字。
-3. key_themes: 精选 2-4 条当日核心关注点（因子异常/集中度/机会/尾部风险等），每条≤30字。
-4. portfolio_snapshot: 从数据中提取结构化指标（若数据缺失填 null）。
-5. top_signals: 严格来自真实信号列表，无信号时推荐 1-2 个适合当前体制的对冲/套利标的（action 用 MONITOR_FOR_HEDGE）；禁止 A 股。
-6. risk_alerts: 2-4 条具体风险提示，优先相关性集中度、单边敞口、因子异动，每条≤40字。
-
-请严格按以下 JSON 格式输出（仅输出 JSON，不含其他文字）：
-{{
-  "date": "{today_date}",
-  "market_regime": "{market_regime}",
-  "summary": "2-3句精炼账户状态",
-  "market_outlook": "市场展望与方向建议",
-  "portfolio_snapshot": {{
-    "positions_count": {positions_count},
-    "unrealized_pnl_pct": null,
-    "top_contributor": null,
-    "beta_exposure": null,
-    "mom_exposure": null
-  }},
-  "key_themes": ["关注点1", "关注点2"],
-  "top_signals": [
-    {{"symbol": "AAPL", "action": "BUY", "reason": "核心逻辑", "confidence": 0.75}}
-  ],
-  "risk_alerts": ["风险提示1", "风险提示2"]
-}}"""
-
-        messages = [{"role": "user", "content": prompt}]
-        # 优化：早间简报优先保证响应速度，使用 lightweight 模型 (deepseek-chat)
-        # 强制刷新也不需要 complex 推理，仅是为了获取最新数据快照
-        model_type = "lightweight"
-        raw_response, _, _ = await self._call_ai(messages, model_type, caller="copilot_morning_brief")
-        
-        result = None
-        try:
-            # 简单提取 JSON
-            match = re.search(r"(\{.*\})", raw_response, re.DOTALL)
-            if match:
-                result = json.loads(match.group(1))
-            else:
-                result = self._build_morning_brief_fallback(
-                    context,
-                    market_regime,
-                    raw_response,
+                return await self._repair_stale_morning_brief(
+                    dict(cached),
+                    account_id,
+                    context_account_id,
+                    cache_key,
                 )
-        except Exception:
-            result = self._build_morning_brief_fallback(
-                context,
-                market_regime,
-                "解析摘要失败，请刷新重试",
-            )
 
-        result = self._normalize_morning_brief_result(result, context)
-
-        # 缓存结果，有效期 4 小时
-        await cache.set(cache_key, result, expire=3600 * 4)
+        result = await self.generate_and_cache_morning_brief(
+            account_id,
+            force_refresh=force_refresh,
+            prefer_quick=True,
+        )
+        context = await self._build_context(
+            account_id,
+            context_account_id=context_account_id,
+        )
+        self._schedule_morning_brief_refresh(
+            cache_key,
+            context,
+            slot_end=slot_end,
+        )
         return result
+
+    async def generate_daily_morning_brief_job(self) -> dict[str, Any]:
+        """供调度器调用：北京时间 08:00 预生成当日早间简报。"""
+        target_account = (
+            settings.ADMIN_USERNAME if settings.AUTH_ENABLED else "anonymous"
+        )
+        return await self.generate_and_cache_morning_brief(
+            target_account,
+            force_refresh=True,
+            prefer_quick=False,
+        )
 
     async def confirm_action(
         self, account_id: str, action_id: str, db: AsyncSession
@@ -413,7 +707,9 @@ class CopilotService:
             params = intent.get("params", {})
             matched = params.get("matched", [])
             symbol = matched[0] if matched else params.get("symbol")
-            price = float(matched[1]) if len(matched) > 1 else float(params.get("price", 0))
+            price = (
+                float(matched[1]) if len(matched) > 1 else float(params.get("price", 0))
+            )
             if symbol and price > 0:
                 await db.execute(
                     text(
@@ -430,10 +726,15 @@ class CopilotService:
             params = intent.get("params", {})
             matched = params.get("matched", [])
             symbol = matched[0] if matched else params.get("symbol")
-            quantity = float(matched[1]) if len(matched) > 1 else float(params.get("quantity", 100))
+            quantity = (
+                float(matched[1])
+                if len(matched) > 1
+                else float(params.get("quantity", 100))
+            )
             side = params.get("side", "BUY").upper()
             if symbol:
                 from app.services.twap_vwap_service import TwapVwapService
+
                 await TwapVwapService().submit(
                     symbol=symbol,
                     side=side,
@@ -461,6 +762,7 @@ class CopilotService:
         elif intent["type"] == "pause_autonomy":
             from app.core.runtime_config import \
                 set_autonomy_level as _set_level
+
             await _set_level("ADVISORY")
 
         # 标记已确认
@@ -473,7 +775,11 @@ class CopilotService:
         )
         await db.commit()
 
-        return {"success": True, "action_type": intent["type"], "params": intent.get("params", {})}
+        return {
+            "success": True,
+            "action_type": intent["type"],
+            "params": intent.get("params", {}),
+        }
 
     # ──────────────────────────────────────────
     # 内部方法
@@ -481,7 +787,17 @@ class CopilotService:
 
     def _is_complex_query(self, message: str) -> bool:
         """判断是否需要复杂推理模型"""
-        complex_keywords = ["分析", "评估", "策略", "优化", "为什么", "怎么", "建议", "风险", "回测"]
+        complex_keywords = [
+            "分析",
+            "评估",
+            "策略",
+            "优化",
+            "为什么",
+            "怎么",
+            "建议",
+            "风险",
+            "回测",
+        ]
         return any(kw in message for kw in complex_keywords)
 
     def _detect_intent(self, user_msg: str, ai_response: str) -> Optional[dict]:
@@ -491,7 +807,11 @@ class CopilotService:
             if m:
                 groups = m.groups()
                 # 范围检查：禁止 A 股操作 (SZ/SH)
-                if groups and any(isinstance(g, str) and (g.upper().endswith(".SZ") or g.upper().endswith(".SH")) for g in groups):
+                if groups and any(
+                    isinstance(g, str)
+                    and (g.upper().endswith(".SZ") or g.upper().endswith(".SH"))
+                    for g in groups
+                ):
                     logger.warning(f"Blocking A-share intent detection: {user_msg}")
                     return None
                 return {"type": intent_type, "params": {"matched": groups}}
@@ -502,12 +822,29 @@ class CopilotService:
         if not text:
             return False
         keywords = [
-            "持仓", "仓位", "敞口", "因子", "beta", "风险", "组合", "P&L", "盈亏", "暴露",
-            "portfolio", "exposure", "position", "positions", "holding", "holdings", "pnl",
+            "持仓",
+            "仓位",
+            "敞口",
+            "因子",
+            "beta",
+            "风险",
+            "组合",
+            "P&L",
+            "盈亏",
+            "暴露",
+            "portfolio",
+            "exposure",
+            "position",
+            "positions",
+            "holding",
+            "holdings",
+            "pnl",
         ]
         return any(k.lower() in text.lower() for k in keywords)
 
-    def _build_portfolio_fact_prompt(self, message: str, context: dict[str, Any]) -> Optional[str]:
+    def _build_portfolio_fact_prompt(
+        self, message: str, context: dict[str, Any]
+    ) -> Optional[str]:
         """仅在持仓评估问题时注入结构化事实，减少模型幻觉。"""
         if not self._is_portfolio_assessment_query(message):
             return None
@@ -529,20 +866,33 @@ class CopilotService:
             "3) 不得编造未提供的仓位数量、敞口数值或收益率。"
         )
 
-    async def _build_context(self, account_id: str) -> dict:
+    async def _build_context(
+        self,
+        account_id: str,
+        context_account_id: Optional[str] = None,
+    ) -> dict:
         """构建增强版账户上下文摘要，为 AI 提供真实决策依据"""
         from sqlalchemy import desc, select
 
         from app.core.runtime_config import get_autonomy_level as _get_level
         from app.models.db import SessionLocal
-        from app.models.trading_signal import SignalStatus, TradingSignal
+        from app.models.trading_signal import TradingSignal
         from app.services.regime_classifier import regime_classifier
         from app.services.war_room_service import war_room_service
 
-        context_account_id = await self._resolve_context_account_id(account_id)
+        resolved_account_id = (
+            context_account_id or await self._resolve_context_account_id(account_id)
+        )
+        cache_key = self._build_copilot_context_cache_key(
+            resolved_account_id,
+            date.today().isoformat(),
+        )
+        cached_context = await cache.get(cache_key)
+        if isinstance(cached_context, dict):
+            return cached_context
 
         context = {
-            "account_id": context_account_id,
+            "account_id": resolved_account_id,
             "auth_user": account_id,
             "date": date.today().isoformat(),
             "autonomy_level": await _get_level(),
@@ -567,31 +917,38 @@ class CopilotService:
 
             # 2. 获取高置信度信号 (限 5 条，仅限美股/港股)
             # 排除包含 .SZ 或 .SH 的标的，同时支持 account_id=user_id 时取用户的信号
-            stmt = select(TradingSignal).where(
-                (TradingSignal.account_id == context_account_id)
-                | (TradingSignal.account_id == account_id)
-                | (TradingSignal.user_id == account_id),
-                TradingSignal.status == "VALIDATED",
-                ~TradingSignal.symbol.like("%.SZ"),
-                ~TradingSignal.symbol.like("%.SH"),
-            ).order_by(desc(TradingSignal.confidence)).limit(5)
-            
+            stmt = (
+                select(TradingSignal)
+                .where(
+                    (TradingSignal.account_id == resolved_account_id)
+                    | (TradingSignal.account_id == account_id)
+                    | (TradingSignal.user_id == account_id),
+                    TradingSignal.status == "VALIDATED",
+                    ~TradingSignal.symbol.like("%.SZ"),
+                    ~TradingSignal.symbol.like("%.SH"),
+                )
+                .order_by(desc(TradingSignal.confidence))
+                .limit(5)
+            )
+
             result = await db.execute(stmt)
             signals = result.scalars().all()
             for s in signals:
                 reason_text = s.notes[:50] if s.notes else "六维指标共振"
-                context["top_signals"].append({
-                    "symbol": s.symbol,
-                    "action": str(s.signal_type),
-                    "confidence": s.confidence,
-                    "reason": reason_text
-                })
+                context["top_signals"].append(
+                    {
+                        "symbol": s.symbol,
+                        "action": str(s.signal_type),
+                        "confidence": s.confidence,
+                        "reason": reason_text,
+                    }
+                )
 
             # 3. 持仓与五因子敞口（与战情室同源，避免 Copilot 与页面口径不一致）
             try:
                 exposure = await war_room_service.get_portfolio_exposure(
                     db,
-                    context_account_id,
+                    resolved_account_id,
                 )
                 positions = exposure.get("positions") or []
                 latest_factor = exposure.get("latest_snapshot")
@@ -610,17 +967,22 @@ class CopilotService:
                 context["data_quality"]["positions_source"] = "war_room"
                 context["data_quality"]["factor_source"] = "risk_observability"
             except Exception as exc:
-                logger.debug("Copilot context exposure load failed for %s: %s", account_id, exc)
+                logger.debug(
+                    "Copilot context exposure load failed for %s: %s", account_id, exc
+                )
 
             # 4. PnL 摘要（给模型额外校验信号）
             try:
                 context["pnl_ticker"] = await war_room_service.get_pnl_ticker(
                     db,
-                    context_account_id,
+                    resolved_account_id,
                 )
             except Exception as exc:
-                logger.debug("Copilot context pnl load failed for %s: %s", account_id, exc)
+                logger.debug(
+                    "Copilot context pnl load failed for %s: %s", account_id, exc
+                )
 
+        await cache.set(cache_key, context, expire=_MORNING_BRIEF_CONTEXT_TTL)
         return context
 
     def _build_system_prompt(self, context: dict) -> str:
@@ -634,7 +996,9 @@ class CopilotService:
 5. 当 positions_count 为 0 或 factor_exposure 为空时，只能表述为“当前数据源未检索到/暂无快照”，禁止下绝对结论“账户没有持仓”。
 6. 回答持仓评估时，优先引用 positions_preview、pnl_ticker、factor_exposure 的真实字段；字段为空时必须明确“数据不足”。"""
 
-    async def _get_history(self, account_id: str, session_id: str, db: Optional[AsyncSession]) -> list:
+    async def _get_history(
+        self, account_id: str, session_id: str, db: Optional[AsyncSession]
+    ) -> list:
         if not db:
             return []
         from sqlalchemy import text
@@ -661,11 +1025,31 @@ class CopilotService:
     ) -> None:
         from app.models.copilot_message import CopilotMessage
 
-        db.add(CopilotMessage(account_id=account_id, session_id=session_id, role="user", content=user_msg, model_used=model_used))
-        db.add(CopilotMessage(account_id=account_id, session_id=session_id, role="assistant", content=ai_msg, model_used=model_used, action_intent=action_intent, tokens_used=tokens))
+        db.add(
+            CopilotMessage(
+                account_id=account_id,
+                session_id=session_id,
+                role="user",
+                content=user_msg,
+                model_used=model_used,
+            )
+        )
+        db.add(
+            CopilotMessage(
+                account_id=account_id,
+                session_id=session_id,
+                role="assistant",
+                content=ai_msg,
+                model_used=model_used,
+                action_intent=action_intent,
+                tokens_used=tokens,
+            )
+        )
         await db.commit()
 
-    async def _call_ai(self, messages: list, model_type: str = "lightweight", caller: str = "copilot") -> tuple[str, str, int]:
+    async def _call_ai(
+        self, messages: list, model_type: str = "lightweight", caller: str = "copilot"
+    ) -> tuple[str, str, int]:
         """返回 (response_text, model_name, tokens_used)，并写入 llm_call_log 用于统计"""
         import asyncio
         import time
@@ -675,7 +1059,11 @@ class CopilotService:
 
         from app.services.ai_client_manager import _write_llm_call_log
 
-        model = settings.AI_COMPLEX_MODEL if model_type == "complex" else settings.AI_LIGHTWEIGHT_MODEL
+        model = (
+            settings.AI_COMPLEX_MODEL
+            if model_type == "complex"
+            else settings.AI_LIGHTWEIGHT_MODEL
+        )
 
         if settings.DEEPSEEK_API_KEY and "deepseek" in model:
             client = AsyncOpenAI(

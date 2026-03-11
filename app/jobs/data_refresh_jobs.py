@@ -366,6 +366,30 @@ async def refresh_market_universe_weekly_job():
         )
 
 
+async def generate_daily_morning_brief_job():
+    """任务9：北京时间每天 08:00 预生成早间简报。"""
+    try:
+        logger.info("Starting daily morning brief generation job")
+        start_time = datetime.now()
+
+        from app.services.copilot_service import copilot_service
+
+        result = await copilot_service.generate_daily_morning_brief_job()
+        elapsed = (datetime.now() - start_time).total_seconds()
+        snapshot = result.get("portfolio_snapshot") or {}
+        logger.info(
+            "Daily morning brief generation completed: positions=%s, regime=%s, took %.2fs",
+            snapshot.get("positions_count"),
+            result.get("market_regime"),
+            elapsed,
+        )
+    except Exception as e:
+        logger.error(
+            f"Daily morning brief generation job failed: {str(e)}",
+            exc_info=True,
+        )
+
+
 def register_all_jobs(_scheduler):
     """注册所有定时任务到调度器
 
@@ -453,6 +477,16 @@ def register_all_jobs(_scheduler):
         day_of_week="sun",
         hour=6,
         minute=0,
+    )
+
+    # 任务9: 早间简报预生成 - 每天北京时间 08:00
+    add_job(
+        func=generate_daily_morning_brief_job,
+        trigger="cron",
+        id="generate_daily_morning_brief",
+        name="生成早间简报(08:00)",
+        hour=settings.SCHEDULER_MORNING_BRIEF_HOUR,
+        minute=settings.SCHEDULER_MORNING_BRIEF_MINUTE,
     )
 
     logger.info("All scheduled jobs registered successfully")
