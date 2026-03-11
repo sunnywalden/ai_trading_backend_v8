@@ -180,6 +180,9 @@ class Settings(BaseSettings):
     SCHEDULER_MACRO_HOURS: int = 24
     SCHEDULER_GEOPOLITICAL_HOURS: int = 4
     SCHEDULER_RISK_HOURS: int = 6
+    SCHEDULER_MORNING_BRIEF_HOUR: int = 8
+    SCHEDULER_MORNING_BRIEF_MINUTE: int = 0
+    MORNING_BRIEF_CACHE_TTL_HOURS: int = 24
 
     # ==================== V9: 新增配置 ====================
     # 订单模式：OFF / PAPER / REAL
@@ -253,6 +256,11 @@ class Settings(BaseSettings):
     # AI 周报定时（每周一 08:00 生成上周复盘）
     SCHEDULER_WEEKLY_REPORT_DAY: str = "mon"
     SCHEDULER_WEEKLY_REPORT_HOUR: int = 8
+
+    # 自动机会扫描每轮最多触发的策略数量。
+    # 当前自动闭环 / Opportunity Scan 都会复用该上限，
+    # 以“最久未运行优先”轮转，避免总是同一个策略被反复执行。
+    AUTO_STRATEGY_SCAN_BATCH_SIZE: int = 3
 
     # ==================== V10.2-M1: 市场体制感知配置 ====================
     # 是否启用市场体制分类（关闭后体制固定为 BULL_TREND，不影响其他模块）

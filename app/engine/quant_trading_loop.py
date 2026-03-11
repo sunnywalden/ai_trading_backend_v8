@@ -16,26 +16,25 @@
 """
 import asyncio
 from datetime import datetime, timedelta
-from typing import List, Optional, Dict, Any
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from sqlalchemy import select, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.trading_signal import TradingSignal
-from app.models.strategy import Strategy
-from app.engine.signal_engine import SignalEngine
+from app.core.config import settings
+from app.engine.adaptive_optimizer import AdaptiveOptimizer
 from app.engine.order_executor import OrderExecutor
 from app.engine.performance_analyzer import PerformanceAnalyzer
-from app.engine.adaptive_optimizer import AdaptiveOptimizer
+from app.engine.signal_engine import SignalEngine
+from app.models.trading_signal import TradingSignal
+from app.services.strategy_auto_selection_service import \
+    StrategyAutoSelectionService
 from app.services.strategy_service import StrategyRunService
-from app.core.trade_mode import TradeMode
-from app.core.config import settings
 
 
 class QuantTradingLoop:
     """量化交易闭环协调器"""
-    
+
     def __init__(self, session: AsyncSession):
         self.session = session
         self.signal_engine = SignalEngine(session)
@@ -43,12 +42,12 @@ class QuantTradingLoop:
         self.performance_analyzer = PerformanceAnalyzer(session)
         self.optimizer = AdaptiveOptimizer(session)
         self.strategy_run_svc = StrategyRunService(session)
-    
+
     async def run_full_cycle(
         self,
         account_id: str,
         execute_trades: bool = True,
-        optimize: bool = True
+        optimize: bool = True,
     ) -> Dict[str, Any]:
         """
         运行完整的交易闭环周期
@@ -58,76 +57,120 @@ class QuantTradingLoop:
             "cycle_id": str(uuid4()),
             "timestamp": datetime.utcnow().isoformat(),
             "account_id": account_id,
-            "phases": {}
+            "phases": {},
         }
-        
+
         # Phase 1: 信号生成
         print("📊 Phase 1: Signal Generation...")
         signal_phase = await self._phase_1_signal_generation(account_id)
         cycle_results["phases"]["signal_generation"] = signal_phase
-        
+
         # Phase 2: 信号验证
         print("✅ Phase 2: Signal Validation...")
         validation_phase = await self._phase_2_signal_validation(account_id)
         cycle_results["phases"]["signal_validation"] = validation_phase
-        
+
         # Phase 3: 交易执行
         if execute_trades:
             print("⚡ Phase 3: Trade Execution...")
             execution_phase = await self._phase_3_trade_execution(account_id)
             cycle_results["phases"]["trade_execution"] = execution_phase
-        
+
         # Phase 4: 性能评估
         print("📈 Phase 4: Performance Evaluation...")
-        evaluation_phase = await self._phase_4_performance_evaluation(account_id)
+        evaluation_phase = await self._phase_4_performance_evaluation(
+            account_id,
+        )
         cycle_results["phases"]["performance_evaluation"] = evaluation_phase
-        
+
         # Phase 5: 自动优化
         if optimize:
             print("🔧 Phase 5: Adaptive Optimization...")
-            optimization_phase = await self._phase_5_adaptive_optimization(account_id)
-            cycle_results["phases"]["adaptive_optimization"] = optimization_phase
-        
+            optimization_phase = await self._phase_5_adaptive_optimization(
+                account_id,
+            )
+            cycle_results["phases"][
+                "adaptive_optimization"
+            ] = optimization_phase
+
         print("✨ Full cycle completed!")
-        
+
         return cycle_results
 
-    async def _trigger_runtime_strategy_scan(self, account_id: str) -> Dict[str, Any]:
+    async def _trigger_runtime_strategy_scan(
+        self,
+        account_id: str,
+    ) -> Dict[str, Any]:
         """在每轮闭环开始前触发一次按时段自动市场池的策略扫描。"""
         try:
-            from app.jobs.strategy_jobs import execute_strategy_run_job, AUTO_UNIVERSE_KEY
+            from app.jobs.strategy_jobs import (AUTO_UNIVERSE_KEY,
+                                                execute_strategy_run_job)
 
-            strategy_stmt = (
-                select(Strategy)
-                .where(Strategy.is_active.is_(True))
-                .order_by(desc(Strategy.is_builtin), desc(Strategy.updated_at))
-                .limit(1)
+            strategy_limit = StrategyAutoSelectionService.resolve_scan_limit(
+                settings.AUTO_STRATEGY_SCAN_BATCH_SIZE
             )
-            strategy_res = await self.session.execute(strategy_stmt)
-            strategy = strategy_res.scalars().first()
-            if not strategy:
+            strategies = (
+                await StrategyAutoSelectionService.select_auto_scan_strategies(
+                    self.session,
+                    limit=strategy_limit,
+                )
+            )
+            if not strategies:
                 return {
                     "triggered": False,
                     "reason": "NO_ACTIVE_STRATEGY",
+                    "selection_policy": "least_recently_run_first",
+                    "requested_strategy_limit": strategy_limit,
+                    "triggered_count": 0,
+                    "runs": [],
                 }
 
-            run = await self.strategy_run_svc.create_run(
-                strategy=strategy,
-                user_id=account_id,
-                account_id=account_id,
-                direction="LONG",
-                target_universe=AUTO_UNIVERSE_KEY,
-                min_score=60,
-                max_results=30,
-                priority=10,
-            )
+            triggered_runs = []
+            failures = []
+            for strategy in strategies:
+                try:
+                    run = await self.strategy_run_svc.create_run(
+                        strategy=strategy,
+                        user_id=account_id,
+                        account_id=account_id,
+                        direction="LONG",
+                        target_universe=AUTO_UNIVERSE_KEY,
+                        min_score=60,
+                        max_results=30,
+                        priority=10,
+                    )
 
-            await execute_strategy_run_job(run.id, task_id=f"auto_cycle:{run.id}")
+                    await execute_strategy_run_job(
+                        run.id,
+                        task_id=f"auto_cycle:{run.id}",
+                    )
+                    triggered_runs.append(
+                        {
+                            "run_id": run.id,
+                            "strategy_id": strategy.id,
+                            "strategy_name": strategy.name,
+                            "target_universe": AUTO_UNIVERSE_KEY,
+                        }
+                    )
+                except Exception as exc:
+                    failures.append(
+                        {
+                            "strategy_id": strategy.id,
+                            "strategy_name": strategy.name,
+                            "error": str(exc),
+                        }
+                    )
+
             return {
-                "triggered": True,
-                "run_id": run.id,
-                "strategy_id": strategy.id,
-                "strategy_name": strategy.name,
+                "triggered": bool(triggered_runs),
+                "selection_policy": "least_recently_run_first",
+                "requested_strategy_limit": strategy_limit,
+                "triggered_count": len(triggered_runs),
+                "selected_strategies": [
+                    strategy.name for strategy in strategies
+                ],
+                "runs": triggered_runs,
+                "failures": failures,
                 "target_universe": AUTO_UNIVERSE_KEY,
             }
         except Exception as e:
@@ -135,59 +178,69 @@ class QuantTradingLoop:
                 "triggered": False,
                 "reason": "TRIGGER_FAILED",
                 "error": str(e),
+                "selection_policy": "least_recently_run_first",
             }
-    
+
     async def _phase_1_signal_generation(
         self,
-        account_id: str
+        account_id: str,
     ) -> Dict[str, Any]:
         """阶段1: 从策略运行结果生成交易信号（多策略融合）"""
 
         runtime_scan = await self._trigger_runtime_strategy_scan(account_id)
-        
+
         # 获取最近完成的策略运行（改为3个，增加多样性）
+        from sqlalchemy import and_, desc, select
+
         from app.models.strategy import StrategyRun
-        from sqlalchemy import select, desc, and_
-        
+
         stmt = (
             select(StrategyRun)
             .where(
                 and_(
                     StrategyRun.account_id == account_id,
-                    StrategyRun.status == "COMPLETED"
-                )
+                    StrategyRun.status == "COMPLETED",
+                ),
             )
             .order_by(desc(StrategyRun.finished_at))
             .limit(3)  # ← 改为3个策略，提高多样性
         )
-        
+
         result = await self.session.execute(stmt)
         recent_runs = result.scalars().all()
-        
+
         all_signals = []
         signals_by_strategy = {}
         strategy_runs_used = []
-        
+
         # 从多个策略运行生成信号
         for run in recent_runs:
             # 从策略运行生成信号
-            signals = await self.signal_engine.generate_signals_from_strategy_run(
-                strategy_run_id=run.id,
-                max_signals=10
+            signals = (
+                await self.signal_engine.generate_signals_from_strategy_run(
+                    strategy_run_id=run.id,
+                    max_signals=10,
+                )
             )
-            
+
             strategy_name = run.strategy.name if run.strategy else "Unknown"
             signals_by_strategy[strategy_name] = len(signals)
             all_signals.extend(signals)
-            strategy_runs_used.append({
-                "run_id": run.id,
-                "strategy_id": run.strategy_id,
-                "strategy_name": strategy_name,
-                "strategy_version": run.strategy_version,
-                "target_universe": run.target_universe,
-                "finished_at": run.finished_at.isoformat() if run.finished_at else None,
-                "signals_generated": len(signals),
-            })
+            strategy_runs_used.append(
+                {
+                    "run_id": run.id,
+                    "strategy_id": run.strategy_id,
+                    "strategy_name": strategy_name,
+                    "strategy_version": run.strategy_version,
+                    "target_universe": run.target_universe,
+                    "finished_at": (
+                        run.finished_at.isoformat()
+                        if run.finished_at
+                        else None
+                    ),
+                    "signals_generated": len(signals),
+                }
+            )
         
         # 多策略信号去重和聚合（保留每个symbol置信度最高的信号）
         deduplicated_signals = self._deduplicate_signals_by_symbol(all_signals)
@@ -244,7 +297,7 @@ class QuantTradingLoop:
         """阶段2: 验证生成的信号"""
         
         from app.models.trading_signal import SignalStatus
-        
+
         # 获取待验证的信号
         pending_signals = await self.signal_engine.get_pending_signals(
             account_id=account_id,
@@ -406,8 +459,9 @@ class QuantTradingLoop:
         # 🛡️ 移除同步阻塞的订单同步 logic，避免 API 超时
         # 实际同步由后台 Job 或用户显式触发执行
             
-        from app.models.trading_signal import TradingSignal, SignalStatus
-        from sqlalchemy import select, func, and_
+        from sqlalchemy import and_, func, select
+
+        from app.models.trading_signal import SignalStatus, TradingSignal
         
         status_counts = {}
         for status in SignalStatus:

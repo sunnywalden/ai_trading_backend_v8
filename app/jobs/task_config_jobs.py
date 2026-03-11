@@ -7,10 +7,9 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import desc, select, text
+from sqlalchemy import select, text
 
 from app.models.db import SessionLocal
-from app.models.strategy import Strategy
 from app.models.task_config import TaskTriggerConfig
 from app.schemas.task_config import TaskType
 from app.services.task_config_service import normalize_trigger_time
@@ -36,17 +35,20 @@ async def _run_opportunity_scan(
 ) -> None:
     from app.jobs.strategy_jobs import (AUTO_UNIVERSE_KEY,
                                         execute_strategy_run_job)
+    from app.services.strategy_auto_selection_service import \
+        StrategyAutoSelectionService
     from app.services.strategy_service import StrategyRunService
 
-    strategy_stmt = (
-        select(Strategy)
-        .where(Strategy.is_active.is_(True))
-        .order_by(desc(Strategy.is_builtin), desc(Strategy.updated_at))
-        .limit(1)
+    strategy_limit = StrategyAutoSelectionService.resolve_scan_limit(
+        params.get("strategy_limit")
     )
-    strategy_res = await session.execute(strategy_stmt)
-    strategy = strategy_res.scalars().first()
-    if not strategy:
+    strategies = (
+        await StrategyAutoSelectionService.select_auto_scan_strategies(
+            session,
+            limit=strategy_limit,
+        )
+    )
+    if not strategies:
         logger.warning(
             "[TaskConfig] Opportunity scan skipped: no active strategy"
         )
@@ -59,22 +61,48 @@ async def _run_opportunity_scan(
     max_results = int(params.get("max_results") or 30)
     priority = int(params.get("priority") or 10)
 
-    run = await run_svc.create_run(
-        strategy=strategy,
-        user_id=account_id,
-        account_id=account_id,
-        direction=direction,
-        target_universe=target_universe,
-        min_score=min_score,
-        max_results=max_results,
-        priority=priority,
-    )
-    await execute_strategy_run_job(run.id, task_id=f"dyn_scan:{run.id}")
+    triggered_runs = []
+    failures = []
+    for strategy in strategies:
+        try:
+            run = await run_svc.create_run(
+                strategy=strategy,
+                user_id=account_id,
+                account_id=account_id,
+                direction=direction,
+                target_universe=target_universe,
+                min_score=min_score,
+                max_results=max_results,
+                priority=priority,
+            )
+            await execute_strategy_run_job(
+                run.id,
+                task_id=f"dyn_scan:{run.id}",
+            )
+            triggered_runs.append(
+                {
+                    "run_id": run.id,
+                    "strategy_id": strategy.id,
+                    "strategy_name": strategy.name,
+                }
+            )
+        except Exception as exc:
+            failures.append(
+                {
+                    "strategy_id": strategy.id,
+                    "strategy_name": strategy.name,
+                    "error": str(exc),
+                }
+            )
 
     logger.info(
-        "[TaskConfig] Opportunity scan completed: run_id=%s strategy=%s universe=%s",
-        run.id,
-        strategy.name,
+        (
+            "[TaskConfig] Opportunity scan completed: "
+            "strategies=%s triggered=%s failures=%s universe=%s"
+        ),
+        [strategy.name for strategy in strategies],
+        len(triggered_runs),
+        len(failures),
         target_universe,
     )
 
