@@ -25,6 +25,7 @@ from app.schemas.situational_awareness import (
     ActiveExecutionsBlock, ActiveExecutionEntry,
     PendingConfirmsBlock, AutonomyBlock,
 )
+from app.services.truth_source_service import truth_source_service
 
 logger = logging.getLogger(__name__)
 
@@ -113,18 +114,15 @@ class SituationalAwarenessService:
     # ─────────────────────────────────────────────────────────────────────────
     async def _get_regime_block(self, db: AsyncSession) -> RegimeBlock:
         try:
-            stmt = select(MarketRegime).order_by(MarketRegime.classification_date.desc()).limit(1)
-            result = await db.execute(stmt)
-            regime_obj = result.scalar_one_or_none()
-            if not regime_obj:
+            regime_truth = await truth_source_service.get_regime_truth_snapshot(db)
+            rtype = str(regime_truth.get("regime") or "UNKNOWN")
+            if rtype == "UNKNOWN":
                 return RegimeBlock()
 
-            # regime_obj.regime is typed as str (Enum value stored in DB)
-            rtype = str(regime_obj.regime)
             meta = REGIME_META.get(rtype, {"label": rtype, "color": "#6b7280", "trend": "flat"})
             
             # 使用 _safe_float 确保 JSON 合规 (解决 nan 问题)
-            raw_conf = _safe_float(regime_obj.confidence, 0.0)
+            raw_conf = _safe_float(regime_truth.get("confidence"), 0.0)
             conf_display = round(raw_conf * 100, 1) if raw_conf <= 1.0 else round(raw_conf, 1)
 
             return RegimeBlock(
@@ -133,6 +131,7 @@ class SituationalAwarenessService:
                 confidence=conf_display,
                 trend_direction=meta["trend"],
                 color=meta["color"],
+                source=str(regime_truth.get("source") or "UNKNOWN"),
             )
         except Exception as e:
             logger.warning(f"[SA] Failed to get regime block: {e}")

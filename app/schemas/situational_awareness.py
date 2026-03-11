@@ -17,6 +17,7 @@ class RegimeBlock(BaseModel):
     confidence: Optional[float] = None      # 0-100
     trend_direction: Optional[str] = None   # up / down / flat
     color: str = "#6b7280"                  # Tailwind-like hex
+    source: Optional[str] = None            # REDIS_RUNTIME / MARKET_REGIME_DB / UNKNOWN
 
 
 class VarBlock(BaseModel):
