@@ -41,9 +41,128 @@ PHASES = [
     ("delivery", "Delivering results"),
 ]
 
+_DIMENSION_WEIGHTS = {
+    "technical": 0.24,
+    "fundamental": 0.18,
+    "macro": 0.14,
+    "options": 0.14,
+    "flow": 0.12,
+    "sentiment": 0.18,
+}
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _score_to_direction(score: float) -> int:
+    if score >= 0.58:
+        return 1
+    if score <= 0.42:
+        return -1
+    return 0
+
+
+def _build_mock_signal_dimensions(
+    *,
+    strength: float,
+    is_event_driven: bool,
+    is_intraday: bool,
+    is_quant: bool,
+) -> dict[str, Any]:
+    technical_score = round(
+        random.uniform(0.72, 0.96) if (is_intraday or is_quant) else random.uniform(0.55, 0.9),
+        2,
+    )
+    fundamental_score = round(
+        random.uniform(0.65, 0.92) if is_quant else random.uniform(0.48, 0.88),
+        2,
+    )
+    macro_score = round(
+        random.uniform(0.62, 0.9) if is_event_driven else random.uniform(0.5, 0.82),
+        2,
+    )
+    options_score = round(
+        random.uniform(0.6, 0.9) if (is_intraday or is_quant) else random.uniform(0.45, 0.85),
+        2,
+    )
+    flow_score = round(
+        random.uniform(0.7, 0.95) if is_intraday else random.uniform(0.48, 0.84),
+        2,
+    )
+    sentiment_score = round(
+        random.uniform(0.68, 0.94) if is_event_driven else random.uniform(0.46, 0.86),
+        2,
+    )
+
+    raw_scores = {
+        "technical": technical_score,
+        "fundamental": fundamental_score,
+        "macro": macro_score,
+        "options": options_score,
+        "flow": flow_score,
+        "sentiment": sentiment_score,
+    }
+
+    directions = {name: _score_to_direction(score) for name, score in raw_scores.items()}
+    directions["technical"] = 1
+
+    aligned_dims = [name for name, direction in directions.items() if direction > 0]
+    if len(aligned_dims) < 4:
+        for name, _score in sorted(raw_scores.items(), key=lambda item: item[1], reverse=True):
+            if name not in aligned_dims:
+                directions[name] = 1
+                aligned_dims.append(name)
+            if len(aligned_dims) >= 4:
+                break
+
+    opposing_dims = [name for name, direction in directions.items() if direction < 0]
+    neutral_dims = [
+        name
+        for name, direction in directions.items()
+        if direction == 0 and name not in aligned_dims and name not in opposing_dims
+    ]
+
+    dimensions = [
+        {
+            "name": name,
+            "score": round(score * 100, 1),
+            "weight": weight,
+            "direction": directions[name],
+            "description": f"Mock {name} dimension for watchtower validation",
+        }
+        for name, weight in _DIMENSION_WEIGHTS.items()
+        for score in [raw_scores[name]]
+    ]
+
+    risk_score = round(max(20.0, min(65.0, 100.0 - strength + random.uniform(-5.0, 6.0))), 2)
+    expected_return = round(0.03 + ((strength - 60.0) / 1000.0), 4)
+    historical_ic = round(random.uniform(0.55, 0.9) if is_quant else random.uniform(0.35, 0.78), 2)
+    timing_quality = round(random.uniform(0.62, 0.95) if is_intraday else random.uniform(0.45, 0.84), 2)
+
+    return {
+        "technical_score": technical_score,
+        "fundamental_score": fundamental_score,
+        "macro_score": macro_score,
+        "options_score": options_score,
+        "volume_anomaly_score": flow_score,
+        "momentum_score": technical_score,
+        "sentiment_score": sentiment_score,
+        "momentum": technical_score,
+        "volume": flow_score,
+        "sentiment": sentiment_score,
+        "risk_score": risk_score,
+        "expected_return": expected_return,
+        "historical_ic": historical_ic,
+        "timing_quality": timing_quality,
+        "adv_usd": round(random.uniform(2_000_000, 25_000_000), 2),
+        "market_cap": round(random.uniform(800_000_000, 350_000_000_000), 2),
+        "aligned_count": len(aligned_dims),
+        "aligned_dims": aligned_dims,
+        "opposing_dims": opposing_dims,
+        "neutral_dims": neutral_dims,
+        "dimensions": dimensions,
+    }
 
 
 def _is_us_market_hours(ts_utc: datetime) -> bool:
@@ -196,6 +315,13 @@ def _sample_assets(count: int, strategy_name: str = "", universe_symbols: Option
             notes = "Strong 60-day relative strength"
             risk_flags = ["TREND_FOLLOWING"]
 
+        signal_dimensions = _build_mock_signal_dimensions(
+            strength=strength,
+            is_event_driven=is_event_driven,
+            is_intraday=is_intraday,
+            is_quant=is_quant,
+        )
+
         asset = {
             "symbol": symbol,
             "signal_strength": strength,
@@ -204,11 +330,7 @@ def _sample_assets(count: int, strategy_name: str = "", universe_symbols: Option
             "direction": "LONG",
             "risk_flags": risk_flags,
             "notes": notes,
-            "signal_dimensions": {
-                "momentum": round(random.uniform(0.6, 1.0) if is_quant else random.uniform(0, 1), 2),
-                "volume": round(random.uniform(0.7, 1.0) if is_intraday else random.uniform(0, 1), 2),
-                "sentiment": round(random.uniform(0.6, 1.0) if is_event_driven else random.uniform(0, 1), 2),
-            },
+            "signal_dimensions": signal_dimensions,
         }
         assets.append(asset)
     return assets
