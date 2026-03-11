@@ -445,6 +445,10 @@ class SignalQualityFunnel:
         signal: SignalFunnelInput,
         regime_cfg: dict,
     ) -> Optional[tuple[str, str]]:
+        metadata_reject = self._layer3_missing_resonance_metadata(signal)
+        if metadata_reject:
+            return metadata_reject
+
         min_dims = regime_cfg.get("SIGNAL_RESONANCE_MIN_DIMS", 4)
         require_tech = regime_cfg.get("RESONANCE_REQUIRED_TECHNICAL", True)
 
@@ -482,6 +486,48 @@ class SignalQualityFunnel:
                 RejectionReason.INSUFFICIENT_RESONANCE,
                 f"技术面(technical)未在同向维度中（aligned={signal.aligned_dims}），"
                 f"强制要求 RESONANCE_REQUIRED_TECHNICAL=True",
+            )
+
+        return None
+
+    def _layer3_missing_resonance_metadata(
+        self,
+        signal: SignalFunnelInput,
+    ) -> Optional[tuple[str, str]]:
+        list_total = (
+            len(signal.aligned_dims)
+            + len(signal.opposing_dims)
+            + len(signal.neutral_dims)
+        )
+        has_directionality = (
+            signal.tech_direction != 0 or signal.fundamental_direction != 0
+        )
+
+        if signal.aligned_count > 0 and not signal.aligned_dims:
+            return (
+                RejectionReason.MISSING_RESONANCE_METADATA,
+                (
+                    "aligned_count 已存在，但 aligned_dims 为空；"
+                    "信号共振元数据不完整，无法可靠评估 Layer 3"
+                ),
+            )
+
+        if signal.aligned_count <= 0 and list_total > 0:
+            return (
+                RejectionReason.MISSING_RESONANCE_METADATA,
+                (
+                    "aligned_dims/opposing_dims/neutral_dims 已存在，但 aligned_count 缺失或为 0；"
+                    "信号共振元数据不一致，无法可靠评估 Layer 3"
+                ),
+            )
+
+        if signal.aligned_count <= 0 and list_total == 0 and not has_directionality:
+            return (
+                RejectionReason.MISSING_RESONANCE_METADATA,
+                (
+                    "aligned_count、共振维度列表以及 technical/fundamental 方向均缺失；"
+                    "信号缺少共振元数据，无法区分真实共振不足与上游数据缺失"
+                ),
             )
 
         return None
@@ -597,6 +643,12 @@ class SignalQualityFunnel:
     ) -> None:
         """为被拒绝的信号创建幽灵交易虚拟跟踪。"""
         if not cfg.GHOST_TRADE_ENABLED:
+            return
+        if decision.rejection_reason == RejectionReason.MISSING_RESONANCE_METADATA:
+            logger.info(
+                "[SignalFunnel] Skip ghost trade for %s because rejection is data-quality related",
+                signal.symbol,
+            )
             return
         try:
             from app.services.ghost_trade_service import ghost_trade_service

@@ -40,6 +40,9 @@ class RejectionReason(str, enum.Enum):
     )
     DAILY_QUOTA_EXHAUSTED = "DAILY_QUOTA_EXHAUSTED"  # Layer 2: 日配额耗尽
     HIGH_CORRELATION = "HIGH_CORRELATION"  # Layer 2: 与现有持仓相关性过高
+    MISSING_RESONANCE_METADATA = (
+        "MISSING_RESONANCE_METADATA"  # Layer 3: 信号缺少共振元数据，无法进行有效评估
+    )
     INSUFFICIENT_RESONANCE = "INSUFFICIENT_RESONANCE"  # Layer 3: 同向维度不足
     ANTI_RESONANCE_KILL = "ANTI_RESONANCE_KILL"  # Layer 3: 一票否决
     LOW_CONVICTION = "LOW_CONVICTION"  # Layer 4: Conviction Score 不足

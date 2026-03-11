@@ -172,7 +172,7 @@ class SignalEngine:
             print(f"[SignalEngine] Found existing signal for {asset.symbol}, checking update...")
             if new_signal_strength > existing_signal.signal_strength:
                 # 🔄 更新为更强的信号
-                signal_dims = asset.signal_dimensions or {}
+                signal_dims = self._safe_dict(asset.signal_dimensions)
                 existing_signal.signal_strength = new_signal_strength
                 existing_signal.confidence = min(new_signal_strength / 100.0, 1.0)
                 existing_signal.expected_return = signal_dims.get('expected_return', 0.05)
@@ -185,13 +185,24 @@ class SignalEngine:
                 existing_signal.quantity_value = existing_signal.suggested_quantity
                 existing_signal.priority = int(new_signal_strength)
                 existing_signal.strategy_run_id = strategy_run.id
-                existing_signal.factor_scores = {
-                    "technical_score": signal_dims.get('technical_score', 70.0),
-                    "fundamental_score": signal_dims.get('fundamental_score', 70.0),
-                    "momentum_score": signal_dims.get('momentum_score', 70.0),
-                    "sentiment_score": signal_dims.get('sentiment_score', 70.0),
-                    "signal_strength": new_signal_strength,
-                }
+                existing_signal.factor_scores = self._build_factor_scores_payload(
+                    signal_dims,
+                    new_signal_strength,
+                )
+                existing_meta = self._safe_dict(existing_signal.extra_metadata).copy()
+                existing_meta.update(
+                    {
+                        "strategy_name": (
+                            strategy_run.strategy.name if strategy_run.strategy else None
+                        ),
+                        "strategy_version": strategy_run.strategy_version,
+                        "run_universe": strategy_run.target_universe,
+                    }
+                )
+                existing_meta.update(
+                    self._extract_watchtower_dimension_fields(signal_dims)
+                )
+                existing_signal.extra_metadata = existing_meta
                 existing_signal.expired_at = datetime.utcnow() + timedelta(hours=24)
                 
                 await self.session.commit()
@@ -202,7 +213,7 @@ class SignalEngine:
                 return existing_signal
         
         # 从signal_dimensions JSON字段提取分数,如果不存在则使用默认值
-        signal_dims = asset.signal_dimensions or {}
+        signal_dims = self._safe_dict(asset.signal_dimensions)
         
         # 🧠 智能推断信号类型（基于当前持仓）
         signal_direction = strategy_run.direction or "LONG"
@@ -226,19 +237,9 @@ class SignalEngine:
             "watchtower_result": "PENDING",
             "watchtower_reason_category": "GENERATION",
         }
-        for key in (
-            "dimensions",
-            "aligned_count",
-            "aligned_dims",
-            "opposing_dims",
-            "neutral_dims",
-            "adv_usd",
-            "market_cap",
-            "historical_ic",
-            "timing_quality",
-        ):
-            if signal_dims.get(key) is not None:
-                signal_extra_metadata[key] = signal_dims.get(key)
+        signal_extra_metadata.update(
+            self._extract_watchtower_dimension_fields(signal_dims)
+        )
 
         # ✨ 创建新信号
         signal = TradingSignal(
@@ -262,13 +263,10 @@ class SignalEngine:
             strategy_id=strategy_run.strategy_id,
             strategy_run_id=strategy_run.id,
             
-            factor_scores={
-                "technical_score": signal_dims.get('technical_score', 70.0),
-                "fundamental_score": signal_dims.get('fundamental_score', 70.0),
-                "momentum_score": signal_dims.get('momentum_score', 70.0),
-                "sentiment_score": signal_dims.get('sentiment_score', 70.0),
-                "signal_strength": new_signal_strength,
-            },
+            factor_scores=self._build_factor_scores_payload(
+                signal_dims,
+                new_signal_strength,
+            ),
             
             account_id=strategy_run.account_id,
             user_id=strategy_run.user_id,
@@ -306,6 +304,56 @@ class SignalEngine:
     @staticmethod
     def _safe_dict(value: Any) -> Dict[str, Any]:
         return value if isinstance(value, dict) else {}
+
+    @classmethod
+    def _extract_watchtower_dimension_fields(
+        cls,
+        signal_dims: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        for key in (
+            "dimensions",
+            "aligned_count",
+            "aligned_dims",
+            "opposing_dims",
+            "neutral_dims",
+            "adv_usd",
+            "market_cap",
+            "historical_ic",
+            "timing_quality",
+        ):
+            if signal_dims.get(key) is not None:
+                payload[key] = signal_dims.get(key)
+        return payload
+
+    @classmethod
+    def _build_factor_scores_payload(
+        cls,
+        signal_dims: Dict[str, Any],
+        signal_strength: float,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "technical_score": signal_dims.get("technical_score", 70.0),
+            "fundamental_score": signal_dims.get("fundamental_score", 70.0),
+            "momentum_score": signal_dims.get(
+                "momentum_score",
+                signal_dims.get("momentum", signal_dims.get("technical_score", 70.0)),
+            ),
+            "sentiment_score": signal_dims.get(
+                "sentiment_score",
+                signal_dims.get("sentiment", 70.0),
+            ),
+            "macro_score": signal_dims.get("macro_score", 70.0),
+            "options_score": signal_dims.get("options_score", 70.0),
+            "volume_anomaly_score": signal_dims.get(
+                "volume_anomaly_score",
+                signal_dims.get("volume", 70.0),
+            ),
+            "signal_strength": signal_strength,
+            "signal_dimensions": dict(signal_dims),
+        }
+        payload.update(cls._extract_watchtower_dimension_fields(signal_dims))
+        return payload
 
     async def _build_quality_watchtower_context(
         self,
