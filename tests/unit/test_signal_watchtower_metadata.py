@@ -109,7 +109,10 @@ async def test_existing_signal_update_refreshes_watchtower_dimension_metadata():
 
     assert result is existing_signal
     assert existing_signal.signal_strength == 95.0
-    assert existing_signal.extra_metadata["watchtower_stage"] == "SIGNAL_VALIDATION"
+    # P0.2: watchtower stage/result MUST be reset to PENDING/SIGNAL_GENERATION when a signal
+    # is regenerated with higher strength so it goes through the quality funnel again.
+    assert existing_signal.extra_metadata["watchtower_stage"] == "SIGNAL_GENERATION"
+    assert existing_signal.extra_metadata["watchtower_result"] == "PENDING"
     assert existing_signal.extra_metadata["legacy_flag"] is True
     assert existing_signal.extra_metadata["strategy_name"] == "Mock Strategy"
     assert existing_signal.extra_metadata["aligned_count"] == signal_dims["aligned_count"]

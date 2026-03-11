@@ -51,6 +51,13 @@ class SignalSource(str, Enum):
     ARBITRAGE = "ARBITRAGE"       # 套利
 
 
+class SignalOriginMode(str, Enum):
+    """信号来源模式 — 区分真实策略信号与合成/回填信号"""
+    REAL = "REAL"              # 真实策略引擎产生的信号
+    SYNTHETIC = "SYNTHETIC"    # 模拟/合成信号（strategy_jobs 随机生成）
+    BACKFILL = "BACKFILL"      # 历史回填信号
+
+
 class TradingSignal(Base):
     """交易信号表 - 所有交易决策的源头"""
     __tablename__ = "trading_signals"
@@ -61,6 +68,7 @@ class TradingSignal(Base):
     signal_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)  # UUID
     signal_type: Mapped[SignalType] = mapped_column(SQLEnum(SignalType), nullable=False)
     signal_source: Mapped[SignalSource] = mapped_column(SQLEnum(SignalSource), nullable=False)
+    signal_origin_mode: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)  # P0.1: REAL/SYNTHETIC/BACKFILL
     status: Mapped[SignalStatus] = mapped_column(SQLEnum(SignalStatus), nullable=False, default=SignalStatus.GENERATED)
     
     # 交易标的

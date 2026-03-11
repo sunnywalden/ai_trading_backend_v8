@@ -3,6 +3,8 @@
 
 提供完整的监控、控制和报表接口
 """
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Body
 from app.i18n import get_translator
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,6 +21,8 @@ from app.engine.adaptive_optimizer import AdaptiveOptimizer
 from app.core.auth import get_current_user
 from app.core.config import settings
 from app.broker.factory import make_option_broker_client
+
+logger = logging.getLogger(__name__)
 
 
 # Request/Response Models
@@ -272,7 +276,18 @@ async def execute_signals_batch(
     
     - **signal_ids**: 要执行的信号ID列表
     - **dry_run**: 演练模式(默认True)
+
+    .. deprecated::
+        此端点绕过 AutonomousEngine.run_decision_cycle() 直接调用 OrderExecutor，
+        生产环境请改用 POST /run-cycle。该端点将在 V10.6 中移除。
     """
+    # P0.3: legacy path that bypasses AutonomousEngine — emit structured deprecation warning
+    logger.warning(
+        "[DEPRECATED] POST /execute-signals called by user=%s. "
+        "This endpoint bypasses AutonomousEngine.run_decision_cycle() and will be "
+        "removed in V10.6. Use POST /run-cycle for production execution.",
+        current_user.get("sub", "unknown"),
+    )
     if not account_id:
         account_id = settings.TIGER_ACCOUNT
     

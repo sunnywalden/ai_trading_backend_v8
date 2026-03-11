@@ -280,7 +280,7 @@ class SignalAuditLogService:
             "funnel_result": watchtower["result"],
             "decision_stage": watchtower["stage"],
             "reason_category": watchtower["reason_category"],
-            "result_source": "TRADING_SIGNAL_METADATA",
+            "result_source": "RECONSTRUCTED",
             "rejected_at_layer": watchtower["rejected_at_layer"],
             "rejection_reason": watchtower["reason_code"],
             "rejection_detail": (

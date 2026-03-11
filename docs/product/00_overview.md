@@ -3,8 +3,8 @@
 # 产品需求文档 (PRD)
 
 > **AI量化交易闭环系统** - 个人美港股智能交易平台  
-> 版本：V10.5.3（实施中）| 当前已上线版本：V10.5.2 | 更新日期：2026-03-10  
-> 变更摘要（V10.5.3 规划）：**Profit Engine Upgrade**——下一版本不再以增加页面数或策略数为导向，而是把 `Alpha Lab / Portfolio / Execution Policy / Governance` 升级为直接影响净收益的控制回路：建立四层 alpha 真相口径、以 `Seat Value` 为核心的组合资本配置、以 Pre-Trade Cost 为约束的执行策略闭环，以及面向 `Discovery / Paper / Shadow Live / Challenger / Production` 的硬门槛晋级治理。  
+> 版本：V10.5.4（规划中）| 当前已上线版本：V10.5.2 | 更新日期：2026-03-11  
+> 变更摘要（V10.5.4 规划）：**Signal Pipeline Integrity & Control-Plane Hardening**——下一版本先收敛信号控制平面，再继续推进收益控制回路：建立 `REAL / SYNTHETIC / BACKFILL` 真源区分、统一 canonical signal payload 与原生状态迁移、明确 AutonomousEngine 为唯一自动执行主链，并让 Watchtower / Governance / Rollout 以原生审计和渐进放量纪律运作。  
 > 变更摘要（V10.5.2 交付）：**组合席位竞争引擎（Capacity-Aware Admission & Replacement Engine）**——把持仓上限从刚性拒绝规则升级为动态席位分配机制：新增 Unified Candidate Pool（当前持仓 + 新信号统一候选池）+ 统一准入评分 admission_score = alpha_quality - replacement_friction - risk_penalty + regime_fit，满仓时按分数淘汰末位 N 个对象（持仓到EXIT、信号到REJECTED_BY_CAPACITY_REPLACEMENT）；引入替换保护带（MIN_REPLACEMENT_EDGE_BPS / MAX_REPLACEMENTS_PER_CYCLE / MIN_HOLD_MINUTES / REPLACEMENT_COOLDOWN_MINUTES）防止过度翻仓；Incumbent Decay Model 让持仓持续参与席位竞争；新增 capacity_decision_audit_log 全量审计；支持 CAPACITY_REPLACEMENT_DRY_RUN 先观测再放量；前端 /portfolio、/autonomy、/order-book 增加席位竞争结果可视化。  
 > 变更摘要（V10.5.1 交付）：**从“功能完整”走向“机构级交易操作系统”**——规划聚焦五大主线：Alpha Truth Stack / Portfolio Construction 2.0 / Execution Policy Engine / Live Safety & Model Degradation Guard / Research-to-Live Governance。**本版本补丁交付**：**事后决策剪析自动化（Post-Mortem Automation）**——新增 `post_mortem_jobs.py`，EventBus 订阅 `Topics.POSITION_CLOSED` 实时触发 + 每日 02:00 UTC 岜底 Cron 扫描近 90 天未剪析平仓仓位，幂等排队 `deepseek-reasoner` 生成结构化复盘（`trade_id="position-{id}"`）；**事件日历数据新鲜度修复**——`data_freshness_guard_service.py` 改查 `EventCalendarEntry.updated_at`（原 `created_at`），`event_calendar_service.py` upsert 时刷新 `updated_at`，消除 `event_calendar` 83h 陈旧 WARN；**`confirmed=False` 体制分类修复**——`regime_classifier.py` `confirmed=False` 分支同步更新 `classification_date`。  
 > 变更摘要（V10.4.3）：**风险降低优先执行（Risk-Reducing Priority Execution）**——新增减仓/平仓快速通道：`REDUCE/EXIT` 信号绕过开仓型质量漏斗、熔断期间允许风险降低类订单、减仓/平仓不占用 `MAX_DAILY_TRADES` / `MAX_DAILY_SIGNALS` 配额；`PositionMonitor` 止损/止盈信号写入 `force_exit=true`，`AutonomousEngine` 识别后跳过冷却与 Redis 并发锁直接执行；`SignalPositionFilter` 在减仓数量超持仓时自动升级为全平；`OrderExecutor` 以实际持仓数量为准执行 EXIT/REDUCE，并为港股退出保留 odd-lot 平仓能力；`AutonomyPage` 新增“减仓/平仓优先通道”状态卡与快速通道/强制出场徽章。**追加需求**：`/system` 系统监控页需补齐三类可观测能力——交易生命周期状态监测、系统主要数据流转详细状态、主要模块及细粒度服务状态。  
@@ -19,7 +19,7 @@
 
 > 历史版本：V10.0（2026-02-24）变更摘要见下方历史记录节  
 > 当前已上线版本：**V10.5.2**（已发布）| 详细规划：[V10.5.2 Release Plan](../archived/v10/v10.5/RELEASE_PLAN_V10.5.2.md)  
-> 下一版本规划：**V10.5.3** | 详细规划：[V10.5.3 Release Plan](../archived/v10/v10.5/RELEASE_PLAN_V10.5.3.md)
+> 下一版本规划：**V10.5.4** | 详细规划：[V10.5.4 Release Plan](../archived/v10/v10.5/RELEASE_PLAN_V10.5.4.md)
 
 ---
 
@@ -43,19 +43,19 @@
 
 ---
 
-## V10.5.3 验收标准（规划中）
+## V10.5.4 验收标准（规划中）
 
-- [ ] `Alpha Lab` 建立 `gross / net / after_cost / after_turnover` 四层 alpha 真相口径
-- [ ] `Portfolio` 支持 `Seat Value / Risk Budget Tree / Marginal Contribution / Liquidity Usage`
-- [ ] `Execution Policy` 从解释视图升级为执行前成本约束与执行后反馈回写闭环
-- [ ] `Governance Pipeline` 建立 `Discovery / Paper / Shadow Live / Challenger / Production` 硬门槛证据链
-- [ ] 核心收益质量指标（Net Alpha Positive Rate / Seat Efficiency / Budget Breach Rate）可观测、可审计、可回溯
+- [ ] 自动信号 100% 带 `signal_origin_mode`
+- [ ] 新信号 100% 写 canonical payload，并由 Watchtower / Quality Funnel / AutonomousEngine 优先读取
+- [ ] 自动执行 100% 由 `AutonomousEngine.run_decision_cycle()` 编排
+- [ ] Watchtower 默认优先显示 native audit，fallback 明确标记 `RECONSTRUCTED`
+- [ ] 关键控制能力全部具备 `Observe → Shadow → Semi → Full` 渐进放量与 feature flag 回退能力
 
-### V10.5.3 Feature Flags（定稿）
+### V10.5.4 Feature Flags（定稿）
 
-- `ALPHA_TRUTH_V2_ENABLED`：控制四层 alpha 真相口径与 `data_quality` 是否对外暴露
-- `SEAT_VALUE_ARBITER_ENABLED`：控制 `CapacityArbiter` 是否从 `admission_score` 切换到 `Seat Value` 仲裁
-- `EXECUTION_POLICY_HARD_CONTROL_ENABLED`：控制执行策略是否从观察视图进入真实下单约束
+- `SIGNAL_PIPELINE_V1054_ENABLED`：控制 canonical payload / origin mode / native transition log 是否进入主链
+- `AUTONOMOUS_CONTROL_PLANE_V1054_ENABLED`：控制单主链收敛、legacy path 限制、统一自动执行编排是否接管
+- `NATIVE_AUDIT_V1054_ENABLED`：控制 Watchtower / signal pipeline 是否优先使用原生审计
 - `GOVERNANCE_HARD_GATE_ENABLED`：控制 `Paper → Live` 与策略晋级是否受五阶段硬门槛治理
 
 ## V10.5.1 验收标准（已归档）

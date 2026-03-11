@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from app.core.config import settings
 
@@ -190,6 +190,23 @@ class RiskGateService:
     def get_regime_var_multiplier(self) -> float:
         """  返回当前体制 VaR 倍数（供审计日志和给 Router 查询用）。"""
         return self._regime_var_multiplier
+
+    async def sync_regime_from_db(self, db: Any) -> None:
+        """P1.3: 从 DB 读取最新体制并同步 VaR 倍数（服务重启 / 定期同步时调用）。
+
+        避免服务停机期间体制切换导致重启后 _regime_var_multiplier 仍为旧值的 drift。
+        """
+        try:
+            from app.services.regime_classifier import RegimeClassifier
+
+            current = await RegimeClassifier.get_current_regime(db)
+            if current and getattr(current, "regime", None):
+                self.set_regime_var_multiplier(str(current.regime))
+                logger.info("[RiskGate] sync_regime_from_db → regime=%s", current.regime)
+            else:
+                logger.warning("[RiskGate] sync_regime_from_db: no active regime found in DB, multiplier unchanged")
+        except Exception as exc:
+            logger.warning("[RiskGate] sync_regime_from_db failed (non-fatal): %s", exc)
 
     # ──────────────────────────────────────────
     # 内部估算函数
