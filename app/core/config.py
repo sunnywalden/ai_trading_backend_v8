@@ -125,6 +125,19 @@ class Settings(BaseSettings):
     HTTPS_PROXY: str | None = None
     NO_PROXY: str | None = None
 
+    # ==================== CORS 配置 ====================
+    # 生产环境应通过环境变量覆盖；默认覆盖本地开发与当前生产域名。
+    CORS_ALLOW_ORIGINS: Any = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:4173",
+        "http://127.0.0.1:4173",
+        "https://sunnywalden.com",
+        "https://www.sunnywalden.com",
+        "https://api.sunnywalden.com",
+    ]
+    CORS_ALLOW_ORIGIN_REGEX: str | None = None
+
     # ==================== 认证配置（默认启用） ====================
     # 是否开启认证（默认 True）。在生产环境请通过环境变量覆盖默认用户名/密码。
     AUTH_ENABLED: bool = True
@@ -285,6 +298,7 @@ class Settings(BaseSettings):
     @field_validator(
         "STRATEGY_EXECUTE_USERS",
         "STRATEGY_MANAGE_USERS",
+        "CORS_ALLOW_ORIGINS",
         mode="before",
     )
     @classmethod
