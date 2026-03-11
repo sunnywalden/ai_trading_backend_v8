@@ -29,9 +29,7 @@ import importlib.util
 import os
 import sys
 
-ROOT = os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-)
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def _venv_python_path() -> str:
@@ -46,9 +44,7 @@ def _ensure_sqlalchemy_available() -> None:
 
     try:
         venv_python = _venv_python_path()
-        same_python = os.path.abspath(sys.executable) == os.path.abspath(
-            venv_python
-        )
+        same_python = os.path.abspath(sys.executable) == os.path.abspath(venv_python)
         if os.path.exists(venv_python) and not same_python:
             os.execv(venv_python, [venv_python, *sys.argv])
 
@@ -185,9 +181,7 @@ async def run_upgrade() -> None:
                     print(f"[upgrade] Adding {table_name}.{column_name}...")
                     await conn.execute(text(sql))
                 else:
-                    print(
-                        f"[upgrade] {table_name}.{column_name} already exists"
-                    )
+                    print(f"[upgrade] {table_name}.{column_name} already exists")
 
             for table_name, index_name, sql in CREATE_INDEXES:
                 if not await _index_exists(conn, table_name, index_name):
