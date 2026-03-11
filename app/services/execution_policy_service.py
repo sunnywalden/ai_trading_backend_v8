@@ -151,10 +151,10 @@ class ExecutionPolicyService:
         notional_bucket = min(max(qty / 100.0, 0.5), 8.0)
 
         if log:
-            delay = cls._safe_float(log.delay_cost_bps)
-            impact = cls._safe_float(log.market_impact_bps)
-            opportunity = cls._safe_float(log.opportunity_cost_bps)
-            timing = cls._safe_float(log.timing_cost_bps)
+            delay = cls._safe_float(getattr(log, "delay_cost_bps", None))
+            impact = cls._safe_float(getattr(log, "market_impact_bps", None))
+            opportunity = cls._safe_float(getattr(log, "opportunity_cost_bps", None))
+            timing = cls._safe_float(getattr(log, "timing_cost_bps", None))
         else:
             delay = round(1.5 + 0.9 * notional_bucket, 2)
             impact = round(2.0 + 1.2 * notional_bucket, 2)
@@ -923,6 +923,27 @@ class ExecutionPolicyService:
             "match_mode": match_mode,
         }
 
+    @staticmethod
+    def _latest_log_sort_key(log: Any) -> tuple[datetime, int]:
+        created_at = getattr(log, "created_at", None) or datetime.min
+        log_id = getattr(log, "id", None) or 0
+        return (created_at, int(log_id))
+
+    @classmethod
+    def _build_latest_logs_by_intent(
+        cls,
+        logs: list[ExecutionQualityLog],
+    ) -> dict[int, ExecutionQualityLog]:
+        latest: dict[int, ExecutionQualityLog] = {}
+        for log in logs:
+            intent_id = int(getattr(log, "intent_id", 0) or 0)
+            if intent_id <= 0:
+                continue
+            current = latest.get(intent_id)
+            if current is None or cls._latest_log_sort_key(log) > cls._latest_log_sort_key(current):
+                latest[intent_id] = log
+        return latest
+
     async def _select_overview_intents(
         self,
         db: AsyncSession,
@@ -1065,7 +1086,7 @@ class ExecutionPolicyService:
             ExecutionQualityLog.intent_id.in_(intent_ids)
         )
         logs = list((await db.execute(log_stmt)).scalars().all())
-        logs_by_intent = {int(log.intent_id): log for log in logs}
+        logs_by_intent = self._build_latest_logs_by_intent(logs)
         profiles_by_symbol = await self._load_profiles_for_symbols(
             db,
             account_id,
@@ -1132,7 +1153,8 @@ class ExecutionPolicyService:
         log_stmt = select(ExecutionQualityLog).where(
             ExecutionQualityLog.intent_id == intent_id
         )
-        log = (await db.execute(log_stmt)).scalars().one_or_none()
+        logs = list((await db.execute(log_stmt)).scalars().all())
+        log = self._build_latest_logs_by_intent(logs).get(intent_id)
         policy = self._derive_policy_snapshot(intent, log)
         pretrade = self._derive_pretrade_cost(intent, log)
         timeline = self._build_replay_timeline(intent, log, policy)
