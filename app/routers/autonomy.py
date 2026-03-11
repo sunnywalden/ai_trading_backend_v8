@@ -1,29 +1,33 @@
 """V10: AI 自主控制路由"""
-from datetime import datetime, timezone, timedelta
-from typing import Any, Optional
+
 import asyncio
+from datetime import datetime, timedelta, timezone
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path
 from pydantic import BaseModel
-from sqlalchemy import select, func, and_, update as sa_update
+from sqlalchemy import and_, func, select
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.broker.factory import make_option_broker_client
 from app.core.auth import get_current_user
 from app.core.config import settings
-from app.broker.factory import make_option_broker_client
-from app.models.trading_plan import TradingPlan
 from app.core.runtime_config import (
+    clear_autonomy_level_override,
     get_autonomy_level,
     set_autonomy_level,
-    clear_autonomy_level_override,
 )
-from app.models.db import get_session
-from app.models.trading_signal import TradingSignal, SignalStatus
+from app.engine.signal_engine import SignalEngine
 from app.models.autonomy_audit_log import AutonomyAuditLog
-from app.models.strategy import Strategy, StrategyRun, HistoricalStrategyRun
+from app.models.db import get_session
+from app.models.strategy import HistoricalStrategyRun, Strategy, StrategyRun
+from app.models.trading_plan import TradingPlan
+from app.models.trading_signal import SignalStatus, TradingSignal
 from app.services.autonomous_engine import autonomous_engine
 from app.services.portfolio_cache_service import invalidate_portfolio_view_caches
-from app.services.signal_quality_funnel import signal_quality_funnel, SignalQualityTier
+from app.services.signal_quality_funnel import SignalQualityTier, signal_quality_funnel
+from app.services.signal_transition_service import signal_transition_service
 from app.services.truth_source_service import truth_source_service
 
 router = APIRouter(prefix="/autonomy", tags=["V10-Autonomy"])
@@ -45,14 +49,20 @@ async def _resolve_account_id() -> str:
     """优先解析 Tiger 实际账户号，避免 settings.TIGER_ACCOUNT 与真实账户不一致。"""
     global _cached_account_id, _cached_account_expires_at
     now = datetime.now(timezone.utc)
-    if _cached_account_id and _cached_account_expires_at and _cached_account_expires_at > now:
+    if (
+        _cached_account_id
+        and _cached_account_expires_at
+        and _cached_account_expires_at > now
+    ):
         return _cached_account_id
     try:
         broker = make_option_broker_client()
         real_acc = await asyncio.wait_for(broker.get_account_id(), timeout=2.0)
         if real_acc:
             _cached_account_id = str(real_acc)
-            _cached_account_expires_at = now + timedelta(seconds=_ACCOUNT_ID_CACHE_TTL_SECONDS)
+            _cached_account_expires_at = now + timedelta(
+                seconds=_ACCOUNT_ID_CACHE_TTL_SECONDS
+            )
             return _cached_account_id
     except Exception:
         pass
@@ -119,14 +129,24 @@ def _get_order_status(order) -> str:
 
 def _build_signal_quality_snapshot(signal: TradingSignal) -> dict[str, object]:
     signal_type = signal.signal_type.value if signal.signal_type else "ENTRY"
-    extra_meta: dict[str, Any] = signal.extra_metadata if isinstance(signal.extra_metadata, dict) else {}
-    factor_scores: dict[str, Any] = signal.factor_scores if isinstance(signal.factor_scores, dict) else {}
+    extra_meta: dict[str, Any] = (
+        signal.extra_metadata if isinstance(signal.extra_metadata, dict) else {}
+    )
+    factor_scores: dict[str, Any] = (
+        signal.factor_scores if isinstance(signal.factor_scores, dict) else {}
+    )
     _raw_signal_payload = extra_meta.get("signal_payload")
-    signal_payload: dict[str, Any] = _raw_signal_payload if isinstance(_raw_signal_payload, dict) else {}
+    signal_payload: dict[str, Any] = (
+        _raw_signal_payload if isinstance(_raw_signal_payload, dict) else {}
+    )
     _raw_payload_dims = signal_payload.get("dimensions")
-    payload_dims: dict[str, Any] = _raw_payload_dims if isinstance(_raw_payload_dims, dict) else {}
+    payload_dims: dict[str, Any] = (
+        _raw_payload_dims if isinstance(_raw_payload_dims, dict) else {}
+    )
     _raw_payload_quality = signal_payload.get("quality_inputs")
-    payload_quality: dict[str, Any] = _raw_payload_quality if isinstance(_raw_payload_quality, dict) else {}
+    payload_quality: dict[str, Any] = (
+        _raw_payload_quality if isinstance(_raw_payload_quality, dict) else {}
+    )
     if signal_type in ("EXIT", "REDUCE") or bool(extra_meta.get("force_exit")):
         return {
             "signal_quality_tier": None,
@@ -146,7 +166,10 @@ def _build_signal_quality_snapshot(signal: TradingSignal) -> dict[str, object]:
             return None
 
     dimensions = _as_list(
-        payload_dims.get("dimensions") or extra_meta.get("dimensions") or factor_scores.get("dimensions") or []
+        payload_dims.get("dimensions")
+        or extra_meta.get("dimensions")
+        or factor_scores.get("dimensions")
+        or []
     )
 
     def _dim_dir(name: str) -> int:
@@ -190,24 +213,141 @@ def _build_signal_quality_snapshot(signal: TradingSignal) -> dict[str, object]:
             direction=str(signal.direction or "LONG").upper(),
             regime=str(extra_meta.get("regime") or "SIDEWAYS"),
             composite_score=float(signal.confidence or 0.0),
-            aligned_count=int(payload_dims.get("aligned_count") or payload_quality.get("aligned_count") or extra_meta.get("aligned_count") or factor_scores.get("aligned_count") or 0),
-            aligned_dims=_as_list(payload_dims.get("aligned_dims") or extra_meta.get("aligned_dims") or factor_scores.get("aligned_dims") or []),
-            opposing_dims=_as_list(payload_dims.get("opposing_dims") or extra_meta.get("opposing_dims") or factor_scores.get("opposing_dims") or []),
-            neutral_dims=_as_list(payload_dims.get("neutral_dims") or extra_meta.get("neutral_dims") or factor_scores.get("neutral_dims") or []),
+            aligned_count=int(
+                payload_dims.get("aligned_count")
+                or payload_quality.get("aligned_count")
+                or extra_meta.get("aligned_count")
+                or factor_scores.get("aligned_count")
+                or 0
+            ),
+            aligned_dims=_as_list(
+                payload_dims.get("aligned_dims")
+                or extra_meta.get("aligned_dims")
+                or factor_scores.get("aligned_dims")
+                or []
+            ),
+            opposing_dims=_as_list(
+                payload_dims.get("opposing_dims")
+                or extra_meta.get("opposing_dims")
+                or factor_scores.get("opposing_dims")
+                or []
+            ),
+            neutral_dims=_as_list(
+                payload_dims.get("neutral_dims")
+                or extra_meta.get("neutral_dims")
+                or factor_scores.get("neutral_dims")
+                or []
+            ),
             tech_direction=_dim_dir("technical"),
             fundamental_direction=_dim_dir("fundamental"),
             macro_score=_dim_score("macro"),
             options_score=_dim_score("options"),
-            adv_usd=_as_float(payload_dims.get("adv_usd") or extra_meta.get("adv_usd") or factor_scores.get("adv_usd")),
-            market_cap=_as_float(payload_dims.get("market_cap") or extra_meta.get("market_cap") or factor_scores.get("market_cap")),
-            historical_ic=_as_float(payload_quality.get("historical_ic") or payload_dims.get("historical_ic") or extra_meta.get("historical_ic") or factor_scores.get("historical_ic")),
-            timing_quality=_as_float(payload_quality.get("timing_quality") or payload_dims.get("timing_quality") or extra_meta.get("timing_quality") or factor_scores.get("timing_quality")),
+            adv_usd=_as_float(
+                payload_dims.get("adv_usd")
+                or extra_meta.get("adv_usd")
+                or factor_scores.get("adv_usd")
+            ),
+            market_cap=_as_float(
+                payload_dims.get("market_cap")
+                or extra_meta.get("market_cap")
+                or factor_scores.get("market_cap")
+            ),
+            historical_ic=_as_float(
+                payload_quality.get("historical_ic")
+                or payload_dims.get("historical_ic")
+                or extra_meta.get("historical_ic")
+                or factor_scores.get("historical_ic")
+            ),
+            timing_quality=_as_float(
+                payload_quality.get("timing_quality")
+                or payload_dims.get("timing_quality")
+                or extra_meta.get("timing_quality")
+                or factor_scores.get("timing_quality")
+            ),
         )
     )
     return {
         "signal_quality_tier": profile.tier,
         "signal_quality_score": profile.score,
         "signal_quality_quota_exempt": profile.quota_exempt,
+    }
+
+
+def _safe_list(value: Any) -> list[Any]:
+    return value if isinstance(value, list) else []
+
+
+def _normalize_origin_mode(value: Any) -> str:
+    text = str(value or "").strip().upper()
+    if text in {"REAL", "SYNTHETIC", "BACKFILL"}:
+        return text
+    return "UNKNOWN"
+
+
+def _build_v1054_rollout_state() -> dict[str, object]:
+    flags = {
+        "signal_pipeline_v1054_enabled": bool(settings.SIGNAL_PIPELINE_V1054_ENABLED),
+        "autonomous_control_plane_v1054_enabled": bool(
+            settings.AUTONOMOUS_CONTROL_PLANE_V1054_ENABLED
+        ),
+        "native_audit_v1054_enabled": bool(settings.NATIVE_AUDIT_V1054_ENABLED),
+        "execution_policy_hard_control_enabled": bool(
+            settings.EXECUTION_POLICY_HARD_CONTROL_ENABLED
+        ),
+        "governance_hard_gate_enabled": bool(settings.GOVERNANCE_HARD_GATE_ENABLED),
+    }
+    if (
+        flags["signal_pipeline_v1054_enabled"]
+        and flags["autonomous_control_plane_v1054_enabled"]
+        and flags["native_audit_v1054_enabled"]
+        and flags["governance_hard_gate_enabled"]
+    ):
+        stage = "FULL"
+    elif (
+        flags["autonomous_control_plane_v1054_enabled"]
+        and flags["native_audit_v1054_enabled"]
+    ):
+        stage = "SEMI"
+    elif flags["signal_pipeline_v1054_enabled"]:
+        stage = "SHADOW"
+    else:
+        stage = "OBSERVE"
+    return {"stage": stage, "flags": flags}
+
+
+def _build_signal_integrity_snapshot(signal: TradingSignal) -> dict[str, object]:
+    extra = signal.extra_metadata if isinstance(signal.extra_metadata, dict) else {}
+    payload = (
+        extra.get("signal_payload")
+        if isinstance(extra.get("signal_payload"), dict)
+        else {}
+    )
+    latest_transition = signal_transition_service.latest_transition(extra)
+    origin_mode = _normalize_origin_mode(
+        getattr(signal, "signal_origin_mode", None)
+        or extra.get("signal_origin_mode")
+        or payload.get("origin_mode")
+    )
+    transitions = _safe_list(extra.get("signal_transitions"))
+    payload_version = str(payload.get("version") or "") or None
+    signal_integrity_ready = bool(
+        origin_mode != "UNKNOWN"
+        and payload_version == SignalEngine.CANONICAL_SIGNAL_PAYLOAD_VERSION
+        and transitions
+    )
+    return {
+        "signal_origin_mode": origin_mode,
+        "signal_payload_version": payload_version,
+        "signal_transition_count": len(transitions),
+        "signal_transition_source": (
+            "NATIVE_TRANSITION_LOG" if transitions else "LEGACY_NONE"
+        ),
+        "latest_transition_to_status": (
+            latest_transition.get("to_status")
+            if isinstance(latest_transition, dict)
+            else None
+        ),
+        "signal_integrity_ready": signal_integrity_ready,
     }
 
 
@@ -252,7 +392,9 @@ async def get_autonomy_status(
 ):
     """获取 AI 自主运行状态 (V10)，包含实时信号流水线统计"""
     account_id = await _resolve_account_id()
-    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    today = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
     today_utc_date = today.date().isoformat()
 
     # 今日已执行交易数（与引擎对齐：从审计日志统计 order_id 非空的下单记录）
@@ -282,8 +424,7 @@ async def get_autonomy_status(
     pipeline = {row[0].value: row[1] for row in pipeline_result.fetchall()}
 
     today_signal_rows = await session.execute(
-        select(TradingSignal)
-        .where(
+        select(TradingSignal).where(
             and_(
                 TradingSignal.account_id == account_id,
                 TradingSignal.created_at >= today,
@@ -292,19 +433,27 @@ async def get_autonomy_status(
     )
     today_signals = today_signal_rows.scalars().all()
     closing_signals = [
-        s for s in today_signals
+        s
+        for s in today_signals
         if s.signal_type.value in ("EXIT", "REDUCE")
-        or (isinstance(s.extra_metadata, dict) and bool(s.extra_metadata.get("force_exit")))
+        or (
+            isinstance(s.extra_metadata, dict)
+            and bool(s.extra_metadata.get("force_exit"))
+        )
     ]
     force_exit_signals = [
-        s for s in closing_signals
-        if isinstance(s.extra_metadata, dict) and bool(s.extra_metadata.get("force_exit"))
+        s
+        for s in closing_signals
+        if isinstance(s.extra_metadata, dict)
+        and bool(s.extra_metadata.get("force_exit"))
     ]
     closing_failed = [
-        s for s in closing_signals
+        s
+        for s in closing_signals
         if s.status in {SignalStatus.REJECTED, SignalStatus.FAILED}
     ]
     quality_snapshots: list[dict[str, object]] = []
+    integrity_snapshots: list[dict[str, object]] = []
     elite_count = 0
     high_quality_count = 0
     quota_exempt_count = 0
@@ -312,10 +461,15 @@ async def get_autonomy_status(
     for signal in today_signals:
         snapshot = _build_signal_quality_snapshot(signal)
         quality_snapshots.append(snapshot)
+        integrity_snapshots.append(_build_signal_integrity_snapshot(signal))
         tier = snapshot.get("signal_quality_tier")
         if tier == SignalQualityTier.ELITE:
             elite_count += 1
-            if signal.status in {SignalStatus.GENERATED, SignalStatus.VALIDATED, SignalStatus.QUEUED}:
+            if signal.status in {
+                SignalStatus.GENERATED,
+                SignalStatus.VALIDATED,
+                SignalStatus.QUEUED,
+            }:
                 pending_elite_count += 1
         if tier in {SignalQualityTier.ELITE, SignalQualityTier.HIGH}:
             high_quality_count += 1
@@ -339,9 +493,29 @@ async def get_autonomy_status(
         account_id,
     )
     regime_truth = await truth_source_service.get_regime_truth_snapshot(session)
+    origin_counts: dict[str, int] = {
+        "REAL": 0,
+        "SYNTHETIC": 0,
+        "BACKFILL": 0,
+        "UNKNOWN": 0,
+    }
+    canonical_ready = 0
+    native_transition_ready = 0
+    for snapshot in integrity_snapshots:
+        origin_counts[str(snapshot["signal_origin_mode"])] += 1
+        if (
+            snapshot["signal_payload_version"]
+            == SignalEngine.CANONICAL_SIGNAL_PAYLOAD_VERSION
+        ):
+            canonical_ready += 1
+        if int(snapshot["signal_transition_count"] or 0) > 0:
+            native_transition_ready += 1
+    integrity_total = len(integrity_snapshots)
 
     # 活跃冷却标的：查询过去 cooldown_min 分钟内由 AI_AUTONOMOUS 成交的计划
-    cooldown_min = int(getattr(settings, "AUTONOMOUS_ORDER_COOLDOWN_MINUTES", 120) or 120)
+    cooldown_min = int(
+        getattr(settings, "AUTONOMOUS_ORDER_COOLDOWN_MINUTES", 120) or 120
+    )
     cooldown_cutoff = datetime.now(timezone.utc) - timedelta(minutes=cooldown_min)
     cooldown_result = await session.execute(
         select(
@@ -365,19 +539,23 @@ async def get_autonomy_status(
         executed_at = row.created_at
         if executed_at and executed_at.tzinfo is None:
             executed_at = executed_at.replace(tzinfo=timezone.utc)
-        expires_at = executed_at + timedelta(minutes=cooldown_min) if executed_at else None
+        expires_at = (
+            executed_at + timedelta(minutes=cooldown_min) if executed_at else None
+        )
         remaining_min = (
             int((expires_at - datetime.now(timezone.utc)).total_seconds() / 60)
             if expires_at and expires_at > datetime.now(timezone.utc)
             else 0
         )
-        cooldown_symbols.append({
-            "symbol": row.symbol,
-            "direction": row.direction,
-            "executed_at": executed_at.isoformat() if executed_at else None,
-            "expires_at": expires_at.isoformat() if expires_at else None,
-            "remaining_minutes": max(0, remaining_min),
-        })
+        cooldown_symbols.append(
+            {
+                "symbol": row.symbol,
+                "direction": row.direction,
+                "executed_at": executed_at.isoformat() if executed_at else None,
+                "expires_at": expires_at.isoformat() if expires_at else None,
+                "remaining_minutes": max(0, remaining_min),
+            }
+        )
 
     return {
         "level": await get_autonomy_level(),
@@ -394,10 +572,38 @@ async def get_autonomy_status(
         "failed_trades_today": failed_today,
         "positions_source": positions_truth.get("source"),
         "positions_count_truth": int(positions_truth.get("positions_count") or 0),
+        "audit_source": (
+            "AUTONOMY_AUDIT_LOG"
+            if settings.NATIVE_AUDIT_V1054_ENABLED
+            else "LEGACY_COMPAT"
+        ),
         "regime_truth": {
             "regime": regime_truth.get("regime"),
             "confidence": regime_truth.get("confidence"),
             "source": regime_truth.get("source"),
+        },
+        "rollout": _build_v1054_rollout_state(),
+        "signal_integrity": {
+            "sample_size": integrity_total,
+            "origin_counts": origin_counts,
+            "canonical_payload_ready": canonical_ready,
+            "canonical_payload_ratio": (
+                round(
+                    canonical_ready / integrity_total,
+                    4,
+                )
+                if integrity_total
+                else 0.0
+            ),
+            "native_transition_ready": native_transition_ready,
+            "native_transition_ratio": (
+                round(
+                    native_transition_ready / integrity_total,
+                    4,
+                )
+                if integrity_total
+                else 0.0
+            ),
         },
         "cooldown_symbols": cooldown_symbols,
         "cooldown_minutes": cooldown_min,
@@ -424,7 +630,9 @@ async def update_autonomy_level(
     """切换 AI 自主级别（立即生效）"""
     valid = {"FULL", "SEMI", "ADVISORY"}
     if body.level not in valid:
-        raise HTTPException(status_code=400, detail=f"Invalid level. Must be one of: {valid}")
+        raise HTTPException(
+            status_code=400, detail=f"Invalid level. Must be one of: {valid}"
+        )
     # 写入 Redis 持久化 + 更新进程内值；重启后仍生效
     await set_autonomy_level(body.level)
     return {"success": True, "autonomy_level": body.level}
@@ -488,8 +696,14 @@ async def get_audit_log(
                 "autonomy_level": r.autonomy_level,
                 "decision_type": r.decision_type,
                 "symbol": r.symbol,
-                "direction": r.decision_type if r.decision_type in ("BUY", "SELL") else None,
-                "confidence_score": float(r.confidence_score) if r.confidence_score is not None else None,
+                "direction": (
+                    r.decision_type if r.decision_type in ("BUY", "SELL") else None
+                ),
+                "confidence_score": (
+                    float(r.confidence_score)
+                    if r.confidence_score is not None
+                    else None
+                ),
                 "risk_gate_passed": bool(r.risk_gate_passed),
                 "order_id": r.order_id,
                 "revoked_at": r.revoked_at.isoformat() if r.revoked_at else None,
@@ -498,7 +712,9 @@ async def get_audit_log(
                 "ai_reasoning": r.ai_reasoning,
                 "quantity": (
                     signal_map[str(r.order_id)].quantity_value
-                    if r.order_id and str(r.order_id) in signal_map and signal_map[str(r.order_id)].quantity_value is not None
+                    if r.order_id
+                    and str(r.order_id) in signal_map
+                    and signal_map[str(r.order_id)].quantity_value is not None
                     else (
                         signal_map[str(r.order_id)].suggested_quantity
                         if r.order_id and str(r.order_id) in signal_map
@@ -517,42 +733,113 @@ async def get_audit_log(
                 ),
                 "execution_path": (
                     ((r.risk_gate_detail or {}).get("execution_path"))
-                    or (((signal_map[str(r.order_id)].extra_metadata if r.order_id and str(r.order_id) in signal_map else {}) or {}).get("execution_path"))
+                    or (
+                        (
+                            (
+                                signal_map[str(r.order_id)].extra_metadata
+                                if r.order_id and str(r.order_id) in signal_map
+                                else {}
+                            )
+                            or {}
+                        ).get("execution_path")
+                    )
                     or "STANDARD"
                 ),
                 "closing_intent": bool(
                     ((r.risk_gate_detail or {}).get("closing_intent"))
-                    or (((signal_map[str(r.order_id)].extra_metadata if r.order_id and str(r.order_id) in signal_map else {}) or {}).get("closing_intent"))
+                    or (
+                        (
+                            (
+                                signal_map[str(r.order_id)].extra_metadata
+                                if r.order_id and str(r.order_id) in signal_map
+                                else {}
+                            )
+                            or {}
+                        ).get("closing_intent")
+                    )
                 ),
                 "force_exit": bool(
                     ((r.risk_gate_detail or {}).get("force_exit"))
-                    or (((signal_map[str(r.order_id)].extra_metadata if r.order_id and str(r.order_id) in signal_map else {}) or {}).get("force_exit"))
+                    or (
+                        (
+                            (
+                                signal_map[str(r.order_id)].extra_metadata
+                                if r.order_id and str(r.order_id) in signal_map
+                                else {}
+                            )
+                            or {}
+                        ).get("force_exit")
+                    )
                 ),
                 "bypass_reason": (
                     (r.risk_gate_detail or {}).get("bypass_reason")
-                    or (((signal_map[str(r.order_id)].extra_metadata if r.order_id and str(r.order_id) in signal_map else {}) or {}).get("bypass_reason"))
+                    or (
+                        (
+                            (
+                                signal_map[str(r.order_id)].extra_metadata
+                                if r.order_id and str(r.order_id) in signal_map
+                                else {}
+                            )
+                            or {}
+                        ).get("bypass_reason")
+                    )
                 ),
                 "risk_gate_detail": r.risk_gate_detail,
                 "circuit_breaker_triggered": bool(r.circuit_breaker_triggered),
                 "signal_quality_tier": (
-                    _build_signal_quality_snapshot(signal_map[str(r.order_id)])["signal_quality_tier"]
+                    _build_signal_quality_snapshot(signal_map[str(r.order_id)])[
+                        "signal_quality_tier"
+                    ]
                     if r.order_id and str(r.order_id) in signal_map
                     else None
                 ),
                 "signal_quality_score": (
-                    _build_signal_quality_snapshot(signal_map[str(r.order_id)])["signal_quality_score"]
+                    _build_signal_quality_snapshot(signal_map[str(r.order_id)])[
+                        "signal_quality_score"
+                    ]
                     if r.order_id and str(r.order_id) in signal_map
                     else None
                 ),
                 "signal_quality_quota_exempt": bool(
-                    _build_signal_quality_snapshot(signal_map[str(r.order_id)])["signal_quality_quota_exempt"]
+                    _build_signal_quality_snapshot(signal_map[str(r.order_id)])[
+                        "signal_quality_quota_exempt"
+                    ]
                     if r.order_id and str(r.order_id) in signal_map
                     else False
+                ),
+                "signal_origin_mode": (
+                    _build_signal_integrity_snapshot(signal_map[str(r.order_id)])[
+                        "signal_origin_mode"
+                    ]
+                    if r.order_id and str(r.order_id) in signal_map
+                    else "UNKNOWN"
+                ),
+                "signal_payload_version": (
+                    _build_signal_integrity_snapshot(signal_map[str(r.order_id)])[
+                        "signal_payload_version"
+                    ]
+                    if r.order_id and str(r.order_id) in signal_map
+                    else None
+                ),
+                "signal_transition_count": (
+                    _build_signal_integrity_snapshot(signal_map[str(r.order_id)])[
+                        "signal_transition_count"
+                    ]
+                    if r.order_id and str(r.order_id) in signal_map
+                    else 0
                 ),
             }
             for r in rows
         ],
         "total": total,
+        "meta": {
+            "audit_source": (
+                "AUTONOMY_AUDIT_LOG"
+                if settings.NATIVE_AUDIT_V1054_ENABLED
+                else "LEGACY_COMPAT"
+            ),
+            "rollout": _build_v1054_rollout_state(),
+        },
     }
 
 
@@ -607,8 +894,10 @@ async def get_signal_pipeline(
         strategy_run_map = {run.id: run for run in run_result.scalars().all()}
 
         history_result = await session.execute(
-            select(HistoricalStrategyRun.strategy_run_id, HistoricalStrategyRun.status_payload)
-            .where(HistoricalStrategyRun.strategy_run_id.in_(strategy_run_ids))
+            select(
+                HistoricalStrategyRun.strategy_run_id,
+                HistoricalStrategyRun.status_payload,
+            ).where(HistoricalStrategyRun.strategy_run_id.in_(strategy_run_ids))
         )
         for run_id, status_payload in history_result.fetchall():
             universe_meta = {}
@@ -620,12 +909,14 @@ async def get_signal_pipeline(
 
     # 获取这些信号对应的执行意图（用于备注显示拒绝原因）
     from app.models.execution_intent import AutonomousExecutionIntent
+
     intent_map = {}
     if signals:
         signal_ids = [s.signal_id for s in signals]
         intent_result = await session.execute(
-            select(AutonomousExecutionIntent.signal_id, AutonomousExecutionIntent.reason)
-            .where(AutonomousExecutionIntent.signal_id.in_(signal_ids))
+            select(
+                AutonomousExecutionIntent.signal_id, AutonomousExecutionIntent.reason
+            ).where(AutonomousExecutionIntent.signal_id.in_(signal_ids))
         )
         for sid, reason in intent_result:
             if sid and reason:
@@ -633,6 +924,7 @@ async def get_signal_pipeline(
 
     # 获取每个信号最新的漏斗审计结果（用于在流水线中显示漏斗拒绝原因，消除歧义）
     from app.models.signal_quality_audit_log import SignalQualityAuditLog
+
     funnel_map: dict = {}
     if signals:
         signal_ids_int = [s.id for s in signals if s.id is not None]
@@ -676,7 +968,9 @@ async def get_signal_pipeline(
                 "quantity": s.suggested_quantity,
                 "quantity_mode": s.quantity_mode,
                 "quantity_value": s.quantity_value,
-                "strength": round(s.confidence, 4) if s.confidence is not None else 0.0,  # 修复置信度显示：保留4位精度(前端*100后含2位小数)
+                "strength": (
+                    round(s.confidence, 4) if s.confidence is not None else 0.0
+                ),  # 修复置信度显示：保留4位精度(前端*100后含2位小数)
                 "priority": s.priority,
                 "notes": (
                     intent_map.get(s.signal_id)
@@ -698,19 +992,25 @@ async def get_signal_pipeline(
                     (s.extra_metadata or {}).get("execution_path")
                     if isinstance(s.extra_metadata, dict)
                     else "STANDARD"
-                ) or "STANDARD",
+                )
+                or "STANDARD",
                 "closing_intent": bool(
                     s.signal_type.value in ("EXIT", "REDUCE")
-                    or (isinstance(s.extra_metadata, dict) and (s.extra_metadata or {}).get("closing_intent"))
+                    or (
+                        isinstance(s.extra_metadata, dict)
+                        and (s.extra_metadata or {}).get("closing_intent")
+                    )
                 ),
                 "force_exit": bool(
-                    isinstance(s.extra_metadata, dict) and (s.extra_metadata or {}).get("force_exit")
+                    isinstance(s.extra_metadata, dict)
+                    and (s.extra_metadata or {}).get("force_exit")
                 ),
                 "bypass_reason": (
                     (s.extra_metadata or {}).get("bypass_reason")
                     if isinstance(s.extra_metadata, dict)
                     else None
-                ) or intent_map.get(s.signal_id),
+                )
+                or intent_map.get(s.signal_id),
                 "strategy_id": s.strategy_id,
                 "strategy_run_id": s.strategy_run_id,
                 "strategy_name": (
@@ -721,7 +1021,8 @@ async def get_signal_pipeline(
                 or (strategy_name_map.get(s.strategy_id) if s.strategy_id else None)
                 or (
                     strategy_run_map[s.strategy_run_id].strategy.name
-                    if s.strategy_run_id in strategy_run_map and strategy_run_map[s.strategy_run_id].strategy
+                    if s.strategy_run_id in strategy_run_map
+                    and strategy_run_map[s.strategy_run_id].strategy
                     else None
                 ),
                 "strategy_version": (
@@ -750,7 +1051,9 @@ async def get_signal_pipeline(
                     else None
                 )
                 or (
-                    (run_universe_meta_map.get(s.strategy_run_id) or {}).get("resolved_market")
+                    (run_universe_meta_map.get(s.strategy_run_id) or {}).get(
+                        "resolved_market"
+                    )
                     if s.strategy_run_id
                     else None
                 ),
@@ -760,7 +1063,9 @@ async def get_signal_pipeline(
                     else None
                 )
                 or (
-                    (run_universe_meta_map.get(s.strategy_run_id) or {}).get("selection_mode")
+                    (run_universe_meta_map.get(s.strategy_run_id) or {}).get(
+                        "selection_mode"
+                    )
                     if s.strategy_run_id
                     else None
                 ),
@@ -770,25 +1075,35 @@ async def get_signal_pipeline(
                     else None
                 )
                 or (
-                    (run_universe_meta_map.get(s.strategy_run_id) or {}).get("fallback_reason")
+                    (run_universe_meta_map.get(s.strategy_run_id) or {}).get(
+                        "fallback_reason"
+                    )
                     if s.strategy_run_id
                     else None
                 ),
                 "fallback_to_default_symbols": (
-                    (s.extra_metadata or {}).get("fallback_to_default_symbols")
-                    if isinstance(s.extra_metadata, dict)
-                    else None
-                )
-                if isinstance((s.extra_metadata or {}), dict) and (s.extra_metadata or {}).get("fallback_to_default_symbols") is not None
-                else (
-                    (run_universe_meta_map.get(s.strategy_run_id) or {}).get("fallback_to_default_symbols")
-                    if s.strategy_run_id
-                    else None
+                    (
+                        (s.extra_metadata or {}).get("fallback_to_default_symbols")
+                        if isinstance(s.extra_metadata, dict)
+                        else None
+                    )
+                    if isinstance((s.extra_metadata or {}), dict)
+                    and (s.extra_metadata or {}).get("fallback_to_default_symbols")
+                    is not None
+                    else (
+                        (run_universe_meta_map.get(s.strategy_run_id) or {}).get(
+                            "fallback_to_default_symbols"
+                        )
+                        if s.strategy_run_id
+                        else None
+                    )
                 ),
                 "executed_at": s.executed_at.isoformat() if s.executed_at else None,
                 "created_at": s.created_at.isoformat() if s.created_at else None,
                 "funnel_result": funnel_map.get(s.id, {}).get("funnel_result"),
-                "funnel_rejected_at_layer": funnel_map.get(s.id, {}).get("funnel_rejected_at_layer"),
+                "funnel_rejected_at_layer": funnel_map.get(s.id, {}).get(
+                    "funnel_rejected_at_layer"
+                ),
                 "funnel_rejection_reason": (
                     funnel_map.get(s.id, {}).get("funnel_rejection_reason")
                     or (
@@ -813,10 +1128,19 @@ async def get_signal_pipeline(
                     else None
                 )
                 or funnel_map.get(s.id, {}).get("funnel_rejection_detail"),
+                **_build_signal_integrity_snapshot(s),
                 **_build_signal_quality_snapshot(s),
             }
             for s in signals
-        ]
+        ],
+        "meta": {
+            "rollout": _build_v1054_rollout_state(),
+            "audit_source": (
+                "AUTONOMY_AUDIT_LOG"
+                if settings.NATIVE_AUDIT_V1054_ENABLED
+                else "LEGACY_COMPAT"
+            ),
+        },
     }
 
 
@@ -828,6 +1152,7 @@ async def trigger_rebalance_scan(
     """手动触发一次持仓再平衡扫描（将 AI 减仓/卖出建议转为信号）"""
     account_id = await _resolve_account_id()
     from app.engine.position_rebalance_monitor import PositionRebalanceMonitor
+
     monitor = PositionRebalanceMonitor(session)
     result = await monitor.scan(account_id=account_id)
     await invalidate_portfolio_view_caches(account_id)
@@ -842,14 +1167,19 @@ async def trigger_capacity_guard(
     """手动触发一次容量守卫扫描（超出并发持仓上限时自动生成 EXIT 信号）。"""
     from app.engine.position_rebalance_monitor import PositionRebalanceMonitor
     from app.services.regime_classifier import RegimeClassifier
-    from app.services.signal_quality_config import get_regime_adjusted_config, get_signal_quality_config
+    from app.services.signal_quality_config import (
+        get_regime_adjusted_config,
+        get_signal_quality_config,
+    )
 
     account_id = await _resolve_account_id()
     current_regime = await RegimeClassifier.get_current_regime(session)
     regime_name = current_regime.regime if current_regime else None
     sq_cfg = get_signal_quality_config()
     regime_cfg = get_regime_adjusted_config(regime_name) if regime_name else {}
-    max_positions = int(regime_cfg.get("MAX_CONCURRENT_POSITIONS", sq_cfg.MAX_CONCURRENT_POSITIONS))
+    max_positions = int(
+        regime_cfg.get("MAX_CONCURRENT_POSITIONS", sq_cfg.MAX_CONCURRENT_POSITIONS)
+    )
 
     monitor = PositionRebalanceMonitor(session)
     result = await monitor.enforce_position_capacity(
@@ -881,7 +1211,9 @@ async def trigger_decision_cycle(
 
     rescued_count = 0
     if rescue_queued:
-        rescue_cutoff = datetime.now(timezone.utc) - timedelta(minutes=max(1, rescue_queued_minutes))
+        rescue_cutoff = datetime.now(timezone.utc) - timedelta(
+            minutes=max(1, rescue_queued_minutes)
+        )
         try:
             rescue_stmt = (
                 sa_update(TradingSignal)
@@ -904,8 +1236,7 @@ async def trigger_decision_cycle(
                 pass
 
     results = await autonomous_engine.run_decision_cycle(
-        account_id=account_id,
-        db=session
+        account_id=account_id, db=session
     )
     return {
         "success": True,
@@ -945,10 +1276,10 @@ async def trigger_full_cycle(
     )
 
     phases = results.get("phases", {})
-    sig_gen   = phases.get("signal_generation", {}).get("total_signals_generated", 0)
-    sig_val   = phases.get("signal_validation", {}).get("validated_signals", 0)
+    sig_gen = phases.get("signal_generation", {}).get("total_signals_generated", 0)
+    sig_val = phases.get("signal_validation", {}).get("validated_signals", 0)
     exec_info = phases.get("trade_execution", {})
-    executed  = exec_info.get("executed_orders", exec_info.get("executed", 0))
+    executed = exec_info.get("executed_orders", exec_info.get("executed", 0))
     signal_generation_phase = phases.get("signal_generation", {})
 
     return {
@@ -960,9 +1291,15 @@ async def trigger_full_cycle(
         "executed": executed,
         "signal_generation_summary": {
             "strategy_scope_note": signal_generation_phase.get("strategy_scope_note"),
-            "strategy_runs_processed": signal_generation_phase.get("strategy_runs_processed", 0),
-            "signals_before_dedup": signal_generation_phase.get("signals_before_dedup", 0),
-            "signals_by_strategy": signal_generation_phase.get("signals_by_strategy", {}),
+            "strategy_runs_processed": signal_generation_phase.get(
+                "strategy_runs_processed", 0
+            ),
+            "signals_before_dedup": signal_generation_phase.get(
+                "signals_before_dedup", 0
+            ),
+            "signals_by_strategy": signal_generation_phase.get(
+                "signals_by_strategy", {}
+            ),
             "strategy_runs_used": signal_generation_phase.get("strategy_runs_used", []),
             "runtime_scan": signal_generation_phase.get("runtime_scan", {}),
         },
@@ -991,6 +1328,7 @@ async def get_autonomy_health(
     # ── 尝试读 Redis 缓存 ────────────────────────────────────────
     try:
         from app.models.db import redis_client
+
         if redis_client:
             raw = await redis_client.get(_HEALTH_CACHE_KEY)
             if raw:

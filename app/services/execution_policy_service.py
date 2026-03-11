@@ -41,6 +41,43 @@ class ExecutionPolicyService:
             "mode": "HARD_CONTROL" if enabled else "OBSERVE_ONLY",
         }
 
+    @staticmethod
+    def _build_rollout_state() -> dict[str, Any]:
+        flags = {
+            "execution_policy_hard_control_enabled": bool(
+                settings.EXECUTION_POLICY_HARD_CONTROL_ENABLED
+            ),
+            "signal_pipeline_v1054_enabled": bool(
+                settings.SIGNAL_PIPELINE_V1054_ENABLED
+            ),
+            "autonomous_control_plane_v1054_enabled": bool(
+                settings.AUTONOMOUS_CONTROL_PLANE_V1054_ENABLED
+            ),
+            "native_audit_v1054_enabled": bool(settings.NATIVE_AUDIT_V1054_ENABLED),
+            "governance_hard_gate_enabled": bool(settings.GOVERNANCE_HARD_GATE_ENABLED),
+        }
+        if (
+            flags["signal_pipeline_v1054_enabled"]
+            and flags["autonomous_control_plane_v1054_enabled"]
+            and flags["native_audit_v1054_enabled"]
+            and flags["governance_hard_gate_enabled"]
+        ):
+            stage = "FULL"
+        elif (
+            flags["autonomous_control_plane_v1054_enabled"]
+            and flags["native_audit_v1054_enabled"]
+        ):
+            stage = "SEMI"
+        elif flags["signal_pipeline_v1054_enabled"]:
+            stage = "SHADOW"
+        else:
+            stage = "OBSERVE"
+        return {
+            "stage": stage,
+            "flags": flags,
+            "policy_source": "NATIVE_EXECUTION_POLICY",
+        }
+
     @classmethod
     def _derive_algo_type(
         cls,
@@ -940,7 +977,9 @@ class ExecutionPolicyService:
             if intent_id <= 0:
                 continue
             current = latest.get(intent_id)
-            if current is None or cls._latest_log_sort_key(log) > cls._latest_log_sort_key(current):
+            if current is None or cls._latest_log_sort_key(
+                log
+            ) > cls._latest_log_sort_key(current):
                 latest[intent_id] = log
         return latest
 
@@ -1022,6 +1061,16 @@ class ExecutionPolicyService:
                     "policy": policy,
                     "pretrade_cost": pretrade,
                     "grade": getattr(log, "grade", None),
+                    "policy_source": "NATIVE_EXECUTION_POLICY",
+                    "feedback_source": (
+                        "recent_logs"
+                        if log is not None
+                        else (
+                            "persistent_profile"
+                            if matched_profile is not None
+                            else "none"
+                        )
+                    ),
                     "persistent_profile": self._serialize_persistent_profile(
                         matched_profile
                     ),
@@ -1079,6 +1128,7 @@ class ExecutionPolicyService:
                 "policies": [],
                 "lookup": lookup,
                 "control_state": self._hard_control_state(),
+                "rollout": self._build_rollout_state(),
             }
 
         intent_ids = [int(intent.id) for intent in intents]
@@ -1133,6 +1183,7 @@ class ExecutionPolicyService:
             ],
             "lookup": lookup,
             "control_state": self._hard_control_state(),
+            "rollout": self._build_rollout_state(),
         }
 
     async def get_policy_detail(
@@ -1209,6 +1260,7 @@ class ExecutionPolicyService:
             "policy": policy,
             "pretrade_cost": pretrade,
             "control_state": self._hard_control_state(),
+            "policy_source": "NATIVE_EXECUTION_POLICY",
             "feedback_profile": feedback_profile,
             "persistent_profile": self._serialize_persistent_profile(
                 persistent_profile
@@ -1216,6 +1268,7 @@ class ExecutionPolicyService:
             "timeline": timeline,
             "exceptions": exceptions,
             "execution_result": execution_result,
+            "rollout": self._build_rollout_state(),
         }
 
 

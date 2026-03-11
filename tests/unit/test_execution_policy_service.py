@@ -124,6 +124,26 @@ def test_hard_control_state_reflects_feature_flag():
     assert state["mode"] == "HARD_CONTROL"
 
 
+def test_build_rollout_state_reflects_v1054_flags():
+    with patch(
+        "app.services.execution_policy_service.settings.SIGNAL_PIPELINE_V1054_ENABLED",
+        True,
+    ), patch(
+        "app.services.execution_policy_service.settings.AUTONOMOUS_CONTROL_PLANE_V1054_ENABLED",
+        True,
+    ), patch(
+        "app.services.execution_policy_service.settings.NATIVE_AUDIT_V1054_ENABLED",
+        True,
+    ), patch(
+        "app.services.execution_policy_service.settings.GOVERNANCE_HARD_GATE_ENABLED",
+        False,
+    ):
+        rollout = ExecutionPolicyService._build_rollout_state()
+
+    assert rollout["stage"] == "SEMI"
+    assert rollout["policy_source"] == "NATIVE_EXECUTION_POLICY"
+
+
 def test_build_live_execution_controls_keeps_requested_algo_when_disabled():
     with patch(
         (
@@ -264,8 +284,8 @@ async def test_update_persistent_feedback_profile_tracks_running_averages():
             ),
         )
         profile = (
-            await session.execute(select(ExecutionPolicyProfile))
-        ).scalars().one()
+            (await session.execute(select(ExecutionPolicyProfile))).scalars().one()
+        )
 
     await engine.dispose()
 
@@ -308,18 +328,16 @@ async def test_feedback_uses_persistent_profile_when_logs_missing():
                     created_at=datetime(2026, 3, 10, 12, 0, 0),
                 ),
             )
-            controls = await (
-                service.build_live_execution_controls_with_feedback(
-                    session,
-                    "acc-1",
-                    {
-                        "symbol": "AAPL",
-                        "action": "BUY",
-                        "qty": 180,
-                        "algo": "MARKET",
-                        "ref_price": 100.0,
-                    },
-                )
+            controls = await service.build_live_execution_controls_with_feedback(
+                session,
+                "acc-1",
+                {
+                    "symbol": "AAPL",
+                    "action": "BUY",
+                    "qty": 180,
+                    "algo": "MARKET",
+                    "ref_price": 100.0,
+                },
             )
 
     await engine.dispose()
@@ -388,6 +406,7 @@ async def test_get_policy_overview_includes_broker_order_id():
         "OBSERVE_ONLY",
         "HARD_CONTROL",
     }
+    assert overview["rollout"]["policy_source"] == "NATIVE_EXECUTION_POLICY"
 
 
 @pytest.mark.asyncio
@@ -490,6 +509,7 @@ async def test_get_policy_detail_exposes_persistent_profile():
     assert detail["persistent_profile"]["feedback_bias"] == "DEFENSIVE"
     assert detail["feedback_profile"]["source"] == "persistent_profile"
     assert detail["feedback_profile"]["recommended_algo"] == "LIMIT"
+    assert detail["policy_source"] == "NATIVE_EXECUTION_POLICY"
 
 
 @pytest.mark.asyncio

@@ -2,8 +2,7 @@ from typing import AsyncGenerator
 
 import redis.asyncio as redis
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import (AsyncSession, async_sessionmaker,
-                                    create_async_engine)
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import declarative_base
 
 from app.core.config import settings
@@ -86,6 +85,16 @@ async def ensure_mysql_indexes() -> None:
             "position_trend_snapshots",
             "CREATE INDEX ix_trend_account_symbol_timeframe_ts ON position_trend_snapshots (account_id, symbol, timeframe, timestamp)",
         ),
+        (
+            "ix_signals_account_origin_status",
+            "trading_signals",
+            "CREATE INDEX ix_signals_account_origin_status ON trading_signals (account_id, signal_origin_mode, status)",
+        ),
+        (
+            "ix_signals_origin_generated",
+            "trading_signals",
+            "CREATE INDEX ix_signals_origin_generated ON trading_signals (signal_origin_mode, generated_at)",
+        ),
     ]
 
     async with engine.begin() as conn:
@@ -116,6 +125,7 @@ async def ensure_mysql_tables() -> None:
     import app.models.algo_execution_task  # noqa: F401
     import app.models.audit_log  # noqa: F401
     import app.models.autonomy_audit_log  # noqa: F401
+
     # V10 新增
     import app.models.backtest_task  # noqa: F401
     import app.models.copilot_message  # noqa: F401
@@ -133,6 +143,7 @@ async def ensure_mysql_tables() -> None:
     import app.models.position_eval_task  # noqa: F401
     import app.models.position_lifecycle_event  # V10.4.4: 生命周期事件
     import app.models.price_alert  # noqa: F401
+
     # 持仓评估任务
     import app.models.task_config as task_cfg  # noqa: F401
     import app.models.trade_journal  # noqa: F401
@@ -161,9 +172,7 @@ async def ensure_mysql_schema_updates() -> None:
         return f"ALTER TABLE {trading_plan_table} ADD COLUMN {definition_sql}"
 
     def _autonomy_audit_log_add_column(definition_sql: str) -> str:
-        return (
-            f"ALTER TABLE {autonomy_audit_log_table} ADD COLUMN {definition_sql}"
-        )
+        return f"ALTER TABLE {autonomy_audit_log_table} ADD COLUMN {definition_sql}"
 
     # 定义需要检查的列更新
     # 格式: (table_name, column_name, add_column_sql)
@@ -194,6 +203,11 @@ async def ensure_mysql_schema_updates() -> None:
             "ALTER TABLE trading_signals ADD COLUMN is_winner VARCHAR(8) NULL COMMENT 'YES/NO - 是否盈利交易'",
         ),
         (
+            "trading_signals",
+            "signal_origin_mode",
+            "ALTER TABLE trading_signals ADD COLUMN signal_origin_mode VARCHAR(16) NULL COMMENT 'V10.5.4: REAL/SYNTHETIC/BACKFILL'",
+        ),
+        (
             trading_plan_table,
             "plan_type",
             _trading_plan_add_column(
@@ -212,9 +226,7 @@ async def ensure_mysql_schema_updates() -> None:
         (
             trading_plan_table,
             "plan_tags",
-            _trading_plan_add_column(
-                "plan_tags JSON NULL COMMENT 'V10.1: 扩展标签'"
-            ),
+            _trading_plan_add_column("plan_tags JSON NULL COMMENT 'V10.1: 扩展标签'"),
         ),
         (
             trading_plan_table,
@@ -256,9 +268,7 @@ async def ensure_mysql_schema_updates() -> None:
         (
             trading_plan_table,
             "reasoning",
-            _trading_plan_add_column(
-                "reasoning TEXT NULL COMMENT 'V10.3: AI决策摘要'"
-            ),
+            _trading_plan_add_column("reasoning TEXT NULL COMMENT 'V10.3: AI决策摘要'"),
         ),
         (
             trading_plan_table,

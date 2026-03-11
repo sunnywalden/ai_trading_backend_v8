@@ -7,6 +7,8 @@ from typing import Any
 from sqlalchemy import desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
+
 
 class V1051ResearchService:
     @staticmethod
@@ -21,6 +23,137 @@ class V1051ResearchService:
     @staticmethod
     def _safe_dict(value: Any) -> dict[str, Any]:
         return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _normalize_origin_mode(value: Any) -> str:
+        text = str(value or "").strip().upper()
+        if text in {"REAL", "SYNTHETIC", "BACKFILL"}:
+            return text
+        return "UNKNOWN"
+
+    @classmethod
+    def _extract_origin_mode(cls, signal: Any) -> str:
+        meta = cls._safe_dict(getattr(signal, "extra_metadata", None))
+        payload = cls._safe_dict(meta.get("signal_payload"))
+        factor_scores = cls._safe_dict(getattr(signal, "factor_scores", None))
+        signal_dims = cls._safe_dict(factor_scores.get("signal_dimensions"))
+        for candidate in (
+            getattr(signal, "signal_origin_mode", None),
+            meta.get("signal_origin_mode"),
+            payload.get("origin_mode"),
+            factor_scores.get("signal_origin_mode"),
+            signal_dims.get("signal_origin_mode"),
+        ):
+            normalized = cls._normalize_origin_mode(candidate)
+            if normalized != "UNKNOWN":
+                return normalized
+        return "UNKNOWN"
+
+    @classmethod
+    def _summarize_origin_breakdown(
+        cls,
+        signals: list[Any],
+    ) -> list[dict[str, Any]]:
+        total = len(signals)
+        counts: dict[str, int] = defaultdict(int)
+        for signal in signals:
+            counts[cls._extract_origin_mode(signal)] += 1
+
+        ordered = ["REAL", "SYNTHETIC", "BACKFILL", "UNKNOWN"]
+        return [
+            {
+                "mode": mode,
+                "count": counts.get(mode, 0),
+                "ratio": (
+                    round(
+                        counts.get(mode, 0) / total,
+                        4,
+                    )
+                    if total
+                    else 0.0
+                ),
+            }
+            for mode in ordered
+            if counts.get(mode, 0) > 0 or (mode == "UNKNOWN" and total == 0)
+        ]
+
+    @classmethod
+    def _build_signal_integrity_summary(
+        cls,
+        signals: list[Any],
+    ) -> dict[str, Any]:
+        total = len(signals)
+        canonical_payload_ready = 0
+        native_transition_ready = 0
+        origin_known = 0
+        for signal in signals:
+            meta = cls._safe_dict(getattr(signal, "extra_metadata", None))
+            payload = cls._safe_dict(meta.get("signal_payload"))
+            transitions = meta.get("signal_transitions")
+            if payload.get("version") == "v10.5.4":
+                canonical_payload_ready += 1
+            if isinstance(transitions, list) and transitions:
+                native_transition_ready += 1
+            if cls._extract_origin_mode(signal) != "UNKNOWN":
+                origin_known += 1
+
+        def _ratio(value: int) -> float:
+            return round(value / total, 4) if total else 0.0
+
+        return {
+            "sample_size": total,
+            "origin_breakdown": cls._summarize_origin_breakdown(signals),
+            "origin_known": origin_known,
+            "origin_known_ratio": _ratio(origin_known),
+            "canonical_payload_ready": canonical_payload_ready,
+            "canonical_payload_ratio": _ratio(canonical_payload_ready),
+            "native_transition_ready": native_transition_ready,
+            "native_transition_ratio": _ratio(native_transition_ready),
+        }
+
+    @staticmethod
+    def _build_rollout_state() -> dict[str, Any]:
+        flags = {
+            "alpha_truth_v2_enabled": bool(settings.ALPHA_TRUTH_V2_ENABLED),
+            "seat_value_arbiter_enabled": bool(settings.SEAT_VALUE_ARBITER_ENABLED),
+            "execution_policy_hard_control_enabled": bool(
+                settings.EXECUTION_POLICY_HARD_CONTROL_ENABLED
+            ),
+            "governance_hard_gate_enabled": bool(settings.GOVERNANCE_HARD_GATE_ENABLED),
+            "signal_pipeline_v1054_enabled": bool(
+                settings.SIGNAL_PIPELINE_V1054_ENABLED
+            ),
+            "autonomous_control_plane_v1054_enabled": bool(
+                settings.AUTONOMOUS_CONTROL_PLANE_V1054_ENABLED
+            ),
+            "native_audit_v1054_enabled": bool(settings.NATIVE_AUDIT_V1054_ENABLED),
+        }
+        if (
+            flags["signal_pipeline_v1054_enabled"]
+            and flags["autonomous_control_plane_v1054_enabled"]
+            and flags["native_audit_v1054_enabled"]
+            and flags["governance_hard_gate_enabled"]
+        ):
+            stage = "FULL"
+            next_step = "保持治理观测，准备全面接管"
+        elif (
+            flags["autonomous_control_plane_v1054_enabled"]
+            and flags["native_audit_v1054_enabled"]
+        ):
+            stage = "SEMI"
+            next_step = "验证治理硬门后进入 FULL"
+        elif flags["signal_pipeline_v1054_enabled"]:
+            stage = "SHADOW"
+            next_step = "开启原生审计与控制面灰度"
+        else:
+            stage = "OBSERVE"
+            next_step = "先开启 SIGNAL_PIPELINE_V1054_ENABLED"
+
+        return {
+            "stage": stage,
+            "flags": flags,
+            "recommended_next_step": next_step,
+        }
 
     @classmethod
     def _extract_turnover_penalty(cls, signal: Any) -> float:
@@ -127,11 +260,7 @@ class V1051ResearchService:
             keys.append(account_id.split("@", 1)[0])
         if account_id.lower().startswith("user_"):
             keys.append(account_id[5:])
-        return [
-            key
-            for idx, key in enumerate(keys)
-            if key and key not in keys[:idx]
-        ]
+        return [key for idx, key in enumerate(keys) if key and key not in keys[:idx]]
 
     @staticmethod
     def _coerce_winner(signal: Any) -> bool | None:
@@ -163,9 +292,7 @@ class V1051ResearchService:
             or signal.pnl is not None
             or signal.pnl_pct is not None
         ]
-        winners = [
-            signal for signal in evaluated if cls._coerce_winner(signal) is True
-        ]
+        winners = [signal for signal in evaluated if cls._coerce_winner(signal) is True]
         expected_returns = [
             cls._safe_float(signal.expected_return)
             for signal in signals
@@ -231,11 +358,7 @@ class V1051ResearchService:
             "generated": generated,
             "executed": executed,
             "evaluated": len(evaluated),
-            "win_rate": (
-                round(len(winners) / len(evaluated), 4)
-                if evaluated
-                else 0.0
-            ),
+            "win_rate": (round(len(winners) / len(evaluated), 4) if evaluated else 0.0),
             "gross_return": gross_return,
             "net_return": net_return,
             "after_cost_return": after_cost_return,
@@ -245,15 +368,12 @@ class V1051ResearchService:
             "avg_expected_return": gross_return,
             "avg_actual_return": net_return,
             "avg_pnl_pct": (
-                round(sum(pnl_pcts) / len(pnl_pcts), 4)
-                if pnl_pcts
-                else 0.0
+                round(sum(pnl_pcts) / len(pnl_pcts), 4) if pnl_pcts else 0.0
             ),
             "avg_confidence": (
-                round(sum(confidences) / len(confidences), 4)
-                if confidences
-                else 0.0
+                round(sum(confidences) / len(confidences), 4) if confidences else 0.0
             ),
+            "origin_breakdown": cls._summarize_origin_breakdown(signals),
             "regime_breakdown": cls._summarize_bucket_breakdown(
                 signals,
                 cls._extract_regime_bucket,
@@ -287,27 +407,19 @@ class V1051ResearchService:
             if cls._safe_float(trade.ghost_pnl_pct) < 0
         ]
         missed_alpha_pct = (
-            round(sum(positive_pnls) / len(positive_pnls), 4)
-            if positive_pnls
-            else 0.0
+            round(sum(positive_pnls) / len(positive_pnls), 4) if positive_pnls else 0.0
         )
         avoided_loss_pct = (
-            round(sum(negative_pnls) / len(negative_pnls), 4)
-            if negative_pnls
-            else 0.0
+            round(sum(negative_pnls) / len(negative_pnls), 4) if negative_pnls else 0.0
         )
         return {
             "total": len(ghost_trades),
             "closed": len(closed_ghosts),
             "win_rate": (
-                round(len(ghost_wins) / len(closed_ghosts), 4)
-                if closed_ghosts
-                else 0.0
+                round(len(ghost_wins) / len(closed_ghosts), 4) if closed_ghosts else 0.0
             ),
             "false_reject_rate": (
-                round(len(ghost_wins) / len(closed_ghosts), 4)
-                if closed_ghosts
-                else 0.0
+                round(len(ghost_wins) / len(closed_ghosts), 4) if closed_ghosts else 0.0
             ),
             "missed_alpha_pct": missed_alpha_pct,
             "avoided_loss_pct": avoided_loss_pct,
@@ -315,14 +427,15 @@ class V1051ResearchService:
                 avoided_loss_pct - missed_alpha_pct,
                 4,
             ),
-            "avg_pnl_pct": round(
-                sum(
-                    cls._safe_float(trade.ghost_pnl_pct)
-                    for trade in closed_ghosts
+            "avg_pnl_pct": (
+                round(
+                    sum(cls._safe_float(trade.ghost_pnl_pct) for trade in closed_ghosts)
+                    / len(closed_ghosts),
+                    4,
                 )
-                / len(closed_ghosts),
-                4,
-            ) if closed_ghosts else 0.0,
+                if closed_ghosts
+                else 0.0
+            ),
             "rejection_breakdown": sorted(
                 (
                     {
@@ -552,19 +665,13 @@ class V1051ResearchService:
         return {
             "sample_size": len(logs),
             "avg_total_is_bps": (
-                round(sum(total_is) / len(total_is), 2)
-                if total_is
-                else 0.0
+                round(sum(total_is) / len(total_is), 2) if total_is else 0.0
             ),
             "avg_fill_rate": (
-                round(sum(fill_rates) / len(fill_rates), 4)
-                if fill_rates
-                else 0.0
+                round(sum(fill_rates) / len(fill_rates), 4) if fill_rates else 0.0
             ),
             "avg_time_to_fill_ms": (
-                round(sum(fill_times) / len(fill_times), 1)
-                if fill_times
-                else 0.0
+                round(sum(fill_times) / len(fill_times), 1) if fill_times else 0.0
             ),
             "avg_quality_score": (
                 round(sum(quality_scores) / len(quality_scores), 2)
@@ -639,11 +746,11 @@ class V1051ResearchService:
                     "avg_expected_return": summary["avg_expected_return"],
                     "avg_actual_return": summary["avg_actual_return"],
                     "alpha_gap": round(
-                        summary["avg_actual_return"]
-                        - summary["avg_expected_return"],
+                        summary["avg_actual_return"] - summary["avg_expected_return"],
                         4,
                     ),
                     "avg_confidence": summary["avg_confidence"],
+                    "origin_breakdown": summary["origin_breakdown"],
                     "regime_breakdown": summary["regime_breakdown"],
                     "capacity_breakdown": summary["capacity_breakdown"],
                 }
@@ -665,7 +772,8 @@ class V1051ResearchService:
             previous_bucket = [
                 signal
                 for signal in bucket
-                if signal.generated_at and previous_window <= signal.generated_at < recent_window
+                if signal.generated_at
+                and previous_window <= signal.generated_at < recent_window
             ]
             recent_summary = self._summarize_signal_bucket(recent_bucket)
             previous_summary = self._summarize_signal_bucket(previous_bucket)
@@ -679,8 +787,7 @@ class V1051ResearchService:
                     "recent_win_rate": recent_summary["win_rate"],
                     "previous_win_rate": previous_summary["win_rate"],
                     "win_rate_delta": round(
-                        recent_summary["win_rate"]
-                        - previous_summary["win_rate"],
+                        recent_summary["win_rate"] - previous_summary["win_rate"],
                         4,
                     ),
                     "recent_alpha_gap": round(
@@ -708,11 +815,7 @@ class V1051ResearchService:
         regimes = list((await db.execute(regime_stmt)).scalars().all())
         current_regime = regimes[0].to_dict() if regimes else None
 
-        ghost_stmt = (
-            select(GhostTrade)
-            .order_by(desc(GhostTrade.created_at))
-            .limit(300)
-        )
+        ghost_stmt = select(GhostTrade).order_by(desc(GhostTrade.created_at)).limit(300)
         ghost_trades = list((await db.execute(ghost_stmt)).scalars().all())
         shadow_book = self._summarize_shadow_book(ghost_trades)
 
@@ -729,12 +832,32 @@ class V1051ResearchService:
                 ),
                 "confidence": self._safe_float(signal.confidence),
                 "expected_return": self._safe_float(signal.expected_return),
-                "actual_return": self._safe_float(signal.actual_return) if signal.actual_return is not None else None,
+                "actual_return": (
+                    self._safe_float(signal.actual_return)
+                    if signal.actual_return is not None
+                    else None
+                ),
+                "origin_mode": self._extract_origin_mode(signal),
+                "signal_payload_version": self._safe_dict(
+                    self._safe_dict(signal.extra_metadata).get("signal_payload")
+                ).get("version"),
+                "signal_transition_count": len(
+                    self._safe_dict(signal.extra_metadata).get("signal_transitions")
+                    or []
+                ),
                 "data_quality": self._infer_data_quality(
                     [signal],
-                    1 if signal.actual_return is not None or signal.pnl is not None or signal.pnl_pct is not None else 0,
+                    (
+                        1
+                        if signal.actual_return is not None
+                        or signal.pnl is not None
+                        or signal.pnl_pct is not None
+                        else 0
+                    ),
                 ),
-                "generated_at": signal.generated_at.isoformat() if signal.generated_at else None,
+                "generated_at": (
+                    signal.generated_at.isoformat() if signal.generated_at else None
+                ),
             }
             for signal in signals[:20]
         ]
@@ -742,6 +865,9 @@ class V1051ResearchService:
         return {
             "lookback_days": lookback_days,
             "summary": overall,
+            "origin_breakdown": overall["origin_breakdown"],
+            "signal_integrity": self._build_signal_integrity_summary(signals),
+            "rollout": self._build_rollout_state(),
             "current_regime": current_regime,
             "regime_tape": [regime.to_dict() for regime in regimes],
             "strategy_scorecards": strategy_scorecards[:10],
@@ -759,7 +885,9 @@ class V1051ResearchService:
         from app.models.ai_insight import ABExperiment, AIInsight
         from app.models.strategy import Strategy, StrategyRun
 
-        strategy_stmt = select(Strategy).order_by(desc(Strategy.updated_at)).limit(max(limit, 20))
+        strategy_stmt = (
+            select(Strategy).order_by(desc(Strategy.updated_at)).limit(max(limit, 20))
+        )
         strategies = list((await db.execute(strategy_stmt)).scalars().all())
         strategy_ids = [strategy.id for strategy in strategies]
 
@@ -811,7 +939,11 @@ class V1051ResearchService:
                     "version": strategy.version,
                     "is_active": strategy.is_active,
                     "last_run_status": strategy.last_run_status,
-                    "last_run_at": strategy.last_run_at.isoformat() if strategy.last_run_at else None,
+                    "last_run_at": (
+                        strategy.last_run_at.isoformat()
+                        if strategy.last_run_at
+                        else None
+                    ),
                     "run_count": len(runs),
                     "stage": stage,
                     "evidence_chain": evidence_chain,
@@ -819,6 +951,9 @@ class V1051ResearchService:
                     "rollback_suggestion": self._build_rollback_suggestion(
                         stage,
                         blockers,
+                    ),
+                    "hard_gate_ready": (
+                        stage in {"CHALLENGER", "PRODUCTION"} and not blockers
                     ),
                     "hit_rate": round(hit_rate, 4),
                     "avg_signal_strength": round(avg_signal_strength, 4),
@@ -833,9 +968,14 @@ class V1051ResearchService:
             "PAPER": 2,
             "DISCOVERY": 1,
         }
-        pipeline.sort(key=lambda item: (stage_rank.get(item["stage"], 0), item["run_count"]), reverse=True)
+        pipeline.sort(
+            key=lambda item: (stage_rank.get(item["stage"], 0), item["run_count"]),
+            reverse=True,
+        )
 
-        experiments_stmt = select(ABExperiment).order_by(desc(ABExperiment.created_at)).limit(10)
+        experiments_stmt = (
+            select(ABExperiment).order_by(desc(ABExperiment.created_at)).limit(10)
+        )
         experiments = list((await db.execute(experiments_stmt)).scalars().all())
 
         insight_stmt = select(AIInsight).order_by(desc(AIInsight.created_at)).limit(10)
@@ -854,17 +994,29 @@ class V1051ResearchService:
                 {
                     "run_id": run.id,
                     "strategy_id": run.strategy_id,
-                    "strategy_name": strategy_name_by_id.get(run.strategy_id, run.strategy_id),
+                    "strategy_name": strategy_name_by_id.get(
+                        run.strategy_id, run.strategy_id
+                    ),
                     "status": run.status,
-                    "created_at": run.created_at.isoformat() if run.created_at else None,
-                    "finished_at": run.finished_at.isoformat() if run.finished_at else None,
-                    "hit_rate": round(self._safe_float(getattr(history, "hit_rate", 0.0)), 4),
-                    "avg_signal_strength": round(self._safe_float(getattr(history, "avg_signal_strength", 0.0)), 4),
+                    "created_at": (
+                        run.created_at.isoformat() if run.created_at else None
+                    ),
+                    "finished_at": (
+                        run.finished_at.isoformat() if run.finished_at else None
+                    ),
+                    "hit_rate": round(
+                        self._safe_float(getattr(history, "hit_rate", 0.0)), 4
+                    ),
+                    "avg_signal_strength": round(
+                        self._safe_float(getattr(history, "avg_signal_strength", 0.0)),
+                        4,
+                    ),
                     "hits": int(getattr(history, "hits", 0) or 0),
                 }
             )
 
         return {
+            "rollout": self._build_rollout_state(),
             "funnel": {
                 "discovery": len(pipeline),
                 "paper": sum(
@@ -883,8 +1035,13 @@ class V1051ResearchService:
                     for item in pipeline
                     if item["stage"] in {"CHALLENGER", "PRODUCTION"}
                 ),
-                "production": sum(1 for item in pipeline if item["stage"] == "PRODUCTION"),
+                "production": sum(
+                    1 for item in pipeline if item["stage"] == "PRODUCTION"
+                ),
             },
+            "hard_gate_candidates": sum(
+                1 for item in pipeline if item["hard_gate_ready"]
+            ),
             "pipeline": pipeline[:limit],
             "experiments": [experiment.to_dict() for experiment in experiments],
             "insight_summary": {
@@ -922,10 +1079,14 @@ class V1051ResearchService:
         )
         execution_logs = list((await db.execute(execution_stmt)).scalars().all())
 
-        construction = self._summarize_weight_shift(
-            getattr(latest, "current_weights", None),
-            getattr(latest, "target_weights", None),
-        ) if latest else self._summarize_weight_shift({}, {})
+        construction = (
+            self._summarize_weight_shift(
+                getattr(latest, "current_weights", None),
+                getattr(latest, "target_weights", None),
+            )
+            if latest
+            else self._summarize_weight_shift({}, {})
+        )
 
         latest_snapshot = None
         if latest:
@@ -940,7 +1101,9 @@ class V1051ResearchService:
                     "volatility": self._safe_float(latest.expected_volatility),
                     "sharpe": self._safe_float(latest.sharpe_ratio),
                 },
-                "created_at": latest.created_at.isoformat() if latest.created_at else None,
+                "created_at": (
+                    latest.created_at.isoformat() if latest.created_at else None
+                ),
             }
 
         return {
@@ -956,7 +1119,9 @@ class V1051ResearchService:
                         "sharpe": self._safe_float(snapshot.sharpe_ratio),
                     },
                     "target_weights": snapshot.target_weights,
-                    "created_at": snapshot.created_at.isoformat() if snapshot.created_at else None,
+                    "created_at": (
+                        snapshot.created_at.isoformat() if snapshot.created_at else None
+                    ),
                 }
                 for snapshot in snapshots
             ],
