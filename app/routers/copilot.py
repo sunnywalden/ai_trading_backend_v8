@@ -15,7 +15,7 @@ from app.models.db import get_session
 from app.models.trading_plan import TradingPlan
 from app.models.trading_signal import TradingSignal
 from app.services.copilot_service import copilot_service
-from app.services.position_query_service import PositionQueryService
+from app.services.truth_source_service import truth_source_service
 
 # 无独立 ORM 模型的辅助表，使用模块级常量集中管理
 _ALERT_RECORDS_TABLE = "alert_records"
@@ -169,9 +169,12 @@ async def get_copilot_context(
     # ─── 活跃持仓 ───
     try:
         context_account_id = await copilot_service._resolve_context_account_id(current_user)
-        position_query = PositionQueryService(session)
-        portfolio_summary = await position_query.get_portfolio_summary(context_account_id)
-        ctx["active_positions"] = int(portfolio_summary.get("active_positions") or 0)
+        positions_truth = await truth_source_service.get_positions_truth_snapshot(
+            session,
+            context_account_id,
+        )
+        ctx["active_positions"] = int(positions_truth.get("positions_count") or 0)
+        ctx["active_positions_source"] = positions_truth.get("source")
     except Exception:
         ctx["active_positions"] = None
 
@@ -213,13 +216,9 @@ async def get_copilot_context(
 
     # ─── 最新市场体制 ───
     try:
-        r = await session.execute(
-            text(
-                f"SELECT regime_label FROM {_MARKET_REGIME_SNAPSHOTS_TABLE} ORDER BY created_at DESC LIMIT 1"
-            )
-        )
-        row = r.fetchone()
-        ctx["market_regime"] = row[0] if row else None
+        regime_truth = await truth_source_service.get_regime_truth_snapshot(session)
+        ctx["market_regime"] = regime_truth.get("regime")
+        ctx["market_regime_source"] = regime_truth.get("source")
     except Exception:
         ctx["market_regime"] = None
 

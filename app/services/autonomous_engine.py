@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.services.risk_gate_service import risk_gate_service
 from app.services.signal_transition_service import signal_transition_service
+from app.services.truth_source_service import truth_source_service
 
 logger = logging.getLogger(__name__)
 
@@ -473,54 +474,15 @@ class AutonomousEngine:
         logger.info(f"Starting decision cycle for {account_id}, Level={level}")
 
         # V10.2-M1: 获取当前市场体制上下文（用于审计日志 + 上册 AI 决策提示词）
-        regime_at_decision: Optional[str] = None
-        regime_confidence: Optional[float] = None
-        try:
-            from app.services.regime_strategy_allocator import \
-                fetch_current_regime_from_redis
-
-            regime_info = await fetch_current_regime_from_redis()
-            if regime_info.get("regime") not in (None, "UNKNOWN"):
-                regime_at_decision = regime_info["regime"]
-                regime_confidence = regime_info.get("confidence")
-                logger.debug(
-                    f"[AutonomousEngine] Regime context: {regime_at_decision} "
-                    f"(confidence={regime_confidence:.2%})"
-                )
-        except Exception as _re:
-            logger.debug(f"[AutonomousEngine] Could not fetch regime info: {_re}")
-
-        if regime_at_decision is None:
-            try:
-                from sqlalchemy import desc, select
-
-                from app.models.market_regime import MarketRegime
-                from app.services.regime_strategy_allocator import \
-                    sync_regime_runtime_state
-
-                latest_regime = (
-                    await db.execute(
-                        select(MarketRegime)
-                        .order_by(desc(MarketRegime.classification_date))
-                        .limit(1)
-                    )
-                ).scalar_one_or_none()
-                if latest_regime is not None:
-                    regime_at_decision = str(latest_regime.regime)
-                    regime_confidence = float(latest_regime.confidence or 0.0)
-                    await sync_regime_runtime_state(
-                        curr_regime=regime_at_decision,
-                        confidence=regime_confidence,
-                        var_multiplier=1.0,
-                    )
-                    logger.info(
-                        f"[AutonomousEngine] Regime context recovered from DB: {regime_at_decision} "
-                        f"(confidence={regime_confidence:.2%})"
-                    )
-            except Exception as _db_re:
-                logger.debug(
-                    f"[AutonomousEngine] Could not recover regime info from DB: {_db_re}"
-                )
+        regime_truth = await truth_source_service.get_regime_truth_snapshot(db)
+        regime_at_decision = regime_truth.get("regime")
+        regime_confidence = regime_truth.get("confidence")
+        logger.info(
+            "[AutonomousEngine] Regime truth source=%s regime=%s confidence=%.2f%%",
+            regime_truth.get("source"),
+            regime_at_decision,
+            float(regime_confidence or 0.0) * (100.0 if float(regime_confidence or 0.0) <= 1.0 else 1.0),
+        )
 
         """
         1. 拉取待处理信号
@@ -3068,6 +3030,7 @@ class AutonomousEngine:
             "realized_pnl": 0.0,
             "equity": 100000.0,
             "positions": {},
+            "positions_source": "UNKNOWN",
         }
 
         # ── 1. 审计日志：今日交易次数 ───────────────────────────────────────────
@@ -3122,12 +3085,16 @@ class AutonomousEngine:
                     f"[AutonomousEngine] equity snapshot fallback failed: {e2}"
                 )
 
-        # ── 3. 实时持仓快照 ────────────────────────────────────────────────────
+        # ── 3. 实时持仓快照（V10.5.4 truth source）────────────────────────────
         try:
-            from app.engine.position_monitor import PositionMonitor
-
-            monitor = PositionMonitor(db)
-            result["positions"] = await monitor.get_positions_snapshot(account_id)
+            positions_truth = await truth_source_service.get_positions_truth_snapshot(
+                db,
+                account_id,
+            )
+            result["positions"] = positions_truth.get("positions") or {}
+            result["positions_source"] = str(
+                positions_truth.get("source") or "UNKNOWN"
+            )
         except Exception as e:
             logger.debug(f"[AutonomousEngine] position snapshot failed: {e}")
 
