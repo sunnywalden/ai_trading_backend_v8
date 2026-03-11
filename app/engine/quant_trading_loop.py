@@ -14,6 +14,7 @@
 
 这是一个自我进化的量化交易系统
 """
+
 import asyncio
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
@@ -27,8 +28,7 @@ from app.engine.order_executor import OrderExecutor
 from app.engine.performance_analyzer import PerformanceAnalyzer
 from app.engine.signal_engine import SignalEngine
 from app.models.trading_signal import TradingSignal
-from app.services.strategy_auto_selection_service import \
-    StrategyAutoSelectionService
+from app.services.strategy_auto_selection_service import StrategyAutoSelectionService
 from app.services.strategy_service import StrategyRunService
 
 
@@ -89,9 +89,7 @@ class QuantTradingLoop:
             optimization_phase = await self._phase_5_adaptive_optimization(
                 account_id,
             )
-            cycle_results["phases"][
-                "adaptive_optimization"
-            ] = optimization_phase
+            cycle_results["phases"]["adaptive_optimization"] = optimization_phase
 
         print("✨ Full cycle completed!")
 
@@ -103,17 +101,17 @@ class QuantTradingLoop:
     ) -> Dict[str, Any]:
         """在每轮闭环开始前触发一次按时段自动市场池的策略扫描。"""
         try:
-            from app.jobs.strategy_jobs import (AUTO_UNIVERSE_KEY,
-                                                execute_strategy_run_job)
+            from app.jobs.strategy_jobs import (
+                AUTO_UNIVERSE_KEY,
+                execute_strategy_run_job,
+            )
 
             strategy_limit = StrategyAutoSelectionService.resolve_scan_limit(
                 settings.AUTO_STRATEGY_SCAN_BATCH_SIZE
             )
-            strategies = (
-                await StrategyAutoSelectionService.select_auto_scan_strategies(
-                    self.session,
-                    limit=strategy_limit,
-                )
+            strategies = await StrategyAutoSelectionService.select_auto_scan_strategies(
+                self.session,
+                limit=strategy_limit,
             )
             if not strategies:
                 return {
@@ -166,9 +164,7 @@ class QuantTradingLoop:
                 "selection_policy": "least_recently_run_first",
                 "requested_strategy_limit": strategy_limit,
                 "triggered_count": len(triggered_runs),
-                "selected_strategies": [
-                    strategy.name for strategy in strategies
-                ],
+                "selected_strategies": [strategy.name for strategy in strategies],
                 "runs": triggered_runs,
                 "failures": failures,
                 "target_universe": AUTO_UNIVERSE_KEY,
@@ -216,11 +212,9 @@ class QuantTradingLoop:
         # 从多个策略运行生成信号
         for run in recent_runs:
             # 从策略运行生成信号
-            signals = (
-                await self.signal_engine.generate_signals_from_strategy_run(
-                    strategy_run_id=run.id,
-                    max_signals=10,
-                )
+            signals = await self.signal_engine.generate_signals_from_strategy_run(
+                strategy_run_id=run.id,
+                max_signals=10,
             )
 
             strategy_name = run.strategy.name if run.strategy else "Unknown"
@@ -234,19 +228,17 @@ class QuantTradingLoop:
                     "strategy_version": run.strategy_version,
                     "target_universe": run.target_universe,
                     "finished_at": (
-                        run.finished_at.isoformat()
-                        if run.finished_at
-                        else None
+                        run.finished_at.isoformat() if run.finished_at else None
                     ),
                     "signals_generated": len(signals),
                 }
             )
-        
+
         # 多策略信号去重和聚合（保留每个symbol置信度最高的信号）
         deduplicated_signals = self._deduplicate_signals_by_symbol(all_signals)
-        
+
         total_signals = len(deduplicated_signals)
-        
+
         return {
             "status": "completed",
             "total_signals_generated": total_signals,
@@ -257,23 +249,22 @@ class QuantTradingLoop:
             "strategy_runs_used": strategy_runs_used,
             "runtime_scan": runtime_scan,
         }
-    
+
     def _deduplicate_signals_by_symbol(
-        self,
-        signals: List[TradingSignal]
+        self, signals: List[TradingSignal]
     ) -> List[TradingSignal]:
         """
         跨策略信号去重：每个symbol只保留置信度最高的信号
-        
+
         Args:
             signals: 信号列表
-            
+
         Returns:
             去重后的信号列表
         """
         if not signals:
             return []
-        
+
         # 按symbol分组
         by_symbol = {}
         for signal in signals:
@@ -281,52 +272,48 @@ class QuantTradingLoop:
             if symbol not in by_symbol:
                 by_symbol[symbol] = []
             by_symbol[symbol].append(signal)
-        
+
         # 每个symbol保留置信度最高的
         deduplicated = []
         for symbol, symbol_signals in by_symbol.items():
-            best_signal = max(symbol_signals, key=lambda s: s.confidence * s.signal_strength)
+            best_signal = max(
+                symbol_signals, key=lambda s: s.confidence * s.signal_strength
+            )
             deduplicated.append(best_signal)
-        
+
         return deduplicated
-    
-    async def _phase_2_signal_validation(
-        self,
-        account_id: str
-    ) -> Dict[str, Any]:
+
+    async def _phase_2_signal_validation(self, account_id: str) -> Dict[str, Any]:
         """阶段2: 验证生成的信号"""
-        
+
         from app.models.trading_signal import SignalStatus
 
         # 获取待验证的信号
         pending_signals = await self.signal_engine.get_pending_signals(
-            account_id=account_id,
-            status=SignalStatus.GENERATED,
-            limit=50
+            account_id=account_id, status=SignalStatus.GENERATED, limit=50
         )
-        
+
         validated_count = 0
         rejected_count = 0
-        
+
         for signal in pending_signals:
             is_valid = await self.signal_engine.validate_signal(signal.signal_id)
             if is_valid:
                 validated_count += 1
             else:
                 rejected_count += 1
-        
+
         return {
             "status": "completed",
             "total_signals_checked": len(pending_signals),
             "validated_signals": validated_count,
             "rejected_signals": rejected_count,
-            "validation_rate": validated_count / len(pending_signals) if pending_signals else 0
+            "validation_rate": (
+                validated_count / len(pending_signals) if pending_signals else 0
+            ),
         }
-    
-    async def _phase_3_trade_execution(
-        self,
-        account_id: str
-    ) -> Dict[str, Any]:
+
+    async def _phase_3_trade_execution(self, account_id: str) -> Dict[str, Any]:
         """
         阶段3: 执行已验证的交易信号。
 
@@ -338,13 +325,12 @@ class QuantTradingLoop:
         from app.services.autonomous_engine import autonomous_engine
 
         results = await autonomous_engine.run_decision_cycle(
-            account_id=account_id,
-            db=self.session
+            account_id=account_id, db=self.session
         )
 
         executed = sum(1 for r in results if r.get("order_id"))
-        blocked  = sum(1 for r in results if not r.get("gate_passed"))
-        cb       = any(r.get("circuit_breaker") for r in results)
+        blocked = sum(1 for r in results if not r.get("gate_passed"))
+        cb = any(r.get("circuit_breaker") for r in results)
 
         return {
             "status": "completed",
@@ -354,52 +340,45 @@ class QuantTradingLoop:
             "circuit_breaker": cb,
             "execution_details": results,
         }
-    
-    async def _phase_4_performance_evaluation(
-        self,
-        account_id: str
-    ) -> Dict[str, Any]:
+
+    async def _phase_4_performance_evaluation(self, account_id: str) -> Dict[str, Any]:
         """阶段4: 评估交易表现"""
-        
+
         # 每日性能评估
         daily_performance = await self.performance_analyzer.evaluate_daily_performance(
             account_id=account_id
         )
-        
+
         # 识别改进机会
-        opportunities = await self.performance_analyzer.identify_improvement_opportunities(
-            account_id=account_id,
-            days=30
+        opportunities = (
+            await self.performance_analyzer.identify_improvement_opportunities(
+                account_id=account_id, days=30
+            )
         )
-        
+
         return {
             "status": "completed",
             "daily_metrics": daily_performance,
             "improvement_opportunities": opportunities.get("recommendations", []),
-            "poor_performers_count": opportunities.get("total_poor_performers", 0)
+            "poor_performers_count": opportunities.get("total_poor_performers", 0),
         }
-    
-    async def _phase_5_adaptive_optimization(
-        self,
-        account_id: str
-    ) -> Dict[str, Any]:
+
+    async def _phase_5_adaptive_optimization(self, account_id: str) -> Dict[str, Any]:
         """阶段5: 自适应优化"""
-        
+
         # 运行每日优化
         optimization_results = await self.optimizer.run_daily_optimization(
             account_id=account_id
         )
-        
+
         return {
             "status": "completed",
             "optimizations_count": len(optimization_results.get("optimizations", [])),
-            "optimization_details": optimization_results.get("optimizations", [])
+            "optimization_details": optimization_results.get("optimizations", []),
         }
-    
+
     async def run_strategy_research_cycle(
-        self,
-        account_id: str,
-        strategy_id: str
+        self, account_id: str, strategy_id: str
     ) -> Dict[str, Any]:
         """
         运行单个策略的研究→交易周期
@@ -407,32 +386,33 @@ class QuantTradingLoop:
         """
         # 1. 运行策略
         from app.services.strategy_service import StrategyService
+
         strategy_svc = StrategyService(self.session)
-        
+
         strategy = await strategy_svc.get_strategy(strategy_id)
         if not strategy:
             return {"error": "Strategy not found"}
-        
+
         # 创建策略运行(这里简化,实际需要完整的策略执行逻辑)
         run = await self.strategy_run_svc.create_run(
             strategy=strategy,
             user_id=settings.TIGER_ACCOUNT,
             account_id=account_id,
             direction="LONG",
-            max_results=10
+            max_results=10,
         )
-        
+
         # 2. 生成信号
         signals = await self.signal_engine.generate_signals_from_strategy_run(
             strategy_run_id=run.id
         )
-        
+
         # 3. 验证信号
         validated_signals = []
         for signal in signals:
             if await self.signal_engine.validate_signal(signal.signal_id):
                 validated_signals.append(signal)
-        
+
         return {
             "strategy_id": strategy_id,
             "strategy_name": strategy.name,
@@ -444,40 +424,43 @@ class QuantTradingLoop:
                     "symbol": s.symbol,
                     "signal_strength": s.signal_strength,
                     "confidence": s.confidence,
-                    "expected_return": s.expected_return
+                    "expected_return": s.expected_return,
                 }
-                for s in sorted(validated_signals, key=lambda x: x.signal_strength, reverse=True)[:3]
-            ]
+                for s in sorted(
+                    validated_signals, key=lambda x: x.signal_strength, reverse=True
+                )[:3]
+            ],
         }
-    
-    async def get_loop_status(
-        self,
-        account_id: str
-    ) -> Dict[str, Any]:
+
+    async def get_loop_status(self, account_id: str) -> Dict[str, Any]:
         """获取闭环系统状态"""
-        
+
         # 🛡️ 移除同步阻塞的订单同步 logic，避免 API 超时
         # 实际同步由后台 Job 或用户显式触发执行
-            
+
         from sqlalchemy import and_, func, select
 
         from app.models.trading_signal import SignalStatus, TradingSignal
-        
+
         status_counts = {}
         for status in SignalStatus:
-            stmt = select(func.count()).select_from(TradingSignal).where(
-                and_(
-                    TradingSignal.account_id == account_id,
-                    TradingSignal.status == status
+            stmt = (
+                select(func.count())
+                .select_from(TradingSignal)
+                .where(
+                    and_(
+                        TradingSignal.account_id == account_id,
+                        TradingSignal.status == status,
+                    )
                 )
             )
             result = await self.session.execute(stmt)
             status_counts[status.value] = result.scalar()
-        
+
         return {
             "account_id": account_id,
             "system_status": "ACTIVE",
             "signal_pipeline": status_counts,
             "last_cycle": datetime.utcnow().isoformat(),
-            "next_cycle": (datetime.utcnow() + timedelta(hours=24)).isoformat()
+            "next_cycle": (datetime.utcnow() + timedelta(hours=24)).isoformat(),
         }
