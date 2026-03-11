@@ -24,6 +24,7 @@ from app.models.strategy import Strategy, StrategyRun, HistoricalStrategyRun
 from app.services.autonomous_engine import autonomous_engine
 from app.services.portfolio_cache_service import invalidate_portfolio_view_caches
 from app.services.signal_quality_funnel import signal_quality_funnel, SignalQualityTier
+from app.services.truth_source_service import truth_source_service
 
 router = APIRouter(prefix="/autonomy", tags=["V10-Autonomy"])
 
@@ -333,6 +334,12 @@ async def get_autonomy_status(
     )
     failed_today = fail_result.scalar() or 0
 
+    positions_truth = await truth_source_service.get_positions_truth_snapshot(
+        session,
+        account_id,
+    )
+    regime_truth = await truth_source_service.get_regime_truth_snapshot(session)
+
     # 活跃冷却标的：查询过去 cooldown_min 分钟内由 AI_AUTONOMOUS 成交的计划
     cooldown_min = int(getattr(settings, "AUTONOMOUS_ORDER_COOLDOWN_MINUTES", 120) or 120)
     cooldown_cutoff = datetime.now(timezone.utc) - timedelta(minutes=cooldown_min)
@@ -385,6 +392,13 @@ async def get_autonomy_status(
         "revoke_window_minutes": settings.REVOKE_WINDOW_MINUTES,
         "signal_pipeline": pipeline,
         "failed_trades_today": failed_today,
+        "positions_source": positions_truth.get("source"),
+        "positions_count_truth": int(positions_truth.get("positions_count") or 0),
+        "regime_truth": {
+            "regime": regime_truth.get("regime"),
+            "confidence": regime_truth.get("confidence"),
+            "source": regime_truth.get("source"),
+        },
         "cooldown_symbols": cooldown_symbols,
         "cooldown_minutes": cooldown_min,
         "closing_flow": {
