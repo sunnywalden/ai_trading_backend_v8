@@ -490,3 +490,124 @@ async def test_get_policy_detail_exposes_persistent_profile():
     assert detail["persistent_profile"]["feedback_bias"] == "DEFENSIVE"
     assert detail["feedback_profile"]["source"] == "persistent_profile"
     assert detail["feedback_profile"]["recommended_algo"] == "LIMIT"
+
+
+@pytest.mark.asyncio
+async def test_get_policy_detail_uses_latest_execution_quality_log_when_duplicates_exist():
+    service = ExecutionPolicyService()
+    db = _FakeSession(
+        [
+            [
+                SimpleNamespace(
+                    id=12,
+                    intent_id="intent-012",
+                    idempotency_key="idem-012",
+                    symbol="AAPL",
+                    action="BUY",
+                    status="SUCCESS",
+                    qty=220,
+                    order_id="broker-012",
+                    reason="duplicate log regression",
+                    created_at=datetime(2026, 3, 10, 12, 0, 0),
+                    updated_at=datetime(2026, 3, 10, 12, 10, 0),
+                )
+            ],
+            [
+                SimpleNamespace(
+                    id=201,
+                    intent_id=12,
+                    algo_type="VWAP",
+                    grade="C",
+                    quality_score=61.0,
+                    total_is_bps=19.0,
+                    fill_rate=0.73,
+                    time_to_fill_ms=12000,
+                    arrival_price=100.0,
+                    fill_price=100.4,
+                    mid_price_at_order=100.2,
+                    vwap_reference=100.3,
+                    created_at=datetime(2026, 3, 10, 12, 1, 0),
+                ),
+                SimpleNamespace(
+                    id=202,
+                    intent_id=12,
+                    algo_type="LIMIT",
+                    grade="A",
+                    quality_score=92.0,
+                    total_is_bps=7.5,
+                    fill_rate=0.98,
+                    time_to_fill_ms=4000,
+                    arrival_price=100.0,
+                    fill_price=100.1,
+                    mid_price_at_order=100.0,
+                    vwap_reference=100.05,
+                    created_at=datetime(2026, 3, 10, 12, 2, 0),
+                ),
+            ],
+            [],
+        ]
+    )
+
+    detail = await service.get_policy_detail(
+        cast(Any, db),
+        "acc-1",
+        12,
+    )
+
+    assert detail is not None
+    assert detail["policy"]["algo_type"] == "LIMIT"
+    assert detail["execution_result"]["grade"] == "A"
+    assert detail["execution_result"]["total_is_bps"] == pytest.approx(7.5)
+    assert detail["execution_result"]["time_to_fill_ms"] == 4000
+
+
+@pytest.mark.asyncio
+async def test_get_policy_overview_prefers_latest_log_per_intent():
+    service = ExecutionPolicyService()
+    db = _FakeSession(
+        [
+            [
+                SimpleNamespace(
+                    id=13,
+                    intent_id="intent-013",
+                    order_id="broker-013",
+                    symbol="AAPL",
+                    action="BUY",
+                    status="SUCCESS",
+                    qty=120,
+                    reason=None,
+                    created_at=datetime(2026, 3, 10, 12, 0, 0),
+                )
+            ],
+            [
+                SimpleNamespace(
+                    id=301,
+                    intent_id=13,
+                    algo_type="VWAP",
+                    total_is_bps=15.0,
+                    fill_rate=0.75,
+                    quality_score=66.0,
+                    created_at=datetime(2026, 3, 10, 12, 1, 0),
+                ),
+                SimpleNamespace(
+                    id=302,
+                    intent_id=13,
+                    algo_type="LIMIT",
+                    total_is_bps=6.0,
+                    fill_rate=0.99,
+                    quality_score=93.0,
+                    created_at=datetime(2026, 3, 10, 12, 3, 0),
+                ),
+            ],
+            [],
+        ]
+    )
+
+    overview = await service.get_policy_overview(
+        cast(Any, db),
+        "acc-1",
+        limit=5,
+    )
+
+    assert overview["policies"][0]["policy"]["algo_type"] == "LIMIT"
+    assert overview["summary"]["avg_realized_is_bps"] == pytest.approx(6.0)
