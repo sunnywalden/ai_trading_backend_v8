@@ -1,21 +1,21 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, Iterable, List, Optional
 from uuid import uuid4
 
-from sqlalchemy import select, desc, and_
-from sqlalchemy.orm import selectinload
+from sqlalchemy import and_, desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.strategy import (
-    Strategy,
-    StrategyRun,
     HistoricalStrategyRun,
+    Strategy,
+    StrategyNotification,
+    StrategyRun,
     StrategyRunAsset,
     StrategyRunLog,
-    StrategyNotification,
 )
 
 
@@ -54,24 +54,44 @@ class StrategyService:
         await self.session.refresh(strategy)
         return strategy
 
-    async def update_strategy_params(self, strategy_id: str, params: Dict[str, Any]) -> Optional[Strategy]:
+    async def update_strategy_params(
+        self, strategy_id: str, params: Dict[str, Any]
+    ) -> Optional[Strategy]:
         strategy = await self.get_strategy(strategy_id)
         if not strategy:
             return None
         strategy.default_params = params
         strategy.version = (strategy.version or 1) + 1
-        strategy.updated_at = datetime.utcnow()
+        strategy.updated_at = datetime.now(timezone.utc)
         await self.session.commit()
         await self.session.refresh(strategy)
         return strategy
-    
-    async def toggle_strategy(self, strategy_id: str, is_active: bool) -> Optional[Strategy]:
+
+    async def update_auto_scan_config(
+        self,
+        strategy_id: str,
+        auto_scan_enabled: bool,
+        auto_scan_priority: int,
+    ) -> Optional[Strategy]:
+        strategy = await self.get_strategy(strategy_id)
+        if not strategy:
+            return None
+        strategy.auto_scan_enabled = auto_scan_enabled
+        strategy.auto_scan_priority = auto_scan_priority
+        strategy.updated_at = datetime.now(timezone.utc)
+        await self.session.commit()
+        await self.session.refresh(strategy)
+        return strategy
+
+    async def toggle_strategy(
+        self, strategy_id: str, is_active: bool
+    ) -> Optional[Strategy]:
         """启用/禁用策略"""
         strategy = await self.get_strategy(strategy_id)
         if not strategy:
             return None
         strategy.is_active = is_active
-        strategy.updated_at = datetime.utcnow()
+        strategy.updated_at = datetime.now(timezone.utc)
         await self.session.commit()
         await self.session.refresh(strategy)
         return strategy
@@ -111,15 +131,18 @@ class StrategyRunService:
         self.session.add(run)
         if strategy:
             strategy.last_run_status = run.status
-            strategy.last_run_at = datetime.utcnow()
+            strategy.last_run_at = datetime.now(timezone.utc)
         await self.session.commit()
         await self.session.refresh(run)
         return run
 
     async def get_run_by_id(self, run_id: str) -> Optional[StrategyRun]:
-        stmt = select(StrategyRun).where(StrategyRun.id == run_id).options(
-            selectinload(StrategyRun.strategy),
-            selectinload(StrategyRun.history)
+        stmt = (
+            select(StrategyRun)
+            .where(StrategyRun.id == run_id)
+            .options(
+                selectinload(StrategyRun.strategy), selectinload(StrategyRun.history)
+            )
         )
         res = await self.session.execute(stmt)
         return res.scalars().first()
@@ -154,7 +177,9 @@ class StrategyRunService:
         res = await self.session.execute(stmt)
         return list(res.scalars().all())
 
-    async def get_latest_run(self, account_id: Optional[str] = None, strategy_id: Optional[str] = None) -> Optional[StrategyRun]:
+    async def get_latest_run(
+        self, account_id: Optional[str] = None, strategy_id: Optional[str] = None
+    ) -> Optional[StrategyRun]:
         stmt = select(StrategyRun).options(selectinload(StrategyRun.history))
         if account_id:
             stmt = stmt.where(StrategyRun.account_id == account_id)
@@ -164,7 +189,11 @@ class StrategyRunService:
         res = await self.session.execute(stmt)
         return res.scalars().first()
 
-    async def get_historical_result(self, run_id: str) -> Optional[HistoricalStrategyRun]:
-        stmt = select(HistoricalStrategyRun).where(HistoricalStrategyRun.strategy_run_id == run_id)
+    async def get_historical_result(
+        self, run_id: str
+    ) -> Optional[HistoricalStrategyRun]:
+        stmt = select(HistoricalStrategyRun).where(
+            HistoricalStrategyRun.strategy_run_id == run_id
+        )
         res = await self.session.execute(stmt)
         return res.scalars().first()

@@ -18,7 +18,8 @@ class StrategyAutoSelectionService:
     1. 避免自动任务永远只命中同一个策略；
     2. 优先补齐从未运行过的 active 策略；
     3. 对已经运行过的策略按 last_run_at 最久优先轮转；
-    4. builtin 仅作为同优先级下的加权偏好，而不是绝对垄断条件。
+    4. auto_scan_priority 用于显式调度分层；默认同权时保持公平轮转；
+    5. builtin 仅作为同优先级下的加权偏好，而不是绝对垄断条件。
     """
 
     @staticmethod
@@ -44,8 +45,12 @@ class StrategyAutoSelectionService:
         strategy_limit = cls.resolve_scan_limit(limit)
         stmt = (
             select(Strategy)
-            .where(Strategy.is_active.is_(True))
+            .where(
+                Strategy.is_active.is_(True),
+                Strategy.auto_scan_enabled.is_(True),
+            )
             .order_by(
+                desc(Strategy.auto_scan_priority),
                 case((Strategy.last_run_at.is_(None), 0), else_=1),
                 Strategy.last_run_at.asc(),
                 desc(Strategy.is_builtin),

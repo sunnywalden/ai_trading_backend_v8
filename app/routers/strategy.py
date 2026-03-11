@@ -1,46 +1,47 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
-import asyncio
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
 from app.core.auth import get_current_user
-from app.models.db import get_session
+from app.core.config import settings
 from app.jobs.scheduler import add_job
 from app.jobs.strategy_jobs import execute_strategy_run_job
-from app.services.strategy_export_service import StrategyExportService
-from app.services.strategy_service import StrategyService, StrategyRunService
-from app.schemas.strategy import (
-    StrategyListResponse,
-    StrategyDetailResponse,
-    StrategySummaryView,
-    StrategyDetailView,
-    StrategyCreateRequest,
-    StrategyUpdateParamsRequest,
-    StrategyRunRequest,
-    StrategyRunResponse,
-    StrategyRunStatusView,
-    StrategyRunLatestResponse,
-    StrategyRunHistoryResponse,
-    StrategyRunHistoryView,
-    StrategyRunResultsResponse,
-    StrategyExportResponse,
-    StrategyRunAssetView,
-)
+from app.models.db import get_session
 from app.schemas.quick_trade import (
-    QuickTradeRequest,
-    QuickTradeResponse,
-    QuickTradePreview,
     BatchQuickTradeRequest,
     BatchQuickTradeResponse,
+    QuickTradePreview,
+    QuickTradeRequest,
+    QuickTradeResponse,
+)
+from app.schemas.strategy import (
+    StrategyAutoScanConfigRequest,
+    StrategyCreateRequest,
+    StrategyDetailResponse,
+    StrategyDetailView,
+    StrategyExportResponse,
+    StrategyListResponse,
+    StrategyRunAssetView,
+    StrategyRunHistoryResponse,
+    StrategyRunHistoryView,
+    StrategyRunLatestResponse,
+    StrategyRunRequest,
+    StrategyRunResponse,
+    StrategyRunResultsResponse,
+    StrategyRunStatusView,
+    StrategySummaryView,
+    StrategyUpdateParamsRequest,
 )
 from app.services.quick_trade_service import QuickTradeService
+from app.services.strategy_export_service import StrategyExportService
+from app.services.strategy_service import StrategyRunService, StrategyService
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -49,9 +50,15 @@ logger = logging.getLogger(__name__)
 def _ensure_permission(current_user: str, action: str) -> None:
     if not settings.AUTH_ENABLED:
         return
-    allowed = settings.STRATEGY_EXECUTE_USERS if action == "execute" else settings.STRATEGY_MANAGE_USERS
+    allowed = (
+        settings.STRATEGY_EXECUTE_USERS
+        if action == "execute"
+        else settings.STRATEGY_MANAGE_USERS
+    )
     if current_user not in allowed:
-        raise HTTPException(status_code=403, detail="Permission denied for strategy operation")
+        raise HTTPException(
+            status_code=403, detail="Permission denied for strategy operation"
+        )
 
 
 def _to_summary(strategy) -> StrategySummaryView:
@@ -62,6 +69,8 @@ def _to_summary(strategy) -> StrategySummaryView:
         description=strategy.description,
         is_builtin=strategy.is_builtin,
         is_active=strategy.is_active,
+        auto_scan_enabled=strategy.auto_scan_enabled,
+        auto_scan_priority=strategy.auto_scan_priority,
         tags=strategy.tags or [],
         last_run_status=strategy.last_run_status,
         last_run_at=strategy.last_run_at,
@@ -70,13 +79,13 @@ def _to_summary(strategy) -> StrategySummaryView:
 
 def _to_detail(strategy) -> StrategyDetailView:
     base = _to_summary(strategy).dict()
-    
+
     # Handle signal_sources: convert list to dict if needed
     signal_sources = strategy.signal_sources or {}
     if isinstance(signal_sources, list):
         # Convert list of sources to dict format {"sources": [...]}
         signal_sources = {"sources": signal_sources}
-    
+
     return StrategyDetailView(
         **base,
         version=strategy.version,
@@ -166,7 +175,9 @@ async def list_strategies(
     current_user: str = Depends(get_current_user),
 ):
     svc = StrategyService(session)
-    strategies = await svc.list_strategies(style=style, is_builtin=is_builtin, limit=limit, offset=offset, search=search)
+    strategies = await svc.list_strategies(
+        style=style, is_builtin=is_builtin, limit=limit, offset=offset, search=search
+    )
     return StrategyListResponse(strategies=[_to_summary(s) for s in strategies])
 
 
@@ -205,6 +216,28 @@ async def update_strategy_params(
     _ensure_permission(current_user, "manage")
     svc = StrategyService(session)
     strategy = await svc.update_strategy_params(strategy_id, payload.default_params)
+    if not strategy:
+        raise HTTPException(status_code=404, detail="Strategy not found")
+    return StrategyDetailResponse(strategy=_to_detail(strategy))
+
+
+@router.patch(
+    "/strategies/{strategy_id}/auto-scan",
+    response_model=StrategyDetailResponse,
+)
+async def update_strategy_auto_scan_config(
+    strategy_id: str,
+    payload: StrategyAutoScanConfigRequest,
+    session: AsyncSession = Depends(get_session),
+    current_user: str = Depends(get_current_user),
+):
+    _ensure_permission(current_user, "manage")
+    svc = StrategyService(session)
+    strategy = await svc.update_auto_scan_config(
+        strategy_id,
+        payload.auto_scan_enabled,
+        payload.auto_scan_priority,
+    )
     if not strategy:
         raise HTTPException(status_code=404, detail="Strategy not found")
     return StrategyDetailResponse(strategy=_to_detail(strategy))
@@ -252,7 +285,9 @@ async def run_strategy(
         else:
             asyncio.create_task(execute_strategy_run_job(run.id, task_id))
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to schedule strategy run: {exc}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to schedule strategy run: {exc}"
+        )
 
     return StrategyRunResponse(run_id=run.id, celery_task_id=task_id)
 
@@ -295,11 +330,19 @@ async def list_strategy_runs(
     current_user: str = Depends(get_current_user),
 ):
     svc = StrategyRunService(session)
-    runs = await svc.list_runs(limit=limit, offset=offset, strategy_id=strategy_id, account_id=account_id, status=status)
+    runs = await svc.list_runs(
+        limit=limit,
+        offset=offset,
+        strategy_id=strategy_id,
+        account_id=account_id,
+        status=status,
+    )
     return StrategyRunHistoryResponse(runs=[_to_history_item(r) for r in runs])
 
 
-@router.get("/strategy-runs/{run_id}/results", response_model=StrategyRunResultsResponse)
+@router.get(
+    "/strategy-runs/{run_id}/results", response_model=StrategyRunResultsResponse
+)
 async def get_strategy_run_results(
     run_id: str,
     session: AsyncSession = Depends(get_session),
@@ -330,7 +373,9 @@ async def export_strategy_run(
     return StrategyExportResponse(run_id=run.id, **result)
 
 
-@router.get("/strategy-runs/{run_id}/assets/{symbol}/preview", response_model=QuickTradeResponse)
+@router.get(
+    "/strategy-runs/{run_id}/assets/{symbol}/preview", response_model=QuickTradeResponse
+)
 async def preview_quick_trade(
     run_id: str,
     symbol: str,
@@ -343,9 +388,7 @@ async def preview_quick_trade(
     try:
         preview_data = await svc.preview_quick_trade(run_id, symbol, risk_budget)
         return QuickTradeResponse(
-            status="ok",
-            message="预览成功",
-            preview=QuickTradePreview(**preview_data)
+            status="ok", message="预览成功", preview=QuickTradePreview(**preview_data)
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -353,7 +396,10 @@ async def preview_quick_trade(
         raise HTTPException(status_code=500, detail=f"预览失败: {str(e)}")
 
 
-@router.post("/strategy-runs/{run_id}/assets/{symbol}/quick-trade", response_model=QuickTradeResponse)
+@router.post(
+    "/strategy-runs/{run_id}/assets/{symbol}/quick-trade",
+    response_model=QuickTradeResponse,
+)
 async def execute_quick_trade(
     run_id: str,
     symbol: str,
@@ -364,7 +410,7 @@ async def execute_quick_trade(
     """从策略结果快速创建并执行交易"""
     _ensure_permission(current_user, "execute")
     svc = QuickTradeService(session)
-    
+
     try:
         override_params = {
             "override_direction": payload.override_direction,
@@ -374,21 +420,23 @@ async def execute_quick_trade(
             "override_take_profit": payload.override_take_profit,
             "risk_budget": payload.risk_budget,
         }
-        
+
         result = await svc.execute_quick_trade(
             run_id=run_id,
             symbol=symbol,
             execution_mode=payload.execution_mode.value,
             override_params=override_params,
-            notes=payload.notes
+            notes=payload.notes,
         )
-        
+
         return QuickTradeResponse(
             status=result["status"],
             signal_id=result.get("signal_id"),
             order_id=result.get("order_id"),
             message=result["message"],
-            preview=QuickTradePreview(**result["preview"]) if "preview" in result else None
+            preview=(
+                QuickTradePreview(**result["preview"]) if "preview" in result else None
+            ),
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -397,7 +445,9 @@ async def execute_quick_trade(
         raise HTTPException(status_code=500, detail=f"执行失败: {str(e)}")
 
 
-@router.post("/strategy-runs/{run_id}/batch-quick-trade", response_model=BatchQuickTradeResponse)
+@router.post(
+    "/strategy-runs/{run_id}/batch-quick-trade", response_model=BatchQuickTradeResponse
+)
 async def batch_quick_trade(
     run_id: str,
     payload: BatchQuickTradeRequest,
@@ -407,7 +457,7 @@ async def batch_quick_trade(
     """批量快捷交易"""
     _ensure_permission(current_user, "execute")
     svc = QuickTradeService(session)
-    
+
     try:
         result = await svc.batch_quick_trade(
             run_id=run_id,
@@ -416,9 +466,9 @@ async def batch_quick_trade(
             position_sizing_method=payload.position_sizing_method.value,
             custom_weights=payload.custom_weights,
             total_risk_budget=payload.total_risk_budget,
-            notes=payload.notes
+            notes=payload.notes,
         )
-        
+
         return BatchQuickTradeResponse(
             status="ok",
             total_signals=result["total_signals"],
@@ -426,7 +476,7 @@ async def batch_quick_trade(
             failed_count=result["failed_count"],
             signal_ids=result["signal_ids"],
             failures=result["failures"],
-            message=f"批量交易完成: {result['success_count']} 成功, {result['failed_count']} 失败"
+            message=f"批量交易完成: {result['success_count']} 成功, {result['failed_count']} 失败",
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -457,8 +507,8 @@ async def get_strategies_performance_batch(
     current_user: str = Depends(get_current_user),
 ):
     """批量获取多个策略的表现统计（单次请求替代 N 次）"""
-    from app.engine.strategy_engine import StrategyEngine
     from app.core.cache import cache
+    from app.engine.strategy_engine import StrategyEngine
 
     id_list = [sid.strip() for sid in ids.split(",") if sid.strip()]
     if not id_list:
@@ -480,14 +530,12 @@ async def get_strategies_performance_batch(
         except Exception:
             return strategy_id, None
 
-    results = await asyncio.gather(*[_get_one(sid) for sid in id_list], return_exceptions=False)
+    results = await asyncio.gather(
+        *[_get_one(sid) for sid in id_list], return_exceptions=False
+    )
     performances = {sid: perf for sid, perf in results if perf is not None}
 
-    return {
-        "status": "ok",
-        "count": len(performances),
-        "performances": performances
-    }
+    return {"status": "ok", "count": len(performances), "performances": performances}
 
 
 @router.get("/strategies/{strategy_id}/performance")
@@ -498,20 +546,16 @@ async def get_strategy_performance(
 ):
     """获取策略表现统计"""
     from app.engine.strategy_engine import StrategyEngine
-    
+
     strategy_svc = StrategyService(session)
     strategy = await strategy_svc.get_strategy(strategy_id)
     if not strategy:
         raise HTTPException(status_code=404, detail="Strategy not found")
-    
+
     engine = StrategyEngine(session)
     performance = await engine.get_strategy_performance(strategy_id)
-    
-    return {
-        "status": "ok",
-        "strategy_id": strategy_id,
-        "performance": performance
-    }
+
+    return {"status": "ok", "strategy_id": strategy_id, "performance": performance}
 
 
 @router.get("/strategies/{strategy_id}/signals")
@@ -523,15 +567,15 @@ async def get_strategy_signals(
 ):
     """获取策略最近生成的信号"""
     from app.engine.strategy_engine import StrategyEngine
-    
+
     strategy_svc = StrategyService(session)
     strategy = await strategy_svc.get_strategy(strategy_id)
     if not strategy:
         raise HTTPException(status_code=404, detail="Strategy not found")
-    
+
     engine = StrategyEngine(session)
     signals = await engine.get_strategy_signals(strategy_id, limit=limit)
-    
+
     return {
         "status": "ok",
         "strategy_id": strategy_id,
@@ -543,8 +587,12 @@ async def get_strategy_signals(
                 "strength": signal.signal_strength,
                 "confidence": signal.confidence,
                 "risk_score": signal.risk_score,
-                "created_at": signal.created_at.isoformat() if signal.created_at is not None else None,
+                "created_at": (
+                    signal.created_at.isoformat()
+                    if signal.created_at is not None
+                    else None
+                ),
             }
             for signal in signals
-        ]
+        ],
     }
