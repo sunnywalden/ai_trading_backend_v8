@@ -1,9 +1,9 @@
 # 后端架构设计文档
 
 > **AI量化交易闭环系统** - Backend Design  
-> 版本：V10.5.3（实施中） | 更新日期：2026-03-10
+> 版本：V10.5.4（规划中） | 更新日期：2026-03-11
 >
-> **V10.5.3 变更摘要（Profit Engine Upgrade）**：本版本从“观测面升级”进入“收益控制闭环升级”。后端围绕四条主线推进：**Alpha Truth Engine 2.0**（四层收益口径 + data quality + regime/capacity bucket + shadow false-reject）、**Portfolio Construction 2.1**（Seat Value + Risk Budget Tree + Marginal Alpha/Risk/Turnover/Liquidity）、**Execution Policy Closed Loop**（Pre-Trade Cost + Policy Snapshot + Feedback Buckets + Hard Control）、**Research-to-Live Governance Hard Gate**（Discovery / Paper / Shadow Live / Challenger / Production 五阶段证据链、promotion blockers、rollback reasons）。所有新能力必须支持 feature flags 分阶段 rollout：`Observe → Shadow Control → Semi → Full`。
+> **V10.5.4 变更摘要（Signal Pipeline Integrity & Control-Plane Hardening）**：本版本先收敛信号控制平面，再继续推进 Profit Engine。后端围绕四条主线推进：**Signal Discovery Integrity**（`signal_origin_mode=REAL/SYNTHETIC/BACKFILL` 真源区分）、**Canonical Signal Payload & State Machine**（统一 payload、原生状态迁移、恢复语义）、**Autonomous Control Plane Hardening**（明确 `AutonomousEngine.run_decision_cycle()` 为唯一自动执行主链，统一 positions / regime / audit 真源，补齐 displacement pending 闭环）、**Native Audit & Governance Discipline**（Watchtower 原生审计优先、完整开发流程、`Observe → Shadow → Semi → Full` 分阶段 rollout）。
 >
 > **V10.5.2 变更摘要（组合席位竞争引擎）**：**Capacity-Aware Admission & Replacement Engine**——SignalQualityFunnel Layer 2 从满仓即拒绝升级为统一席位竞争：新增 CapacityArbiterService（统一候选池 + admission_score 排序 + overflow 淘汰算法）；AutonomousEngine 在 RiskGate 前引入 unified capacity decision；PositionRebalanceMonitor 升级为席位竞争数据供应方与兜底守卫；PositionScoringService 补齐统一准入评分接口；新增 capacity_decision_audit_log 数据表，记录候选评分、淘汰原因、保护带结果；支持治理开关 CAPACITY_REPLACEMENT_ENABLED / DRY_RUN / MAX_PER_CYCLE / MIN_EDGE；新增 /api/v1/capacity-arbiter/ 路由组（preview、audit-log、config）；V10.5.1 补丁随本版合并发布：post_mortem_jobs.py EventBus + Cron 自动化 + 事件日历 freshness 修复 + confirmed=False 体制修复。
 >

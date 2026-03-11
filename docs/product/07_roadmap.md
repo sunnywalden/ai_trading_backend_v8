@@ -91,15 +91,15 @@
 - **M5 Observability & Governance**：\capacity_decision_audit_log\ 全量审计 + \CAPACITY_REPLACEMENT_DRY_RUN\ 治理开关
 - **前端重点**：\/portfolio\、\/autonomy\、\/order-book\ 增加席位竞争结果、保护带说明与替换归因可视化
 
-### Phase 15: Profit Engine Upgrade 🚀 V10.5.3 当前规划
-> 详细规划见：[docs/archived/v10/v10.5/RELEASE_PLAN_V10.5.3.md](../archived/v10/v10.5/RELEASE_PLAN_V10.5.3.md)
+### Phase 15: Signal Pipeline Integrity & Control-Plane Hardening 🚀 V10.5.4 当前规划
+> 详细规划见：[docs/archived/v10/v10.5/RELEASE_PLAN_V10.5.4.md](../archived/v10/v10.5/RELEASE_PLAN_V10.5.4.md)
 
-- **M1 Alpha Truth Engine 2.0**：建立 `gross / net / after cost / after turnover` 四层 alpha 真相口径，补齐 regime / capacity / decay / shadow false-reject 视图，解决“看起来赚钱”和“净成本后赚钱”之间的偏差
-- **M2 Portfolio Construction 2.1**：以 `Seat Value` 为核心升级 `CapacityArbiter`，加入 Risk Budget Tree、Marginal Alpha/Risk/Turnover/Liquidity 贡献，让资本按边际净收益分配
-- **M3 Execution Policy Closed Loop**：把 Pre-Trade Cost、slippage budget、urgency、participation rate 接入执行前决策，并让执行反馈回写 execution policy profile
-- **M4 Research-to-Live Governance Hard Gate**：统一 `Discovery / Paper / Shadow Live / Challenger / Production` 五阶段晋级管线，以 evidence chain 驱动 promotion / rollback，而不是只看 paper 胜率
-- **前端重点**：强化 `/alpha-lab`、`/portfolio`、`/execution-policy`、`/governance/pipeline` 四个决策工作台，继续坚持“决策级可视化而非页面膨胀”
-- **与 V10.5.2 的关系**：V10.5.2 已作为独立版本正式发布，其席位竞争引擎（`CapacityArbiter` 基础版）已落地；V10.5.3 M2 将在此基础上升级为以 `SeatValue` 为核心的完整仲裁机制
+- **M1 Signal Discovery Integrity**：建立 `REAL / SYNTHETIC / BACKFILL` 真源区分，停止模拟信号污染真实自动执行链路
+- **M2 Canonical Payload & State Machine**：统一 canonical signal payload、原生状态迁移与恢复语义，结束 `factor_scores / extra_metadata / signal_dimensions` 多点写入与 fallback 拼装
+- **M3 Autonomous Control Plane Hardening**：明确 `AutonomousEngine.run_decision_cycle()` 为唯一自动执行编排入口，统一 positions / regime / audit 真源，并补齐 displacement pending 闭环
+- **M4 Native Audit & Governance Discipline**：Watchtower 优先显示原生审计，fallback 明确标记 `RECONSTRUCTED`，所有新控制能力按 `Observe → Shadow → Semi → Full` 渐进放量
+- **前端重点**：升级 `/alpha-lab`、`/portfolio`、`/execution-policy`、`/governance/pipeline`、`/autonomy` 五个工作台，统一显示“结果值 + 解释字段 + 数据质量 + 来源类型”
+- **与 V10.5.3 的关系**：V10.5.3 的 Profit Engine 方向保留，但其高级收益控制能力需要先建立在统一信号控制平面之上；V10.5.4 是这套底座收敛版本
 
 ### Phase 16: V11 计划 🔜
 - 期权执行开启（`STOCK,ETF,OPTION` 全模式）

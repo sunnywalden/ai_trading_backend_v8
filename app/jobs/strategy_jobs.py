@@ -330,7 +330,7 @@ def _sample_assets(count: int, strategy_name: str = "", universe_symbols: Option
             "direction": "LONG",
             "risk_flags": risk_flags,
             "notes": notes,
-            "signal_dimensions": signal_dimensions,
+            "signal_dimensions": {**signal_dimensions, "signal_origin_mode": "SYNTHETIC"},  # P0.1: mark as synthetic
         }
         assets.append(asset)
     return assets

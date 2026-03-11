@@ -6,6 +6,8 @@
 > - **所有业务接口**：`/api/v1/*`（统一前缀）
 >
 > 注意：本文档已包含“API 监控（Rate Limit）”部分，原文件 `docs/API_Monitoring.md` 已合并（并标记为已合并/弃用）。
+>
+> **V10.5.4 开发对齐说明（2026-03-11）**：本轮规划重点不是新增大量独立接口，而是统一信号控制平面的语义与来源：`signal_origin_mode`、canonical signal payload、原生状态迁移、原生审计优先、以及 `AutonomousEngine.run_decision_cycle()` 作为唯一自动执行编排入口。API 在 V10.5.4 阶段需优先保证字段口径、来源标记与 rollout/feature flag 语义一致。
 
 Base URL 以你的启动参数为准（示例：`http://localhost:8088`）。
 

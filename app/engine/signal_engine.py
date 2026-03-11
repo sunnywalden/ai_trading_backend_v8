@@ -73,7 +73,7 @@ class SignalEngine:
         
         signals = []
         for asset in assets:
-            if asset.signal_strength < (strategy_run.min_score or 60):
+            if (asset.signal_strength or 0) < (strategy_run.min_score or 60):
                 continue
             
             signal = await self._create_signal_from_asset(
@@ -202,7 +202,24 @@ class SignalEngine:
                 existing_meta.update(
                     self._extract_watchtower_dimension_fields(signal_dims)
                 )
+                # P0.2: signal regenerated with higher strength — reset watchtower so it
+                # goes through the full quality funnel again rather than carrying stale
+                # REJECTED / PASSED state from a previous evaluation cycle.
+                existing_meta.update(
+                    {
+                        "watchtower_stage": "SIGNAL_GENERATION",
+                        "watchtower_result": "PENDING",
+                        "watchtower_reason_code": None,
+                        "watchtower_reason_detail": None,
+                        "watchtower_reason_category": "GENERATION",
+                        "watchtower_rejected_at_layer": None,
+                    }
+                )
                 existing_signal.extra_metadata = existing_meta
+                # P0.1: preserve or promote origin mode (SYNTHETIC overrides REAL)
+                new_origin = signal_dims.get("signal_origin_mode")
+                if new_origin:
+                    existing_signal.signal_origin_mode = new_origin
                 existing_signal.expired_at = datetime.utcnow() + timedelta(hours=24)
                 
                 await self.session.commit()
@@ -246,6 +263,7 @@ class SignalEngine:
             signal_id=str(uuid4()),
             signal_type=signal_type,
             signal_source=SignalSource.STRATEGY,
+            signal_origin_mode=signal_dims.get("signal_origin_mode", "REAL"),  # P0.1
             status=SignalStatus.GENERATED,
             
             symbol=asset.symbol,
@@ -444,6 +462,28 @@ class SignalEngine:
             }
         )
         signal.extra_metadata = meta
+
+    @staticmethod
+    def _record_transition(
+        meta: dict,
+        *,
+        from_status: str,
+        to_status: str,
+        reason: str | None = None,
+    ) -> None:
+        """P1.1: 追加一条状态流转记录到 extra_metadata["status_history"]（保留最近 20 条）。"""
+        history: list = meta.get("status_history", [])
+        if not isinstance(history, list):
+            history = []
+        history.append(
+            {
+                "from": from_status,
+                "to": to_status,
+                "at": datetime.utcnow().isoformat(),
+                "reason": reason,
+            }
+        )
+        meta["status_history"] = history[-20:]
     
     async def validate_signal(self, signal_id: str) -> bool:
         """
@@ -458,6 +498,9 @@ class SignalEngine:
         
         # 检查信号是否过期
         if signal.expired_at and signal.expired_at < datetime.utcnow():
+            _pre_meta = self._safe_dict(signal.extra_metadata).copy()
+            self._record_transition(_pre_meta, from_status=signal.status.value, to_status="EXPIRED", reason="SIGNAL_EXPIRED")
+            signal.extra_metadata = _pre_meta
             signal.status = SignalStatus.EXPIRED
             await self._stamp_watchtower_metadata(
                 signal,
@@ -473,6 +516,9 @@ class SignalEngine:
         eff_state = await self.risk_svc.get_effective_state(signal.account_id)
         
         if eff_state.effective_trade_mode == TradeMode.OFF:
+            _pre_meta = self._safe_dict(signal.extra_metadata).copy()
+            self._record_transition(_pre_meta, from_status=signal.status.value, to_status="REJECTED", reason="TRADING_MODE_OFF")
+            signal.extra_metadata = _pre_meta
             signal.status = SignalStatus.REJECTED
             signal.risk_check_passed = "NO"
             signal.risk_check_details = {"reason": "Trading mode is OFF"}
@@ -493,13 +539,16 @@ class SignalEngine:
         check = await guard.check_order(signal.direction, notional)
         
         if not check.allowed:
+            _pre_meta = self._safe_dict(signal.extra_metadata).copy()
+            self._record_transition(_pre_meta, from_status=signal.status.value, to_status="REJECTED", reason=str(check.reason or "SafetyGuard blocked order"))
+            signal.extra_metadata = _pre_meta
             signal.status = SignalStatus.REJECTED
             signal.risk_check_passed = "NO"
             signal.risk_check_details = {
                 "reason": check.reason,
                 "triggers": getattr(check, "triggers", [])
             }
-            signal.validation_errors = [check.reason]
+            signal.validation_errors = {"errors": [str(check.reason)]}
             await self._stamp_watchtower_metadata(
                 signal,
                 stage="SIGNAL_VALIDATION",
@@ -511,6 +560,9 @@ class SignalEngine:
             return False
         
         # 验证通过
+        _pre_meta = self._safe_dict(signal.extra_metadata).copy()
+        self._record_transition(_pre_meta, from_status=signal.status.value, to_status="VALIDATED", reason="PASSED_ALL_CHECKS")
+        signal.extra_metadata = _pre_meta
         signal.status = SignalStatus.VALIDATED
         signal.risk_check_passed = "YES"
         signal.validated_at = datetime.utcnow()
@@ -607,11 +659,10 @@ class SignalEngine:
         
         # 计算评分(0-100)
         evaluation_score = self._calculate_evaluation_score(
+            pnl_pct=actual_return,
             expected_return=signal.expected_return or 0,
-            actual_return=actual_return,
-            signal_strength=signal.signal_strength,
+            risk_score=float(signal.risk_score or 50),
             holding_days=holding_days,
-            max_holding_days=signal.max_holding_days or 30
         )
         
         signal.evaluation_score = evaluation_score
@@ -623,38 +674,6 @@ class SignalEngine:
             signal.evaluation_notes = f"Signal underperformed: actual {actual_return:.2%} vs expected {signal.expected_return:.2%}"
         
         await self.session.commit()
-    
-    def _calculate_evaluation_score(
-        self,
-        expected_return: float,
-        actual_return: float,
-        signal_strength: float,
-        holding_days: int,
-        max_holding_days: int
-    ) -> float:
-        """
-        计算信号评估分数
-        考虑: 预期vs实际收益、信号强度准确性、持仓时间效率
-        """
-        # 收益准确性(0-50分)
-        if expected_return != 0:
-            return_accuracy = 1.0 - abs(actual_return - expected_return) / abs(expected_return)
-            return_score = max(0, return_accuracy * 50)
-        else:
-            return_score = 25 if actual_return > 0 else 0
-        
-        # 绝对收益(0-30分)
-        absolute_score = min(30, max(0, actual_return * 100 * 3))
-        
-        # 时间效率(0-20分)
-        if max_holding_days > 0:
-            time_efficiency = 1.0 - (holding_days / max_holding_days)
-            time_score = max(0, time_efficiency * 20)
-        else:
-            time_score = 10
-        
-        total_score = return_score + absolute_score + time_score
-        return min(100, max(0, total_score))
     
     async def calculate_performance_stats(
         self,

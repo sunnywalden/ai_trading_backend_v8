@@ -410,6 +410,22 @@ class CapacityArbiterService:
                 db=db,
             )
             decision.exit_signals_created = exit_created
+            # P1.4: 已触发席位替换，审计批准的 ENTRY 信号应在 EXIT 信号完成后才执行。
+            # 在批准信号元数据中记录待完成的 EXIT 符号，供 AutonomousEngine 进行顺序校验。
+            if exit_created:
+                logger.warning(
+                    "[CapacityArbiter][P1.4] Displacement detected: %d EXIT signal(s) queued "
+                    "for symbols=%s [cycle=%s]. Approved ENTRY signals should defer execution "
+                    "until EXIT completion.",
+                    len(exit_created),
+                    exit_created,
+                    _cycle_id,
+                )
+                for sig in approved_signals:
+                    sig_meta = sig.get("extra_metadata") if isinstance(sig, dict) else None
+                    if isinstance(sig_meta, dict):
+                        sig_meta["displacement_pending_exit_symbols"] = exit_created
+                        sig_meta["displacement_cycle_id"] = _cycle_id
         elif positions_to_close and _dry_run:
             logger.info(
                 "[CapacityArbiter] DRY-RUN: would close positions %s",

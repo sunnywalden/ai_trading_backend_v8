@@ -4,8 +4,8 @@
 > 本文档已拆分为模块化子文档，位于 [`docs/product/`](product/README.md)。
 > 本文件保留作为向后兼容入口，正式维护请在 `docs/product/` 目录进行。
 > **AI量化交易闭环系统** - 个人美港股智能交易平台  
-> 版本：V10.5.3（实施中）| 当前已上线版本：V10.5.2 | 更新日期：2026-03-10  
-> 变更摘要（V10.5.3 规划）：**Profit Engine Upgrade**——下一版本聚焦“收益控制回路”而非继续横向扩页，围绕四条主线推进：**Alpha Truth Engine 2.0**（gross / net / after cost / after turnover 四层真相口径、regime/capacity bucket、shadow false-reject 评估）、**Portfolio Construction 2.1**（Seat Value、Risk Budget Tree、Marginal Alpha/Risk/Turnover/Liquidity 贡献）、**Execution Policy Closed Loop**（Pre-Trade Cost 约束、执行策略对象化、执行反馈回写）、**Research-to-Live Governance Hard Gate**（Discovery / Paper / Shadow Live / Challenger / Production 五阶段证据链与回滚门槛）；目标是在不放宽风险上限的前提下提高净 alpha 质量、减少伪 alpha 与低价值席位占用。  
+> 版本：V10.5.4（规划中）| 当前已上线版本：V10.5.2 | 更新日期：2026-03-11  
+> 变更摘要（V10.5.4 规划）：**Signal Pipeline Integrity & Control-Plane Hardening**——本版本先收敛信号控制平面，再继续推进 Profit Engine：围绕 **Signal Discovery Integrity**（REAL / SYNTHETIC / BACKFILL 真源区分）、**Canonical Signal Payload & State Machine**（统一 payload、原生状态迁移、恢复语义）、**Autonomous Control Plane Hardening**（统一自动执行主链、统一 positions / regime / audit 真源、席位置换完整闭环）、**Native Audit & Governance Discipline**（Watchtower 原生审计优先、完整开发流程、Observe → Shadow → Semi → Full 放量纪律）四条主线推进，目标是在不放宽风险上限的前提下，把信号发现、状态、执行与审计口径统一成可验证、可回退、可放量的交易控制平面。  
 > 变更摘要（V10.5.2 交付）：**组合席位竞争引擎（Capacity-Aware Admission & Replacement Engine）**——把「持仓上限」从刚性拒绝规则升级为动态席位分配机制：新增 **Unified Candidate Pool**（当前持仓 + 新信号统一候选池）+ **统一准入评分** `admission_score = alpha_quality - replacement_friction - risk_penalty + regime_fit`，满仓时按分数淘汰末位 N 个对象（持仓→EXIT、信号→REJECTED_BY_CAPACITY_REPLACEMENT）；引入替换保护带（`MIN_REPLACEMENT_EDGE_BPS / MAX_REPLACEMENTS_PER_CYCLE / MIN_HOLD_MINUTES / REPLACEMENT_COOLDOWN_MINUTES`）防止过度翻仓；**Incumbent Decay Model** 让持仓持续参与席位竞争（alpha 衰减 + 体制适配 + 机会成本）；新增 `capacity_decision_audit_log` 全量审计；支持 `CAPACITY_REPLACEMENT_DRY_RUN` 先观测再放量；前端 `/portfolio`、`/autonomy`、`/order-book` 增加「席位竞争结果」可视化。  
 > 变更摘要（V10.5.1 交付）：**从“功能完整”走向“机构级交易操作系统”**——下一版本不再以新增页面和策略数量为核心，而聚焦三条机构级主线：**Alpha Truth Stack**（策略净 alpha、信号衰减、影子组合、Purged Walk-Forward、成本后真实表现）、**Portfolio Construction 2.0**（风险预算树、流动性感知仓位、边际风险/alpha/turnover 贡献）、**Execution Policy Engine**（订单紧急度、参与率、滑点预算、预交易成本模型、成交后回放）；同时补齐 **Live Safety & Model Degradation Guard**（模型退化监控、数据新鲜度 kill matrix、自主度自适应降级）与 **Research-to-Live Governance**（shadow live、晋级流水线、实验总账），让平台从“能跑的自主交易系统”升级为“可验证、可控放量、可持续进化的研究与交易一体化系统”。【补丁交付】：事后决策剪析自动化（Post-Mortem Automation）——新增 `post_mortem_jobs.py`，通过 EventBus 订阅 `Topics.POSITION_CLOSED` 实时触发 + 每日 02:00 UTC 岜底 Cron 扫描近 90 天未剪析平仓仓位，幂等排队 `deepseek-reasoner` 生成结构化复盘（`trade_id="position-{id}"`），`_RUNNING_TASKS` 集合防 GC；事件日历数据新鲜度修复——`data_freshness_guard_service.py` 改查 `EventCalendarEntry.updated_at`（原 `created_at`），`event_calendar_service.py` upsert 时对已存在记录刷新 `updated_at`，消除 `event_calendar` 83h 陈旧 WARN。  
 > 变更摘要（V10.4.3）：**风险降低优先执行（Risk-Reducing Priority Execution）**——新增减仓/平仓快速通道：`REDUCE/EXIT` 信号绕过开仓型质量漏斗、熔断期间允许风险降低类订单、减仓/平仓不占用 `MAX_DAILY_TRADES` / `MAX_DAILY_SIGNALS` 配额；`PositionMonitor`止损/止盈信号写入 `force_exit=true`，`AutonomousEngine` 识别后跳过冷却与 Redis 并发锁直接执行；`SignalPositionFilter` 在减仓数量超持仓时自动升级为全平；`OrderExecutor` 以实际持仓数量为准执行 EXIT/REDUCE，并为港股退出保留 odd-lot 平仓能力；`AutonomyPage` 新增“减仓/平仓优先通道”状态卡与快速通道/强制出场徽章。**补充**：开仓型信号新增 `LOW / MEDIUM / HIGH / ELITE` 质量标识，进入漏斗前先按质量排队；其中 `ELITE` 信号可豁免 `SQ_MAX_DAILY_SIGNALS` 日配额上限，但仍必须通过仓位、相关性与 RiskGate。**追加需求**：`/system` 系统监控模块需新增交易生命周期状态监测、系统主要数据流转详细状态、系统主要模块及细粒度服务状态。  
@@ -22,7 +22,7 @@
 > 变更摘要（V10.1）：**兑现承诺 + 打磨质量 + 扩展边界**——Tiger 真实下单接入（覆盖美股/港股/期权）、FULL 模式完整自主交易闭环、Copilot 操作指令执行落地、Dashboard 所有 TODO 指标真实化、AI 组合级决策升级（结构化 JSON 输出 + 批量组合决策）、ETF 标的池正式支持、港股支持（Tiger API 统一，无需 Futu）、Paper→Live 毕业自动化、Dashboard WebSocket 实时推送；**本版本明确不含 Telegram 通知，FULL 模式具备完全自主交易能力**
 > 历史版本：V10.0（2026-02-24）变更摘要见下方历史记录节  
 > 当前已上线版本：**V10.5.2**（已发布）| 详细规划：[V10.5.2 Release Plan](archived/v10/v10.5/RELEASE_PLAN_V10.5.2.md)  
-> 下一版本规划：**V10.5.3** | 详细规划：[V10.5.3 Release Plan](archived/v10/v10.5/RELEASE_PLAN_V10.5.3.md)
+> 下一版本规划：**V10.5.4** | 详细规划：[V10.5.4 Release Plan](archived/v10/v10.5/RELEASE_PLAN_V10.5.4.md)
 
 ---
 
@@ -46,57 +46,59 @@
 
 ---
 
-## V10.5.3 验收标准（规划中）
+## V10.5.4 验收标准（规划中）
 
-> 完整规划详见 [docs/archived/v10/v10.5/RELEASE_PLAN_V10.5.3.md](archived/v10/v10.5/RELEASE_PLAN_V10.5.3.md)
+> 完整规划详见 [docs/archived/v10/v10.5/RELEASE_PLAN_V10.5.4.md](archived/v10/v10.5/RELEASE_PLAN_V10.5.4.md)
 
-### V10.5.3 开发流程（定稿）
+### V10.5.4 开发流程（定稿）
 
-- **第 1 阶段：文档对齐** —— `PRODUCT.md / FRONTEND_DESIGN.md / BACKEND_DESIGN.md / API.md` 四份主文档先统一字段口径、路由契约、feature flags 与验收矩阵。
-- **第 2 阶段：后端阻塞项** —— 先完成 `Alpha Truth Engine 2.0`、`Portfolio Construction 2.1`、`Execution Policy Closed Loop`、`Governance Hard Gate` 的模型、服务与接口，且全部支持 flag-gated rollout。
-- **第 3 阶段：前端工作台升级** —— 仅升级现有四个工作台（`/alpha-lab`、`/portfolio`、`/execution-policy`、`/governance/pipeline`），不新增导航分组。
-- **第 4 阶段：测试与联调** —— 单元测试、集成测试、Cypress E2E 与产品验收并行推进，所有新能力必须同时给出“结果值 + 解释字段 + data_quality”。
-- **第 5 阶段：渐进放量** —— 按 `Observe → Shadow Control → Semi → Full` 分四阶段放量，不允许 V10.5.3 直接默认硬切 live 链路。
+- **第 1 阶段：文档对齐** —— `PRODUCT.md / FRONTEND_DESIGN.md / BACKEND_DESIGN.md / API.md` 四份主文档先统一版本口径、feature flags、rollout phases、legacy 路径与验收矩阵。
+- **第 2 阶段：后端阻塞项** —— 先完成 `signal_origin_mode` 全链路、canonical signal payload、native state transition、AutonomousEngine 单主链收敛、positions / regime / audit 真源统一，以及 displacement pending 完整闭环，且全部支持 flag-gated rollout。
+- **第 3 阶段：前端工作台升级** —— 仅升级现有工作台（`/alpha-lab`、`/portfolio`、`/execution-policy`、`/governance/pipeline`、`/autonomy`），不新增导航分组；所有关键结论必须同时给出“结果值 + 解释字段 + 数据质量 + 来源类型”。
+- **第 4 阶段：测试与联调** —— 单元测试、集成测试、前后端联调、Cypress E2E 与产品验收并行推进，必须覆盖 REAL/SYNTHETIC 区分、native vs reconstructed audit、legacy path 不误接管生产链路。
+- **第 5 阶段：渐进放量** —— 按 `Observe → Shadow → Semi → Full` 分四阶段放量，不允许 V10.5.4 直接默认硬切 live 链路。
 
-### V10.5.3 Feature Flags（定稿）
+### V10.5.4 Feature Flags（定稿）
 
-- `ALPHA_TRUTH_V2_ENABLED`：控制 Alpha Truth 四层口径、data quality 与 Shadow False-Reject 指标是否对外暴露。
-- `SEAT_VALUE_ARBITER_ENABLED`：控制 `CapacityArbiter` 是否从静态质量排序切换到 `SeatValue` 仲裁。
-- `EXECUTION_POLICY_HARD_CONTROL_ENABLED`：控制 pre-trade cost / policy snapshot 是否进入真实执行决策，而不仅是观测视图。
+- `SIGNAL_PIPELINE_V1054_ENABLED`：控制 canonical payload / origin mode / native transition log 是否进入主链。
+- `AUTONOMOUS_CONTROL_PLANE_V1054_ENABLED`：控制单主链收敛、legacy path 限制、统一自动执行编排是否接管。
+- `NATIVE_AUDIT_V1054_ENABLED`：控制 Watchtower / signal pipeline 是否优先使用原生审计。
 - `GOVERNANCE_HARD_GATE_ENABLED`：控制五阶段晋级与回滚门是否参与真实策略放量。
+- `SEAT_VALUE_ARBITER_ENABLED`：控制 `CapacityArbiter` 是否在控制平面收敛后切换到 `SeatValue` 仲裁。
+- `EXECUTION_POLICY_HARD_CONTROL_ENABLED`：控制 pre-trade cost / policy snapshot 是否进入真实执行决策，而不仅是观测视图。
 
-### V10.5.3 Rollout 策略（定稿）
+### V10.5.4 Rollout 策略（定稿）
 
 | 阶段 | 目标 | 规则 |
 |------|------|------|
-| Observe | 只观测，不接管 | 计算新指标、写快照、前端可读，但不改变 live 行为 |
-| Shadow Control | 影子接管 | 只在 shadow / paper 路径启用新逻辑，记录与旧逻辑差异 |
-| Semi | 半接管 | 对有限真实链路启用 SeatValue / Policy / Gate，并保留人工审计与快速回退 |
-| Full | 全接管 | 新逻辑成为默认链路，但保留 feature flags 级回退能力 |
+| Observe | 只观测，不接管 | 计算 canonical / native audit / truth sources，但不改变 live 行为 |
+| Shadow | 影子接管 | 只在 shadow / paper 路径启用统一控制平面，记录与旧逻辑差异 |
+| Semi | 半接管 | 对有限真实链路启用 unified control plane，并保留人工审计与快速回退 |
+| Full | 全接管 | AutonomousEngine + native audit + governance hard gate 成为默认主链 |
 
-### M1 — Alpha Truth Engine 2.0
+### M1 — Signal Discovery Integrity
 
-- [ ] 所有核心策略同时输出 `gross / net / after_cost / after_turnover` 四层收益口径
-- [ ] `Alpha Lab` 所有研究卡片显式展示 `data_quality`（`REAL / INSUFFICIENT / STALE / PROXY`）
-- [ ] `Shadow Book` 能量化 `false_reject_rate` 与 `protection_benefit`
+- [ ] 自动信号 100% 带 `signal_origin_mode`
+- [ ] `SYNTHETIC` 信号默认不进入生产自动执行主链
+- [ ] discovery 诊断面可观测 REAL / SYNTHETIC / BACKFILL 分布
 
-### M2 — Portfolio Construction 2.1
+### M2 — Canonical Payload & State Machine
 
-- [ ] `CapacityArbiter` 基于 `SeatValue` 决定席位保留与替换，而不再只依赖静态质量排序
-- [ ] 组合建议可解释 `marginal_alpha / marginal_var / marginal_turnover / liquidity_usage`
-- [ ] `Risk Budget Tree` 能解释任何 `scaled_down / rejected` 的组合建议
+- [ ] 新信号 100% 写 canonical payload
+- [ ] Watchtower / Quality Funnel / CapacityArbiter / AutonomousEngine 优先读取 canonical payload
+- [ ] 原生状态流转可完整回答任一信号为何被拒、为何执行、为何卡住
 
-### M3 — Execution Policy Closed Loop
+### M3 — Autonomous Control Plane Hardening
 
-- [ ] 每笔订单执行前生成 `policy snapshot + pre-trade cost estimate`
-- [ ] 执行页展示的算法、预算、参与率与真实下单参数保持一致
-- [ ] 可按 `symbol / urgency / algo_type` 追踪 `realized IS` 与 `budget breach rate`
+- [ ] 自动执行 100% 由 `AutonomousEngine.run_decision_cycle()` 编排
+- [ ] positions / regime / audit 真源在 UI 与执行链中一致
+- [ ] displacement pending → exit submitted → exit filled → entry released 可完整回放
 
-### M4 — Research-to-Live Governance Hard Gate
+### M4 — Native Audit & Governance Discipline
 
-- [ ] 策略统一进入 `Discovery → Paper → Shadow Live → Challenger → Production` 五阶段流水线
-- [ ] 进入 `Production` 的策略 100% 具备 evidence chain（backtest / paper / shadow / execution / calibration）
-- [ ] 退化策略可见明确的 `rollback blocker / rollback reason / downgrade suggestion`
+- [ ] Watchtower 默认优先显示 native audit，fallback 明确标记 `RECONSTRUCTED`
+- [ ] 关键控制能力全部具备 flag + phase + rollback 能力
+- [ ] `Discovery → Production` 的治理证据链可对接真实控制平面
 
 ## V10.4 验收标准（规划归档）
 
