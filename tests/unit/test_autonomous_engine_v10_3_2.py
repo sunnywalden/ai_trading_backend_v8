@@ -270,3 +270,45 @@ async def test_fetch_pending_signals_skips_synthetic_non_closing():
 
     assert [row["signal_id"] for row in pending] == ["sig-real-1"]
     assert pending[0]["signal_origin_mode"] == "REAL"
+
+
+@pytest.mark.asyncio
+async def test_get_daily_stats_uses_truth_source_positions(monkeypatch):
+    ae = AutonomousEngine()
+
+    class _CountResult:
+        def scalar(self):
+            return 0
+
+        def scalars(self):
+            return SimpleNamespace(first=lambda: None)
+
+    fake_db = SimpleNamespace(execute=AsyncMock(return_value=_CountResult()))
+
+    monkeypatch.setattr(
+        "app.services.truth_source_service.truth_source_service.get_positions_truth_snapshot",
+        AsyncMock(
+            return_value={
+                "positions": {
+                    "AAPL": {"qty": 10.0, "avg_cost": 100.0, "current_price": 101.0}
+                },
+                "positions_count": 1,
+                "source": "POSITION_LIFECYCLE",
+            }
+        ),
+    )
+
+    class _DummyBroker:
+        async def get_account_equity(self, _account_id: str):
+            return {"net_liquidation": 250000.0}
+
+    monkeypatch.setattr(
+        "app.broker.factory.make_option_broker_client",
+        lambda: _DummyBroker(),
+    )
+
+    stats = await ae._get_daily_stats("acc-1", cast(Any, fake_db))
+
+    assert stats["positions_source"] == "POSITION_LIFECYCLE"
+    assert stats["positions"]["AAPL"]["qty"] == pytest.approx(10.0)
+    assert stats["equity"] == pytest.approx(250000.0)
