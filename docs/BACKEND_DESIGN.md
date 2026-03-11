@@ -59,6 +59,14 @@
 - 禁止在系统提示词之外通过 Regex 提取字段。
 - AI 响应必须符合预定义的 Pydantic Schema。
 
+#### 1.2.3 V10.5.4 rollout 运行纪律
+
+- `SIGNAL_PIPELINE_V1054_ENABLED=false`：**OBSERVE**，只校验 `signal_origin_mode` / canonical `signal_payload` / native `signal_transitions` 的覆盖率与一致性。
+- `SIGNAL_PIPELINE_V1054_ENABLED=true`：**SHADOW**，开始在控制台与研究页展示真源 / payload / transition 差异，但不接管 live 决策。
+- `AUTONOMOUS_CONTROL_PLANE_V1054_ENABLED=true` 且 `NATIVE_AUDIT_V1054_ENABLED=true`：**SEMI**，原生控制面与审计路径开始灰度接管。
+- 再叠加 `GOVERNANCE_HARD_GATE_ENABLED=true`：**FULL**，进入原生治理闭环。
+- 运维顺序建议固定为：**迁移 → 回补 → 修复 → 验收 → 灰度开关**。避免先开开关、后补历史，导致页面口径与真实控制面错位。
+
 ### 1.3 项目结构
 
 ```

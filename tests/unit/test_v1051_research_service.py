@@ -27,9 +27,7 @@ def test_summarize_weight_shift_builds_turnover_and_risk_budget():
     assert summary["turnover"] == pytest.approx(0.3)
     assert summary["top_weights"][0]["symbol"] == "NVDA"
     assert summary["largest_rebalances"][0]["symbol"] == "NVDA"
-    assert sum(
-        item["budget"] for item in summary["risk_budget"]
-    ) == pytest.approx(1.0)
+    assert sum(item["budget"] for item in summary["risk_budget"]) == pytest.approx(1.0)
 
 
 def test_summarize_execution_logs_tracks_worst_symbols():
@@ -82,9 +80,12 @@ def test_summarize_signal_bucket_returns_truth_layers_and_quality():
             confidence=0.9,
             execution_slippage=0.001,
             generated_at=datetime.now(),
+            signal_origin_mode="REAL",
             extra_metadata={
                 "market_regime": "BULL_TREND",
                 "adv_usd": 12_000_000,
+                "signal_payload": {"version": "v10.5.4", "origin_mode": "REAL"},
+                "signal_transitions": [{"to_status": "EXECUTED"}],
             },
         ),
         SimpleNamespace(
@@ -97,7 +98,16 @@ def test_summarize_signal_bucket_returns_truth_layers_and_quality():
             confidence=0.7,
             execution_slippage=0.002,
             generated_at=datetime.now(),
-            extra_metadata={"market_regime": "BULL_TREND", "adv_usd": 800_000},
+            signal_origin_mode="SYNTHETIC",
+            extra_metadata={
+                "market_regime": "BULL_TREND",
+                "adv_usd": 800_000,
+                "signal_payload": {
+                    "version": "v10.5.4",
+                    "origin_mode": "SYNTHETIC",
+                },
+                "signal_transitions": [{"to_status": "EXECUTED"}],
+            },
         ),
     ]
 
@@ -112,8 +122,69 @@ def test_summarize_signal_bucket_returns_truth_layers_and_quality():
     assert summary["after_cost_return"] == pytest.approx(0.0185)
     assert summary["after_turnover_return"] == pytest.approx(0.0145)
     assert summary["data_quality"] == "INSUFFICIENT"
+    assert summary["origin_breakdown"][0]["mode"] == "REAL"
     assert summary["regime_breakdown"][0]["bucket"] == "BULL_TREND"
     assert summary["capacity_breakdown"][0]["bucket"] in {"L", "S"}
+
+
+def test_build_signal_integrity_summary_tracks_payload_and_transitions():
+    signals = [
+        SimpleNamespace(
+            signal_origin_mode="REAL",
+            extra_metadata={
+                "signal_payload": {"version": "v10.5.4", "origin_mode": "REAL"},
+                "signal_transitions": [{"to_status": "VALIDATED"}],
+            },
+            factor_scores={},
+        ),
+        SimpleNamespace(
+            signal_origin_mode=None,
+            extra_metadata={
+                "signal_origin_mode": "BACKFILL",
+                "signal_payload": {"version": "legacy", "origin_mode": "BACKFILL"},
+            },
+            factor_scores={},
+        ),
+    ]
+
+    build_signal_integrity_summary = getattr(
+        V1051ResearchService,
+        "_build_signal_integrity_summary",
+    )
+    summary = build_signal_integrity_summary(signals)
+
+    assert summary["sample_size"] == 2
+    assert summary["canonical_payload_ready"] == 1
+    assert summary["native_transition_ready"] == 1
+    assert summary["origin_known"] == 2
+
+
+def test_build_rollout_state_promotes_to_semi_when_v1054_control_plane_on(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.v1051_research_service.settings.SIGNAL_PIPELINE_V1054_ENABLED",
+        True,
+    )
+    monkeypatch.setattr(
+        "app.services.v1051_research_service.settings.AUTONOMOUS_CONTROL_PLANE_V1054_ENABLED",
+        True,
+    )
+    monkeypatch.setattr(
+        "app.services.v1051_research_service.settings.NATIVE_AUDIT_V1054_ENABLED",
+        True,
+    )
+    monkeypatch.setattr(
+        "app.services.v1051_research_service.settings.GOVERNANCE_HARD_GATE_ENABLED",
+        False,
+    )
+
+    build_rollout_state = getattr(
+        V1051ResearchService,
+        "_build_rollout_state",
+    )
+    rollout = build_rollout_state()
+
+    assert rollout["stage"] == "SEMI"
+    assert rollout["flags"]["signal_pipeline_v1054_enabled"] is True
 
 
 def test_summarize_shadow_book_exposes_false_reject_and_protection_benefit():
@@ -161,9 +232,6 @@ def test_compute_governance_stage_supports_five_stage_pipeline():
 
     assert compute_governance_stage(False, None, 0.0, 0) == "DISCOVERY"
     assert compute_governance_stage(False, "FAILED", 0.4, 3) == "PAPER"
-    assert (
-        compute_governance_stage(False, "SUCCESS", 0.52, 12)
-        == "SHADOW_LIVE"
-    )
+    assert compute_governance_stage(False, "SUCCESS", 0.52, 12) == "SHADOW_LIVE"
     assert compute_governance_stage(False, "SUCCESS", 0.56, 24) == "CHALLENGER"
     assert compute_governance_stage(True, "SUCCESS", 0.60, 36) == "PRODUCTION"

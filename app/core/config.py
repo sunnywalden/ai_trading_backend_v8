@@ -288,6 +288,12 @@ class Settings(BaseSettings):
     EXECUTION_POLICY_HARD_CONTROL_ENABLED: bool = False
     GOVERNANCE_HARD_GATE_ENABLED: bool = False
 
+    # ==================== V10.5.4: Signal Pipeline Integrity &
+    # Control-Plane Hardening ====================
+    SIGNAL_PIPELINE_V1054_ENABLED: bool = False
+    AUTONOMOUS_CONTROL_PLANE_V1054_ENABLED: bool = False
+    NATIVE_AUDIT_V1054_ENABLED: bool = False
+
     model_config = SettingsConfigDict(
         env_file=str(ENV_FILE) if ENV_FILE else ".env",
         env_file_encoding="utf-8",
@@ -321,9 +327,7 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _validate_auth_settings(self) -> "Settings":
         if self.AUTH_ENABLED and not (self.ADMIN_PASSWORD or "").strip():
-            raise ValueError(
-                "ADMIN_PASSWORD must be set when AUTH_ENABLED=true"
-            )
+            raise ValueError("ADMIN_PASSWORD must be set when AUTH_ENABLED=true")
         return self
 
 
