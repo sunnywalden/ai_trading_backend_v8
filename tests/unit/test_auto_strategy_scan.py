@@ -9,9 +9,8 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.engine.quant_trading_loop import QuantTradingLoop
-from app.models.strategy import Strategy
-from app.services.strategy_auto_selection_service import \
-    StrategyAutoSelectionService
+from app.models.strategy import Strategy, StrategyRun
+from app.services.strategy_auto_selection_service import StrategyAutoSelectionService
 
 
 @pytest.mark.asyncio
@@ -21,6 +20,7 @@ async def test_select_auto_scan_strategies_prefers_never_run_then_oldest_run():
 
     async with engine.begin() as conn:
         await conn.run_sync(Strategy.__table__.create)
+        await conn.run_sync(StrategyRun.__table__.create)
 
     async with session_factory() as session:
         session.add_all(
@@ -61,11 +61,9 @@ async def test_select_auto_scan_strategies_prefers_never_run_then_oldest_run():
         )
         await session.commit()
 
-        strategies = (
-            await StrategyAutoSelectionService.select_auto_scan_strategies(
-                session,
-                limit=3,
-            )
+        strategies = await StrategyAutoSelectionService.select_auto_scan_strategies(
+            session,
+            limit=3,
         )
 
     await engine.dispose()
