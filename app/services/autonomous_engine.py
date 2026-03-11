@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.services.risk_gate_service import risk_gate_service
+from app.services.signal_transition_service import signal_transition_service
 
 logger = logging.getLogger(__name__)
 
@@ -195,28 +196,55 @@ class AutonomousEngine:
         return value if isinstance(value, dict) else {}
 
     @classmethod
+    def _canonical_signal_payload(cls, signal: dict) -> dict[str, Any]:
+        extra_meta = cls._safe_dict(signal.get("extra_metadata"))
+        payload = extra_meta.get("signal_payload")
+        return payload if isinstance(payload, dict) else {}
+
+    @classmethod
+    def _signal_origin_mode(cls, signal: dict) -> str:
+        payload = cls._canonical_signal_payload(signal)
+        origin = (
+            signal.get("signal_origin_mode")
+            or payload.get("origin_mode")
+            or cls._safe_dict(signal.get("extra_metadata")).get("signal_origin_mode")
+            or "REAL"
+        )
+        return str(origin).upper()
+
+    @classmethod
     def _extract_dimension_payload(
         cls, signal: dict
-    ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any], dict[str, Any]]:
         factor_scores = cls._safe_dict(signal.get("factor_scores"))
         extra_meta = cls._safe_dict(signal.get("extra_metadata"))
+        signal_payload = cls._canonical_signal_payload(signal)
+        payload_dims = cls._safe_dict(signal_payload.get("dimensions"))
         dimensions = signal.get("dimensions")
+        if not isinstance(dimensions, list):
+            dimensions = payload_dims.get("dimensions")
         if not isinstance(dimensions, list):
             dimensions = extra_meta.get("dimensions")
         if not isinstance(dimensions, list):
             dimensions = factor_scores.get("dimensions")
         if not isinstance(dimensions, list):
             dimensions = []
-        return dimensions, factor_scores, extra_meta
+        return dimensions, factor_scores, extra_meta, signal_payload
 
     def _build_signal_funnel_input(self, signal: dict, regime: Optional[str]) -> Any:
         from app.services.signal_quality_funnel import SignalFunnelInput
 
-        dimensions, factor_scores, extra_meta = self._extract_dimension_payload(signal)
+        dimensions, factor_scores, extra_meta, signal_payload = self._extract_dimension_payload(signal)
+        payload_dims = self._safe_dict(signal_payload.get("dimensions"))
+        payload_quality = self._safe_dict(signal_payload.get("quality_inputs"))
 
         def _from_sources(key: str, default: Any = None) -> Any:
             if key in signal and signal.get(key) is not None:
                 return signal.get(key)
+            if key in payload_quality and payload_quality.get(key) is not None:
+                return payload_quality.get(key)
+            if key in payload_dims and payload_dims.get(key) is not None:
+                return payload_dims.get(key)
             if key in extra_meta and extra_meta.get(key) is not None:
                 return extra_meta.get(key)
             if key in factor_scores and factor_scores.get(key) is not None:
@@ -2183,12 +2211,36 @@ class AutonomousEngine:
             )
             result = await db.execute(stmt)
             rows = result.scalars().all()
-            return [
-                {
+            pending: list[dict[str, Any]] = []
+            skipped_synthetic = 0
+            for r in rows:
+                extra_metadata = (
+                    r.extra_metadata if isinstance(r.extra_metadata, dict) else {}
+                )
+                signal_payload = self._safe_dict(extra_metadata.get("signal_payload"))
+                payload_dims = self._safe_dict(signal_payload.get("dimensions"))
+                payload_quality = self._safe_dict(signal_payload.get("quality_inputs"))
+                signal_origin_mode = str(
+                    r.signal_origin_mode
+                    or signal_payload.get("origin_mode")
+                    or extra_metadata.get("signal_origin_mode")
+                    or "REAL"
+                ).upper()
+
+                if (
+                    signal_origin_mode == "SYNTHETIC"
+                    and (r.signal_type.value if r.signal_type else "ENTRY") not in {"EXIT", "REDUCE"}
+                ):
+                    skipped_synthetic += 1
+                    continue
+
+                pending.append(
+                    {
                     "id": r.id,
                     "signal_id": r.signal_id,
                     "symbol": r.symbol,
                     "signal_type": r.signal_type.value if r.signal_type else "ENTRY",
+                    "signal_origin_mode": signal_origin_mode,
                     "signal_strength": float(r.signal_strength or 0),
                     "confidence": float(r.confidence or 0.5),
                     "direction": r.direction or "LONG",
@@ -2214,9 +2266,10 @@ class AutonomousEngine:
                         r.factor_scores if isinstance(r.factor_scores, dict) else {}
                     ),
                     "dimensions": (
-                        (
-                            (r.extra_metadata or {}).get("dimensions")
-                            if isinstance(r.extra_metadata, dict)
+                        payload_dims.get("dimensions")
+                        or (
+                            extra_metadata.get("dimensions")
+                            if isinstance(extra_metadata, dict)
                             else None
                         )
                         or (
@@ -2227,9 +2280,11 @@ class AutonomousEngine:
                         or []
                     ),
                     "aligned_count": (
-                        (
-                            (r.extra_metadata or {}).get("aligned_count")
-                            if isinstance(r.extra_metadata, dict)
+                        payload_dims.get("aligned_count")
+                        or payload_quality.get("aligned_count")
+                        or (
+                            extra_metadata.get("aligned_count")
+                            if isinstance(extra_metadata, dict)
                             else None
                         )
                         or (
@@ -2240,9 +2295,10 @@ class AutonomousEngine:
                         or 0
                     ),
                     "aligned_dims": (
-                        (
-                            (r.extra_metadata or {}).get("aligned_dims")
-                            if isinstance(r.extra_metadata, dict)
+                        payload_dims.get("aligned_dims")
+                        or (
+                            extra_metadata.get("aligned_dims")
+                            if isinstance(extra_metadata, dict)
                             else None
                         )
                         or (
@@ -2253,9 +2309,10 @@ class AutonomousEngine:
                         or []
                     ),
                     "opposing_dims": (
-                        (
-                            (r.extra_metadata or {}).get("opposing_dims")
-                            if isinstance(r.extra_metadata, dict)
+                        payload_dims.get("opposing_dims")
+                        or (
+                            extra_metadata.get("opposing_dims")
+                            if isinstance(extra_metadata, dict)
                             else None
                         )
                         or (
@@ -2266,9 +2323,10 @@ class AutonomousEngine:
                         or []
                     ),
                     "neutral_dims": (
-                        (
-                            (r.extra_metadata or {}).get("neutral_dims")
-                            if isinstance(r.extra_metadata, dict)
+                        payload_dims.get("neutral_dims")
+                        or (
+                            extra_metadata.get("neutral_dims")
+                            if isinstance(extra_metadata, dict)
                             else None
                         )
                         or (
@@ -2279,9 +2337,10 @@ class AutonomousEngine:
                         or []
                     ),
                     "adv_usd": (
-                        (
-                            (r.extra_metadata or {}).get("adv_usd")
-                            if isinstance(r.extra_metadata, dict)
+                        payload_dims.get("adv_usd")
+                        or (
+                            extra_metadata.get("adv_usd")
+                            if isinstance(extra_metadata, dict)
                             else None
                         )
                         or (
@@ -2291,9 +2350,10 @@ class AutonomousEngine:
                         )
                     ),
                     "market_cap": (
-                        (
-                            (r.extra_metadata or {}).get("market_cap")
-                            if isinstance(r.extra_metadata, dict)
+                        payload_dims.get("market_cap")
+                        or (
+                            extra_metadata.get("market_cap")
+                            if isinstance(extra_metadata, dict)
                             else None
                         )
                         or (
@@ -2303,9 +2363,11 @@ class AutonomousEngine:
                         )
                     ),
                     "historical_ic": (
-                        (
-                            (r.extra_metadata or {}).get("historical_ic")
-                            if isinstance(r.extra_metadata, dict)
+                        payload_quality.get("historical_ic")
+                        or payload_dims.get("historical_ic")
+                        or (
+                            extra_metadata.get("historical_ic")
+                            if isinstance(extra_metadata, dict)
                             else None
                         )
                         or (
@@ -2315,9 +2377,11 @@ class AutonomousEngine:
                         )
                     ),
                     "timing_quality": (
-                        (
-                            (r.extra_metadata or {}).get("timing_quality")
-                            if isinstance(r.extra_metadata, dict)
+                        payload_quality.get("timing_quality")
+                        or payload_dims.get("timing_quality")
+                        or (
+                            extra_metadata.get("timing_quality")
+                            if isinstance(extra_metadata, dict)
                             else None
                         )
                         or (
@@ -2326,12 +2390,18 @@ class AutonomousEngine:
                             else None
                         )
                     ),
-                    "extra_metadata": (
-                        r.extra_metadata if isinstance(r.extra_metadata, dict) else {}
-                    ),
+                    "extra_metadata": extra_metadata,
+                    "signal_payload": signal_payload,
                 }
-                for r in rows
-            ]
+                )
+
+            if skipped_synthetic:
+                logger.info(
+                    "[AutonomousEngine] Skipped %d SYNTHETIC pending signal(s) for account=%s",
+                    skipped_synthetic,
+                    account_id,
+                )
+            return pending
         except Exception as e:
             logger.warning(f"Failed to fetch pending signals: {e}", exc_info=True)
             return []
@@ -2891,6 +2961,12 @@ class AutonomousEngine:
         db: AsyncSession,
         signal_db_id: Optional[int],
         new_status: Any,
+        *,
+        actor: str = "AUTONOMOUS_ENGINE",
+        stage: str = "CONTROL_PLANE",
+        reason_code: Optional[str] = None,
+        reason_detail: Optional[str] = None,
+        correlation_id: Optional[str] = None,
     ) -> None:
         """
         更新 TradingSignal 状态，捕获异常以免中断主流程。
@@ -2904,18 +2980,42 @@ class AutonomousEngine:
         # 如果状态变为 EXECUTED，同步写入 executed_at
         from datetime import datetime as _dt
 
+        from sqlalchemy import select as _select
         from sqlalchemy import update as _upd
 
         from app.models.trading_signal import SignalStatus as _SSEnum
         from app.models.trading_signal import TradingSignal as _TS
 
+        _status_value = new_status.value if hasattr(new_status, "value") else str(new_status)
         _values: dict = {"status": new_status}
         if hasattr(new_status, "value") and new_status == _SSEnum.EXECUTED:
             _values["executed_at"] = _dt.utcnow()
 
-        stmt = _upd(_TS).where(_TS.id == signal_db_id).values(**_values)
         for attempt in (1, 2):
             try:
+                current_signal = (
+                    await db.execute(_select(_TS).where(_TS.id == signal_db_id))
+                ).scalars().first()
+                if current_signal is None:
+                    return
+
+                old_status = (
+                    current_signal.status.value
+                    if hasattr(current_signal.status, "value")
+                    else str(current_signal.status)
+                )
+                if old_status != _status_value:
+                    current_signal.extra_metadata = signal_transition_service.append_transition(
+                        current_signal.extra_metadata if isinstance(current_signal.extra_metadata, dict) else {},
+                        from_status=old_status,
+                        to_status=_status_value,
+                        actor=actor,
+                        stage=stage,
+                        reason_code=reason_code or f"STATUS_{_status_value}",
+                        reason_detail=reason_detail,
+                        correlation_id=correlation_id,
+                    )
+                stmt = _upd(_TS).where(_TS.id == signal_db_id).values(**_values)
                 await db.execute(stmt)
                 await db.commit()
                 return

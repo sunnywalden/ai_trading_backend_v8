@@ -26,10 +26,12 @@ from app.models.trading_signal import (SignalPerformance, SignalSource,
 from app.services.account_service import AccountService
 from app.services.risk_config_service import RiskConfigService
 from app.services.safety_guard import SafetyGuard
+from app.services.signal_transition_service import signal_transition_service
 
 
 class SignalEngine:
     """信号引擎 - 交易信号的生成、验证和管理"""
+    CANONICAL_SIGNAL_PAYLOAD_VERSION = "v10.5.4"
     
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -202,6 +204,21 @@ class SignalEngine:
                 existing_meta.update(
                     self._extract_watchtower_dimension_fields(signal_dims)
                 )
+                existing_meta["signal_payload"] = self._build_canonical_signal_payload(
+                    signal_dims=signal_dims,
+                    signal_strength=new_signal_strength,
+                    confidence=min(new_signal_strength / 100.0, 1.0),
+                    direction=strategy_run.direction or "LONG",
+                    signal_type=(
+                        existing_signal.signal_type.value
+                        if getattr(existing_signal, "signal_type", None)
+                        else "ENTRY"
+                    ),
+                    quantity_mode="PCT_EQUITY",
+                    quantity_value=float(existing_signal.suggested_quantity or 0.0),
+                    suggested_quantity=float(existing_signal.suggested_quantity or 0.0),
+                    strategy_run=strategy_run,
+                )
                 # P0.2: signal regenerated with higher strength — reset watchtower so it
                 # goes through the full quality funnel again rather than carrying stale
                 # REJECTED / PASSED state from a previous evaluation cycle.
@@ -256,6 +273,19 @@ class SignalEngine:
         }
         signal_extra_metadata.update(
             self._extract_watchtower_dimension_fields(signal_dims)
+        )
+        signal_extra_metadata["signal_payload"] = self._build_canonical_signal_payload(
+            signal_dims=signal_dims,
+            signal_strength=new_signal_strength,
+            confidence=min(new_signal_strength / 100.0, 1.0),
+            direction=signal_direction,
+            signal_type=(
+                signal_type.value if hasattr(signal_type, "value") else str(signal_type)
+            ),
+            quantity_mode="PCT_EQUITY",
+            quantity_value=float(suggested_qty),
+            suggested_quantity=float(suggested_qty),
+            strategy_run=strategy_run,
         )
 
         # ✨ 创建新信号
@@ -324,6 +354,70 @@ class SignalEngine:
         return value if isinstance(value, dict) else {}
 
     @classmethod
+    def _build_canonical_signal_payload(
+        cls,
+        *,
+        signal_dims: Dict[str, Any],
+        signal_strength: float,
+        confidence: float,
+        direction: str,
+        signal_type: str,
+        quantity_mode: str,
+        quantity_value: float,
+        suggested_quantity: float,
+        strategy_run: Optional[StrategyRun] = None,
+    ) -> Dict[str, Any]:
+        """V10.5.4 canonical signal payload。"""
+        origin_mode = str(signal_dims.get("signal_origin_mode") or "REAL").upper()
+        dimensions = cls._extract_watchtower_dimension_fields(signal_dims)
+        return {
+            "version": cls.CANONICAL_SIGNAL_PAYLOAD_VERSION,
+            "origin_mode": origin_mode,
+            "source": "STRATEGY",
+            "strategy_context": {
+                "strategy_id": getattr(strategy_run, "strategy_id", None),
+                "strategy_run_id": getattr(strategy_run, "id", None),
+                "strategy_name": (
+                    strategy_run.strategy.name
+                    if strategy_run and getattr(strategy_run, "strategy", None)
+                    else None
+                ),
+                "strategy_version": getattr(strategy_run, "strategy_version", None),
+                "run_universe": getattr(strategy_run, "target_universe", None),
+            },
+            "dimensions": {
+                **dimensions,
+                "technical_score": signal_dims.get("technical_score", 70.0),
+                "fundamental_score": signal_dims.get("fundamental_score", 70.0),
+                "macro_score": signal_dims.get("macro_score", 70.0),
+                "options_score": signal_dims.get("options_score", 70.0),
+                "sentiment_score": signal_dims.get(
+                    "sentiment_score",
+                    signal_dims.get("sentiment", 70.0),
+                ),
+                "momentum_score": signal_dims.get(
+                    "momentum_score",
+                    signal_dims.get("momentum", signal_dims.get("technical_score", 70.0)),
+                ),
+            },
+            "quality_inputs": {
+                "signal_strength": float(signal_strength),
+                "confidence": float(confidence),
+                "expected_return": signal_dims.get("expected_return", 0.05),
+                "risk_score": signal_dims.get("risk_score", 50.0),
+                "historical_ic": signal_dims.get("historical_ic"),
+                "timing_quality": signal_dims.get("timing_quality"),
+            },
+            "execution_hints": {
+                "direction": direction,
+                "signal_type": signal_type,
+                "quantity_mode": quantity_mode,
+                "quantity_value": quantity_value,
+                "suggested_quantity": suggested_quantity,
+            },
+        }
+
+    @classmethod
     def _extract_watchtower_dimension_fields(
         cls,
         signal_dims: Dict[str, Any],
@@ -383,6 +477,9 @@ class SignalEngine:
 
         extra = self._safe_dict(signal.extra_metadata)
         factor_scores = self._safe_dict(signal.factor_scores)
+        signal_payload = self._safe_dict(extra.get("signal_payload"))
+        payload_dims = self._safe_dict(signal_payload.get("dimensions"))
+        payload_quality = self._safe_dict(signal_payload.get("quality_inputs"))
         current_regime = await RegimeClassifier.get_current_regime(self.session)
         regime = (
             getattr(current_regime, "regime", None)
@@ -391,9 +488,24 @@ class SignalEngine:
         )
         confidence = float(signal.confidence or 0.0)
         composite_ratio = confidence / 100.0 if confidence > 1.0 else confidence
-        aligned_dims = extra.get("aligned_dims") or factor_scores.get("aligned_dims") or []
-        opposing_dims = extra.get("opposing_dims") or factor_scores.get("opposing_dims") or []
-        neutral_dims = extra.get("neutral_dims") or factor_scores.get("neutral_dims") or []
+        aligned_dims = (
+            payload_dims.get("aligned_dims")
+            or extra.get("aligned_dims")
+            or factor_scores.get("aligned_dims")
+            or []
+        )
+        opposing_dims = (
+            payload_dims.get("opposing_dims")
+            or extra.get("opposing_dims")
+            or factor_scores.get("opposing_dims")
+            or []
+        )
+        neutral_dims = (
+            payload_dims.get("neutral_dims")
+            or extra.get("neutral_dims")
+            or factor_scores.get("neutral_dims")
+            or []
+        )
 
         funnel_input = SignalFunnelInput(
             signal_id=getattr(signal, "id", None),
@@ -408,21 +520,27 @@ class SignalEngine:
             signal_strength=float(signal.signal_strength or 0.0),
             composite_score=composite_ratio,
             aligned_count=int(
-                extra.get("aligned_count")
+                payload_dims.get("aligned_count")
+                or payload_quality.get("aligned_count")
+                or extra.get("aligned_count")
                 or factor_scores.get("aligned_count")
                 or 0
             ),
             aligned_dims=list(aligned_dims or []),
             opposing_dims=list(opposing_dims or []),
             neutral_dims=list(neutral_dims or []),
-            adv_usd=extra.get("adv_usd") or factor_scores.get("adv_usd"),
-            market_cap=extra.get("market_cap") or factor_scores.get("market_cap"),
+            adv_usd=payload_dims.get("adv_usd") or extra.get("adv_usd") or factor_scores.get("adv_usd"),
+            market_cap=payload_dims.get("market_cap") or extra.get("market_cap") or factor_scores.get("market_cap"),
             historical_ic=(
-                extra.get("historical_ic")
+                payload_quality.get("historical_ic")
+                or payload_dims.get("historical_ic")
+                or extra.get("historical_ic")
                 or factor_scores.get("historical_ic")
             ),
             timing_quality=(
-                extra.get("timing_quality")
+                payload_quality.get("timing_quality")
+                or payload_dims.get("timing_quality")
+                or extra.get("timing_quality")
                 or factor_scores.get("timing_quality")
             ),
         )
@@ -471,19 +589,18 @@ class SignalEngine:
         to_status: str,
         reason: str | None = None,
     ) -> None:
-        """P1.1: 追加一条状态流转记录到 extra_metadata["status_history"]（保留最近 20 条）。"""
-        history: list = meta.get("status_history", [])
-        if not isinstance(history, list):
-            history = []
-        history.append(
-            {
-                "from": from_status,
-                "to": to_status,
-                "at": datetime.utcnow().isoformat(),
-                "reason": reason,
-            }
+        """P1.1/V10.5.4: 写兼容 status_history + 原生 signal_transitions。"""
+        updated = signal_transition_service.append_transition(
+            meta,
+            from_status=from_status,
+            to_status=to_status,
+            actor="SIGNAL_ENGINE",
+            stage="SIGNAL_VALIDATION",
+            reason_code=reason,
+            reason_detail=reason,
         )
-        meta["status_history"] = history[-20:]
+        meta.clear()
+        meta.update(updated)
     
     async def validate_signal(self, signal_id: str) -> bool:
         """

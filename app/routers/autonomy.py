@@ -1,6 +1,6 @@
 """V10: AI 自主控制路由"""
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import Any, Optional
 import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException, Path
@@ -118,8 +118,14 @@ def _get_order_status(order) -> str:
 
 def _build_signal_quality_snapshot(signal: TradingSignal) -> dict[str, object]:
     signal_type = signal.signal_type.value if signal.signal_type else "ENTRY"
-    extra_meta = signal.extra_metadata if isinstance(signal.extra_metadata, dict) else {}
-    factor_scores = signal.factor_scores if isinstance(signal.factor_scores, dict) else {}
+    extra_meta: dict[str, Any] = signal.extra_metadata if isinstance(signal.extra_metadata, dict) else {}
+    factor_scores: dict[str, Any] = signal.factor_scores if isinstance(signal.factor_scores, dict) else {}
+    _raw_signal_payload = extra_meta.get("signal_payload")
+    signal_payload: dict[str, Any] = _raw_signal_payload if isinstance(_raw_signal_payload, dict) else {}
+    _raw_payload_dims = signal_payload.get("dimensions")
+    payload_dims: dict[str, Any] = _raw_payload_dims if isinstance(_raw_payload_dims, dict) else {}
+    _raw_payload_quality = signal_payload.get("quality_inputs")
+    payload_quality: dict[str, Any] = _raw_payload_quality if isinstance(_raw_payload_quality, dict) else {}
     if signal_type in ("EXIT", "REDUCE") or bool(extra_meta.get("force_exit")):
         return {
             "signal_quality_tier": None,
@@ -127,7 +133,20 @@ def _build_signal_quality_snapshot(signal: TradingSignal) -> dict[str, object]:
             "signal_quality_quota_exempt": False,
         }
 
-    dimensions = extra_meta.get("dimensions") or factor_scores.get("dimensions") or []
+    def _as_list(value: Any) -> list[Any]:
+        return list(value) if isinstance(value, list) else []
+
+    def _as_float(value: Any) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    dimensions = _as_list(
+        payload_dims.get("dimensions") or extra_meta.get("dimensions") or factor_scores.get("dimensions") or []
+    )
 
     def _dim_dir(name: str) -> int:
         for item in dimensions:
@@ -147,6 +166,8 @@ def _build_signal_quality_snapshot(signal: TradingSignal) -> dict[str, object]:
                     score = 0.5
                 return score / 100.0 if score > 1.0 else score
         raw = extra_meta.get(f"{name}_score")
+        if raw is None:
+            raw = payload_dims.get(f"{name}_score")
         if raw is None:
             raw = factor_scores.get(f"{name}_score")
         if raw is None:
@@ -168,18 +189,18 @@ def _build_signal_quality_snapshot(signal: TradingSignal) -> dict[str, object]:
             direction=str(signal.direction or "LONG").upper(),
             regime=str(extra_meta.get("regime") or "SIDEWAYS"),
             composite_score=float(signal.confidence or 0.0),
-            aligned_count=int(extra_meta.get("aligned_count") or factor_scores.get("aligned_count") or 0),
-            aligned_dims=list(extra_meta.get("aligned_dims") or factor_scores.get("aligned_dims") or []),
-            opposing_dims=list(extra_meta.get("opposing_dims") or factor_scores.get("opposing_dims") or []),
-            neutral_dims=list(extra_meta.get("neutral_dims") or factor_scores.get("neutral_dims") or []),
+            aligned_count=int(payload_dims.get("aligned_count") or payload_quality.get("aligned_count") or extra_meta.get("aligned_count") or factor_scores.get("aligned_count") or 0),
+            aligned_dims=_as_list(payload_dims.get("aligned_dims") or extra_meta.get("aligned_dims") or factor_scores.get("aligned_dims") or []),
+            opposing_dims=_as_list(payload_dims.get("opposing_dims") or extra_meta.get("opposing_dims") or factor_scores.get("opposing_dims") or []),
+            neutral_dims=_as_list(payload_dims.get("neutral_dims") or extra_meta.get("neutral_dims") or factor_scores.get("neutral_dims") or []),
             tech_direction=_dim_dir("technical"),
             fundamental_direction=_dim_dir("fundamental"),
             macro_score=_dim_score("macro"),
             options_score=_dim_score("options"),
-            adv_usd=extra_meta.get("adv_usd") or factor_scores.get("adv_usd"),
-            market_cap=extra_meta.get("market_cap") or factor_scores.get("market_cap"),
-            historical_ic=extra_meta.get("historical_ic") or factor_scores.get("historical_ic"),
-            timing_quality=extra_meta.get("timing_quality") or factor_scores.get("timing_quality"),
+            adv_usd=_as_float(payload_dims.get("adv_usd") or extra_meta.get("adv_usd") or factor_scores.get("adv_usd")),
+            market_cap=_as_float(payload_dims.get("market_cap") or extra_meta.get("market_cap") or factor_scores.get("market_cap")),
+            historical_ic=_as_float(payload_quality.get("historical_ic") or payload_dims.get("historical_ic") or extra_meta.get("historical_ic") or factor_scores.get("historical_ic")),
+            timing_quality=_as_float(payload_quality.get("timing_quality") or payload_dims.get("timing_quality") or extra_meta.get("timing_quality") or factor_scores.get("timing_quality")),
         )
     )
     return {

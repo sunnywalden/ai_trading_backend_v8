@@ -288,6 +288,17 @@ async def execute_signals_batch(
         "removed in V10.6. Use POST /run-cycle for production execution.",
         current_user.get("sub", "unknown"),
     )
+    if (
+        getattr(settings, "AUTONOMOUS_CONTROL_PLANE_V1054_ENABLED", False)
+        and not request.dry_run
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "V10.5.4 control plane enabled: POST /execute-signals only supports dry_run. "
+                "Use POST /run-cycle for real autonomous execution."
+            ),
+        )
     if not account_id:
         account_id = settings.TIGER_ACCOUNT
     

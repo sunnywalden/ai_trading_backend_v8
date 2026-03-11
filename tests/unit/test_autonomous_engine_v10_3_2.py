@@ -10,7 +10,7 @@ from sqlalchemy.orm import configure_mappers
 
 from app.models.execution_intent import AutonomousExecutionIntent
 from app.models.strategy import Strategy, StrategyRun  # noqa: F401
-from app.models.trading_signal import TradingSignal  # noqa: F401
+from app.models.trading_signal import SignalSource, SignalStatus, SignalType, TradingSignal
 from app.services.autonomous_engine import AutonomousEngine
 
 configure_mappers()
@@ -153,3 +153,120 @@ async def test_execute_order_uses_hard_control_payload(monkeypatch):
     assert captured["payload"]["order_type"] == "LMT"
     assert isclose(captured["payload"]["limit_price"], 123.45, rel_tol=1e-9)
     assert captured["payload"]["execution_control_mode"] == "HARD_CONTROL"
+
+
+def test_build_signal_funnel_input_prefers_canonical_signal_payload():
+    ae = AutonomousEngine()
+    signal = {
+        "id": 1,
+        "symbol": "AAPL",
+        "signal_type": "ENTRY",
+        "direction": "LONG",
+        "signal_strength": 88.0,
+        "confidence": 0.88,
+        "extra_metadata": {
+            "signal_payload": {
+                "version": "v10.5.4",
+                "origin_mode": "REAL",
+                "dimensions": {
+                    "aligned_count": 6,
+                    "aligned_dims": ["technical", "fundamental", "macro", "options", "flow", "sentiment"],
+                    "opposing_dims": [],
+                    "neutral_dims": [],
+                    "adv_usd": 12_000_000,
+                    "market_cap": 5_000_000_000,
+                    "dimensions": [
+                        {"name": "technical", "direction": 1, "score": 95},
+                        {"name": "fundamental", "direction": 1, "score": 90},
+                        {"name": "macro", "direction": 1, "score": 88},
+                        {"name": "options", "direction": 1, "score": 86},
+                    ],
+                    "macro_score": 88,
+                    "options_score": 86,
+                },
+                "quality_inputs": {
+                    "historical_ic": 0.13,
+                    "timing_quality": 0.81,
+                },
+            },
+            "aligned_count": 1,
+            "aligned_dims": ["legacy"],
+        },
+        "factor_scores": {"aligned_count": 2, "aligned_dims": ["older"]},
+    }
+
+    funnel_input = ae._build_signal_funnel_input(signal, "BULL_TREND")
+
+    assert funnel_input.aligned_count == 6
+    assert funnel_input.aligned_dims == ["technical", "fundamental", "macro", "options", "flow", "sentiment"]
+    assert funnel_input.historical_ic == pytest.approx(0.13)
+    assert funnel_input.timing_quality == pytest.approx(0.81)
+
+
+@pytest.mark.asyncio
+async def test_fetch_pending_signals_skips_synthetic_non_closing():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", future=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Strategy.__table__.create)
+        await conn.run_sync(StrategyRun.__table__.create)
+        await conn.run_sync(TradingSignal.__table__.create)
+
+    ae = AutonomousEngine()
+
+    async with session_factory() as session:
+        session.add_all(
+            [
+                TradingSignal(
+                    signal_id="sig-real-1",
+                    signal_type=SignalType.ENTRY,
+                    signal_source=SignalSource.STRATEGY,
+                    signal_origin_mode="REAL",
+                    status=SignalStatus.VALIDATED,
+                    symbol="AAPL",
+                    direction="LONG",
+                    signal_strength=90.0,
+                    confidence=0.9,
+                    account_id="acc-1",
+                    user_id="u-1",
+                    extra_metadata={
+                        "signal_payload": {
+                            "version": "v10.5.4",
+                            "origin_mode": "REAL",
+                            "dimensions": {"aligned_count": 4, "aligned_dims": ["technical"]},
+                        }
+                    },
+                    priority=90,
+                ),
+                TradingSignal(
+                    signal_id="sig-syn-1",
+                    signal_type=SignalType.ENTRY,
+                    signal_source=SignalSource.STRATEGY,
+                    signal_origin_mode="SYNTHETIC",
+                    status=SignalStatus.VALIDATED,
+                    symbol="MSFT",
+                    direction="LONG",
+                    signal_strength=95.0,
+                    confidence=0.95,
+                    account_id="acc-1",
+                    user_id="u-1",
+                    extra_metadata={
+                        "signal_payload": {
+                            "version": "v10.5.4",
+                            "origin_mode": "SYNTHETIC",
+                            "dimensions": {"aligned_count": 6, "aligned_dims": ["technical", "macro"]},
+                        }
+                    },
+                    priority=95,
+                ),
+            ]
+        )
+        await session.commit()
+
+        pending = await ae._fetch_pending_signals("acc-1", session)
+
+    await engine.dispose()
+
+    assert [row["signal_id"] for row in pending] == ["sig-real-1"]
+    assert pending[0]["signal_origin_mode"] == "REAL"
