@@ -55,6 +55,7 @@ python scripts/migrations/version_manager.py --record v3.1.1 \
 
 | 版本 | 发布日期 | 主要变更 | 脚本 |
 |------|---------|---------|------|
+| v10.5.4 | 2026-03 | Signal Pipeline Integrity + auto_scan_enabled / auto_scan_priority 自动扫描治理字段与索引 | upgrade_to_v10_5_4.py |
 | v10.5.3 | 2026-03 | 新增 execution_policy_profiles 执行策略长期反馈画像 | upgrade_to_v10_5_3.py |
 | v10.5.2 | 2026-03 | 新增 capacity_decision_logs 席位竞争仲裁审计日志 | upgrade_to_v10_5_2.py |
 | v10.5.1 | 2026-03 | 新增研究/执行/治理 10 张机构级表 | upgrade_to_v10_5_1.py |
@@ -236,7 +237,9 @@ A: 是的，v3.1.1 新增的通知记录和性能数据会丢失
 4. 更新本 README
 5. 更新 `docs/DATABASE_MIGRATIONS.md`
 
-### V10.5.3 附加脚本
+### V10.5.4 / V10.5.3 附加脚本
+
+- `upgrade_to_v10_5_4.py`：除 `signal_origin_mode` 外，也负责补齐策略自动扫描治理字段（`auto_scan_enabled` / `auto_scan_priority`）及索引，保持当前平台版本仍为 `v10.5.4`。
 
 - `backfill_execution_policy_profiles.py`：从历史 `execution_quality_log + autonomous_execution_intent` 全量重建执行画像。
 - `../maintenance/repair_execution_policy_profiles.py`：校验并修复 stale / orphan / missing / duplicate 画像记录。

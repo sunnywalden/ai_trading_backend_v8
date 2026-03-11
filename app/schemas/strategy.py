@@ -13,6 +13,8 @@ class StrategySummaryView(BaseModel):
     description: Optional[str] = None
     is_builtin: bool
     is_active: bool
+    auto_scan_enabled: bool = True
+    auto_scan_priority: int = 100
     tags: List[str] = Field(default_factory=list)
     last_run_status: Optional[str] = None
     last_run_at: Optional[datetime] = None
@@ -45,10 +47,17 @@ class StrategyCreateRequest(BaseModel):
     tags: List[str] = Field(default_factory=list)
     is_builtin: bool = Field(False)
     is_active: bool = Field(True)
+    auto_scan_enabled: bool = Field(True)
+    auto_scan_priority: int = Field(100, ge=0, le=1000)
 
 
 class StrategyUpdateParamsRequest(BaseModel):
     default_params: Dict[str, Any]
+
+
+class StrategyAutoScanConfigRequest(BaseModel):
+    auto_scan_enabled: bool
+    auto_scan_priority: int = Field(100, ge=0, le=1000)
 
 
 class StrategyRunRequest(BaseModel):
