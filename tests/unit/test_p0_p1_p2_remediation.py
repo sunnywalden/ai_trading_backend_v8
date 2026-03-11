@@ -21,6 +21,7 @@ from app.engine.signal_engine import SignalEngine
 from app.jobs.strategy_jobs import _sample_assets
 from app.services.risk_gate_service import RiskGateService
 from app.services.signal_audit_log_service import SignalAuditLogService
+from app.services.signal_transition_service import signal_transition_service
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -114,6 +115,11 @@ async def test_new_signal_gets_real_origin_mode_by_default():
     assert created_signal.signal_origin_mode == "REAL", (
         f"Expected 'REAL', got {created_signal.signal_origin_mode!r}"
     )
+    payload = created_signal.extra_metadata.get("signal_payload")
+    assert isinstance(payload, dict)
+    assert payload["version"] == "v10.5.4"
+    assert payload["origin_mode"] == "REAL"
+    assert payload["execution_hints"]["direction"] == "LONG"
 
 
 @pytest.mark.asyncio
@@ -155,6 +161,9 @@ async def test_new_signal_inherits_synthetic_origin_mode():
 
     created_signal = session.add.call_args[0][0]
     assert created_signal.signal_origin_mode == "SYNTHETIC"
+    payload = created_signal.extra_metadata.get("signal_payload")
+    assert isinstance(payload, dict)
+    assert payload["origin_mode"] == "SYNTHETIC"
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -227,6 +236,7 @@ async def test_signal_update_resets_watchtower_to_pending():
         "watchtower_stage should be reset to SIGNAL_GENERATION after signal update"
     )
     assert existing_signal.extra_metadata.get("watchtower_reason_code") is None
+    assert existing_signal.extra_metadata["signal_payload"]["version"] == "v10.5.4"
 
 
 @pytest.mark.asyncio
@@ -282,6 +292,7 @@ async def test_signal_update_propagates_synthetic_origin():
     result = await SignalEngine._create_signal_from_asset(engine, cast(Any, strategy_run), cast(Any, asset))
     assert result is existing_signal
     assert existing_signal.signal_origin_mode == "SYNTHETIC"
+    assert existing_signal.extra_metadata["signal_payload"]["origin_mode"] == "SYNTHETIC"
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -299,6 +310,9 @@ def test_record_transition_appends_to_status_history():
     assert entry["to"] == "VALIDATED"
     assert entry["reason"] == "ALL_CHECKS_PASSED"
     assert "at" in entry
+    assert "signal_transitions" in meta
+    assert meta["signal_transitions"][0]["actor"] == "SIGNAL_ENGINE"
+    assert meta["signal_transitions"][0]["result_source"] == "NATIVE_TRANSITION_LOG"
 
 
 def test_record_transition_preserves_existing_history():
@@ -326,6 +340,26 @@ def test_record_transition_handles_corrupt_history():
     SignalEngine._record_transition(meta, from_status="GENERATED", to_status="EXPIRED")
     assert isinstance(meta["status_history"], list)
     assert meta["status_history"][-1]["to"] == "EXPIRED"
+
+
+def test_signal_transition_service_latest_transition_reads_native_log():
+    meta = signal_transition_service.append_transition(
+        {},
+        from_status="VALIDATED",
+        to_status="QUEUED",
+        actor="AUTONOMOUS_ENGINE",
+        stage="CONTROL_PLANE",
+        reason_code="STATUS_QUEUED",
+        correlation_id="cycle-001",
+    )
+
+    latest = signal_transition_service.latest_transition(meta)
+
+    assert latest is not None
+    assert latest["from_status"] == "VALIDATED"
+    assert latest["to_status"] == "QUEUED"
+    assert latest["actor"] == "AUTONOMOUS_ENGINE"
+    assert latest["correlation_id"] == "cycle-001"
 
 
 # ───────────────────────────────────────────────────────────────────────────
@@ -420,6 +454,59 @@ def test_fallback_audit_uses_reconstructed_source():
     )
 
 
+def test_fallback_audit_prefers_native_transition_source_when_present():
+    svc = SignalAuditLogService()
+
+    fake_signal = SimpleNamespace(
+        id=101,
+        signal_id="sig-native-001",
+        symbol="NVDA",
+        status="QUEUED",
+        signal_strength=91.0,
+        confidence=0.91,
+        signal_type="ENTRY",
+        signal_source="STRATEGY",
+        direction="LONG",
+        account_id="acc-1",
+        strategy_id="strat-1",
+        strategy_run_id="run-1",
+        priority=91,
+        created_at=None,
+        updated_at=None,
+        generated_at=None,
+        validated_at=None,
+        expired_at=None,
+        executed_at=None,
+        risk_check_passed="YES",
+        risk_check_details=None,
+        validation_errors=None,
+        factor_scores=None,
+        notes=None,
+        tags=None,
+        extra_metadata={
+            "signal_transitions": [
+                {
+                    "from_status": "VALIDATED",
+                    "to_status": "QUEUED",
+                    "at": "2026-03-11T00:00:00",
+                    "actor": "AUTONOMOUS_ENGINE",
+                    "stage": "CONTROL_PLANE",
+                    "reason_code": "STATUS_QUEUED",
+                    "reason_detail": "Signal reserved for autonomous cycle",
+                    "correlation_id": "cycle-42",
+                    "result_source": "NATIVE_TRANSITION_LOG",
+                }
+            ]
+        },
+    )
+
+    result = svc._fallback_signal_to_dict(fake_signal, regime="BULL_TREND")
+
+    assert result["result_source"] == "NATIVE_TRANSITION_LOG"
+    assert result["decision_stage"] == "CONTROL_PLANE"
+    assert result["rejection_reason"] == "STATUS_QUEUED"
+
+
 def test_native_audit_log_row_uses_signal_quality_audit_log_source():
     """P2: _row_to_dict (native audit log path) 应保持 result_source='SIGNAL_QUALITY_AUDIT_LOG'。"""
     from app.services.signal_audit_log_service import SignalAuditLogService
@@ -440,15 +527,22 @@ def test_native_audit_log_row_uses_signal_quality_audit_log_source():
         quality_tier="GOOD",
         quota_exempt=False,
         anti_resonance_triggered=False,
+        rejected_at_layer=None,
         rejection_layer=None,
         rejection_reason=None,
+        rejection_detail=None,
         rejection_reason_detail=None,
         rejection_reason_category=None,
+        conviction_score=None,
         composite_score=72.0,
+        resonance_bonus=None,
+        regime_alignment=None,
+        calibrated_lower_bound=None,
         aligned_count=3,
         aligned_dims=["technical", "macro", "options"],
         opposing_dims=[],
         neutral_dims=["fundamental", "flow", "sentiment"],
+        signal_direction="LONG",
         tech_direction=1,
         fundamental_direction=None,
         historical_ic=0.05,
@@ -459,6 +553,10 @@ def test_native_audit_log_row_uses_signal_quality_audit_log_source():
         signal_source="STRATEGY",
         direction="LONG",
         priority=82,
+        concurrent_positions=None,
+        daily_signals_used=None,
+        generated_at=None,
+        evaluated_at=None,
         created_at=datetime.datetime(2024, 1, 1),
         extra_metadata={},
     )

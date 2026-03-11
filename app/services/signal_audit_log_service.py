@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.signal_quality_audit_log import (FunnelResult,
                                                  SignalQualityAuditLog)
 from app.services.signal_conviction_scorer import ConvictionComponents
+from app.services.signal_transition_service import signal_transition_service
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,7 @@ class SignalAuditLogService:
             else {}
         )
         status = str(getattr(getattr(signal, "status", None), "value", getattr(signal, "status", "")))
+        latest_transition = signal_transition_service.latest_transition(extra)
         watchtower_result = extra.get("watchtower_result")
         if watchtower_result in {"PASSED", "REJECTED"}:
             return {
@@ -85,6 +87,27 @@ class SignalAuditLogService:
                     else extra.get("funnel_rejected_at_layer")
                 ),
                 "reason_category": extra.get("watchtower_reason_category"),
+                "regime": extra.get("watchtower_regime") or extra.get("regime"),
+            }
+
+        if latest_transition:
+            to_status = str(latest_transition.get("to_status") or "")
+            reason_code = latest_transition.get("reason_code")
+            reason_detail = latest_transition.get("reason_detail")
+            stage = latest_transition.get("stage")
+            if to_status in {"REJECTED", "EXPIRED", "FAILED"}:
+                result = "REJECTED"
+            elif to_status in {"VALIDATED", "QUEUED", "EXECUTING", "EXECUTED", "SKIPPED", "CANCELLED"}:
+                result = "PASSED"
+            else:
+                result = "PASSED" if status in SignalAuditLogService._FALLBACK_PASS_STATUSES else "REJECTED"
+            return {
+                "result": result,
+                "stage": stage,
+                "reason_code": reason_code,
+                "reason_detail": reason_detail,
+                "rejected_at_layer": extra.get("watchtower_rejected_at_layer") or extra.get("funnel_rejected_at_layer"),
+                "reason_category": stage,
                 "regime": extra.get("watchtower_regime") or extra.get("regime"),
             }
 
@@ -265,6 +288,7 @@ class SignalAuditLogService:
         extra = signal.extra_metadata if isinstance(signal.extra_metadata, dict) else {}
         factor = signal.factor_scores if isinstance(signal.factor_scores, dict) else {}
         watchtower = self._derive_watchtower_state(signal)
+        latest_transition = signal_transition_service.latest_transition(extra)
         lists = self._normalize_signal_lists({
             "aligned_dims": extra.get("aligned_dims") or factor.get("aligned_dims"),
             "opposing_dims": extra.get("opposing_dims") or factor.get("opposing_dims"),
@@ -280,7 +304,7 @@ class SignalAuditLogService:
             "funnel_result": watchtower["result"],
             "decision_stage": watchtower["stage"],
             "reason_category": watchtower["reason_category"],
-            "result_source": "RECONSTRUCTED",
+            "result_source": "NATIVE_TRANSITION_LOG" if latest_transition else "RECONSTRUCTED",
             "rejected_at_layer": watchtower["rejected_at_layer"],
             "rejection_reason": watchtower["reason_code"],
             "rejection_detail": (
