@@ -33,25 +33,21 @@ async def _run_opportunity_scan(
     account_id: str,
     params: dict[str, Any],
 ) -> None:
-    from app.jobs.strategy_jobs import (AUTO_UNIVERSE_KEY,
-                                        execute_strategy_run_job)
-    from app.services.strategy_auto_selection_service import \
-        StrategyAutoSelectionService
+    from app.jobs.strategy_jobs import AUTO_UNIVERSE_KEY, execute_strategy_run_job
+    from app.services.strategy_auto_selection_service import (
+        StrategyAutoSelectionService,
+    )
     from app.services.strategy_service import StrategyRunService
 
     strategy_limit = StrategyAutoSelectionService.resolve_scan_limit(
         params.get("strategy_limit")
     )
-    strategies = (
-        await StrategyAutoSelectionService.select_auto_scan_strategies(
-            session,
-            limit=strategy_limit,
-        )
+    strategies = await StrategyAutoSelectionService.select_auto_scan_strategies(
+        session,
+        limit=strategy_limit,
     )
     if not strategies:
-        logger.warning(
-            "[TaskConfig] Opportunity scan skipped: no active strategy"
-        )
+        logger.warning("[TaskConfig] Opportunity scan skipped: no active strategy")
         return
 
     run_svc = StrategyRunService(session)
@@ -189,13 +185,11 @@ async def execute_configured_task(config_id: int, account_id: str):
             params = config.params or {}
 
             if config.task_type == TaskType.POSITION_EVAL.value:
-                from app.schemas.position_eval import (EvalScope,
-                                                       TriggerEvalTaskRequest)
-                from app.services.position_eval_service import \
-                    PositionEvalService
-                
+                from app.schemas.position_eval import EvalScope, TriggerEvalTaskRequest
+                from app.services.position_eval_service import PositionEvalService
+
                 svc = PositionEvalService(session)
-                
+
                 # 构建触发请求
                 scope_str = params.get("scope", "ALL_POSITIONS")
                 try:
@@ -208,15 +202,15 @@ async def execute_configured_task(config_id: int, account_id: str):
                     scope=scope,
                     symbols=params.get("symbols"),
                     eval_dimensions=params.get("eval_dimensions", ["composite"]),
-                    extra_params=params.get("extra_params")
+                    extra_params=params.get("extra_params"),
                 )
-                
+
                 # 创建任务（标记为 scheduler 触发）
                 task = await svc.trigger_task(account_id, req)
                 # 修改触发方式为 scheduler
                 task.triggered_by = "scheduler"
                 await session.commit()
-                
+
                 # 立即执行
                 logger.info(
                     "[TaskConfig] Running PositionEvalTask %s in background",
@@ -238,7 +232,7 @@ async def execute_configured_task(config_id: int, account_id: str):
                     "[TaskConfig] Unsupported task type: %s",
                     config.task_type,
                 )
-            
+
             logger.info(
                 "[TaskConfig] Task %s execution triggered successfully",
                 config.name,
@@ -258,71 +252,78 @@ async def sync_task_configs_job():
     配置同步任务：扫描数据库中所有已启用的 TaskTriggerConfig，并同步到 APScheduler。
     """
     from app.jobs.scheduler import add_job, get_scheduler, remove_job
-    
+
     logger.info("[TaskConfig] Starting task configurations sync")
-    
+
     async with SessionLocal() as session:
         try:
             stmt = select(TaskTriggerConfig).where(TaskTriggerConfig.enabled.is_(True))
             result = await session.execute(stmt)
             configs = result.scalars().all()
-            
+
             scheduler = get_scheduler()
             current_jobs = scheduler.get_jobs()
-            existing_dyn_job_ids = {job.id for job in current_jobs if job.id.startswith(JOB_PREFIX)}
-            
+            existing_dyn_job_ids = {
+                job.id for job in current_jobs if job.id.startswith(JOB_PREFIX)
+            }
+
             synced_ids = set()
-            
+
             for config in configs:
                 job_id = f"{JOB_PREFIX}{config.id}"
                 synced_ids.add(job_id)
-                
+
                 # 根据配置生成触发器
                 trigger = None
                 trigger_args = {}
-                
+
                 if config.trigger_mode == "DAILY":
                     parsed_time = _parse_daily_time(config.trigger_time or "09:00")
                     if parsed_time is not None:
                         hour, minute = parsed_time
-                        trigger = 'cron'
-                        trigger_args = {
-                            'hour': hour,
-                            'minute': minute
-                        }
+                        trigger = "cron"
+                        trigger_args = {"hour": hour, "minute": minute}
                     else:
-                        logger.warning(f"[TaskConfig] Invalid DAILY time format for config {config.id}: {config.trigger_time}")
+                        logger.warning(
+                            f"[TaskConfig] Invalid DAILY time format for config {config.id}: {config.trigger_time}"
+                        )
                         continue
                 elif config.trigger_mode == "CRON":
                     # 假设是标准 cron 表达式
                     from zoneinfo import ZoneInfo
 
                     from apscheduler.triggers.cron import CronTrigger
+
                     try:
                         # 尝试将 trigger_time (HH:MM 或 cron 表达式) 转换为触发器
                         # 如果包含空格且长度为 5，则解析为标准 crontab
                         cron_str = config.trigger_time
                         if cron_str and len(cron_str.split()) == 5:
-                            trigger = CronTrigger.from_crontab(cron_str, timezone=ZoneInfo('Asia/Shanghai'))
+                            trigger = CronTrigger.from_crontab(
+                                cron_str, timezone=ZoneInfo("Asia/Shanghai")
+                            )
                         else:
-                            parsed_time = _parse_daily_time(config.trigger_time or "09:00")
+                            parsed_time = _parse_daily_time(
+                                config.trigger_time or "09:00"
+                            )
                             if parsed_time is not None:
                                 hour, minute = parsed_time
-                                trigger = 'cron'
-                                trigger_args = {
-                                    'hour': hour,
-                                    'minute': minute
-                                }
+                                trigger = "cron"
+                                trigger_args = {"hour": hour, "minute": minute}
                             else:
                                 continue
                     except Exception as e:
-                        logger.error(f"[TaskConfig] Invalid CRON expression for config {config.id}: {e}")
+                        logger.error(
+                            f"[TaskConfig] Invalid CRON expression for config {config.id}: {e}"
+                        )
                         continue
                 elif config.trigger_mode == "MANUAL":
                     # 手动模式不进入调度
                     continue
                 else:
-                    logger.warning(f"[TaskConfig] Unsupported trigger mode for config {config.id}: {config.trigger_mode}")
+                    logger.warning(
+                        f"[TaskConfig] Unsupported trigger mode for config {config.id}: {config.trigger_mode}"
+                    )
                     continue
 
                 # 注册或更新任务
@@ -334,7 +335,7 @@ async def sync_task_configs_job():
                         name=f"Configured Task: {config.name}",
                         replace_existing=True,
                         args=[config.id, config.account_id],
-                        **trigger_args
+                        **trigger_args,
                     )
                 else:
                     # 如果是 CronTrigger 实例
@@ -344,16 +345,18 @@ async def sync_task_configs_job():
                         id=job_id,
                         name=f"Configured Task: {config.name}",
                         replace_existing=True,
-                        args=[config.id, config.account_id]
+                        args=[config.id, config.account_id],
                     )
 
             # 清理已经删除或停用的任务
             to_remove = existing_dyn_job_ids - synced_ids
             for rid in to_remove:
                 remove_job(rid)
-                
-            logger.info(f"[TaskConfig] Sync completed. {len(synced_ids)} active dynamic jobs.")
-            
+
+            logger.info(
+                f"[TaskConfig] Sync completed. {len(synced_ids)} active dynamic jobs."
+            )
+
         except Exception as e:
             logger.error(f"[TaskConfig] Sync job failed: {e}", exc_info=True)
 
@@ -367,9 +370,9 @@ def register_task_config_jobs(scheduler):
     # 每 5 分钟同步一次配置
     add_job(
         func=sync_task_configs_job,
-        trigger='interval',
-        id='sync_task_trigger_configs',
-        name='同步数据库任务配置',
+        trigger="interval",
+        id="sync_task_trigger_configs",
+        name="同步数据库任务配置",
         minutes=5,
-        next_run_time=datetime.now() # 立即执行第一次
+        next_run_time=datetime.now(),  # 立即执行第一次
     )
