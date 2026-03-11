@@ -633,7 +633,8 @@ app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
 # 配置CORS中间件
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 生产环境应该配置具体的域名
+    allow_origins=settings.CORS_ALLOW_ORIGINS,
+    allow_origin_regex=settings.CORS_ALLOW_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],  # 允许所有HTTP方法（包括OPTIONS）
     allow_headers=["*"],  # 允许所有请求头
