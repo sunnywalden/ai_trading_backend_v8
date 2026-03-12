@@ -137,6 +137,34 @@ class GrossExposureAllocator:
             ),
         }
 
+    def build_runtime_summary(
+        self,
+        *,
+        positions: dict[str, Any],
+        equity: float,
+        regime: str | None,
+    ) -> dict[str, Any]:
+        regime_targets = self.resolve_regime_targets(regime)
+        current_gross_pct, current_net_pct = self._portfolio_exposure_snapshot(
+            positions,
+            equity,
+        )
+        target_gross_pct = float(regime_targets["target_gross_exposure_pct"])
+        max_gross_pct = float(regime_targets["max_gross_exposure_pct"])
+        return {
+            **regime_targets,
+            "current_gross_exposure_pct": round(current_gross_pct, 6),
+            "current_net_exposure_pct": round(current_net_pct, 6),
+            "distance_to_target_gross_exposure_pct": round(
+                target_gross_pct - current_gross_pct,
+                6,
+            ),
+            "remaining_to_max_gross_exposure_pct": round(
+                max_gross_pct - current_gross_pct,
+                6,
+            ),
+        }
+
     def allocate_entry(
         self,
         *,
