@@ -10,6 +10,9 @@ from app.core.config import settings
 class GrossExposureAllocation:
     enabled: bool
     reason: str
+    regime: str
+    target_config_source: str
+    max_config_source: str
     current_gross_exposure_pct: float
     current_net_exposure_pct: float
     current_symbol_exposure_pct: float
@@ -84,6 +87,56 @@ class GrossExposureAllocator:
 
         return gross_notional / equity, net_notional / equity
 
+    @classmethod
+    def _parse_regime_map(cls, raw: Any) -> dict[str, float]:
+        mapping: dict[str, float] = {}
+        text = str(raw or "").strip()
+        if not text:
+            return mapping
+        for item in text.split(","):
+            item = item.strip()
+            if not item or ":" not in item:
+                continue
+            regime, value = item.split(":", 1)
+            regime = regime.strip().upper()
+            if not regime:
+                continue
+            parsed = cls._safe_float(value.strip(), float("nan"))
+            if parsed == parsed:
+                mapping[regime] = parsed
+        return mapping
+
+    def resolve_regime_targets(self, regime: str | None) -> dict[str, Any]:
+        regime_name = str(regime or "SIDEWAYS").upper()
+        base_target = max(
+            0.0,
+            self._safe_float(getattr(settings, "TARGET_GROSS_EXPOSURE_PCT", 1.5), 1.5),
+        )
+        base_max = max(
+            base_target,
+            self._safe_float(getattr(settings, "MAX_GROSS_EXPOSURE_PCT", 2.0), 2.0),
+        )
+        target_map = self._parse_regime_map(
+            getattr(settings, "GROSS_EXPOSURE_TARGET_BY_REGIME", "")
+        )
+        max_map = self._parse_regime_map(
+            getattr(settings, "MAX_GROSS_EXPOSURE_BY_REGIME", "")
+        )
+
+        target_value = target_map.get(regime_name, base_target)
+        max_value = max(max_map.get(regime_name, base_max), target_value)
+        return {
+            "regime": regime_name,
+            "target_gross_exposure_pct": target_value,
+            "max_gross_exposure_pct": max_value,
+            "target_config_source": (
+                f"regime:{regime_name}" if regime_name in target_map else "base"
+            ),
+            "max_config_source": (
+                f"regime:{regime_name}" if regime_name in max_map else "base"
+            ),
+        }
+
     def allocate_entry(
         self,
         *,
@@ -93,16 +146,15 @@ class GrossExposureAllocator:
         current_positions: dict[str, Any],
         base_position_pct: float,
         explicit_abs_qty: bool = False,
+        regime: str | None = None,
     ) -> GrossExposureAllocation:
         base_pct = max(0.0, self._safe_float(base_position_pct, 0.0))
-        target_gross_pct = max(
-            0.0,
-            self._safe_float(getattr(settings, "TARGET_GROSS_EXPOSURE_PCT", 1.5), 1.5),
-        )
-        max_gross_pct = max(
-            target_gross_pct,
-            self._safe_float(getattr(settings, "MAX_GROSS_EXPOSURE_PCT", 2.0), 2.0),
-        )
+        regime_targets = self.resolve_regime_targets(regime)
+        regime_name = str(regime_targets["regime"])
+        target_gross_pct = float(regime_targets["target_gross_exposure_pct"])
+        max_gross_pct = float(regime_targets["max_gross_exposure_pct"])
+        target_config_source = str(regime_targets["target_config_source"])
+        max_config_source = str(regime_targets["max_config_source"])
         slice_count = max(
             1,
             int(self._safe_float(getattr(settings, "GROSS_EXPOSURE_ENTRY_SLICE_COUNT", 4), 4)),
@@ -148,6 +200,9 @@ class GrossExposureAllocator:
             return GrossExposureAllocation(
                 enabled=False,
                 reason="allocator-disabled",
+                regime=regime_name,
+                target_config_source=target_config_source,
+                max_config_source=max_config_source,
                 current_gross_exposure_pct=current_gross_pct,
                 current_net_exposure_pct=current_net_pct,
                 current_symbol_exposure_pct=current_symbol_pct,
@@ -168,6 +223,9 @@ class GrossExposureAllocator:
             return GrossExposureAllocation(
                 enabled=False,
                 reason="missing-equity-or-price",
+                regime=regime_name,
+                target_config_source=target_config_source,
+                max_config_source=max_config_source,
                 current_gross_exposure_pct=current_gross_pct,
                 current_net_exposure_pct=current_net_pct,
                 current_symbol_exposure_pct=current_symbol_pct,
@@ -188,6 +246,9 @@ class GrossExposureAllocator:
             return GrossExposureAllocation(
                 enabled=True,
                 reason="no-headroom",
+                regime=regime_name,
+                target_config_source=target_config_source,
+                max_config_source=max_config_source,
                 current_gross_exposure_pct=current_gross_pct,
                 current_net_exposure_pct=current_net_pct,
                 current_symbol_exposure_pct=current_symbol_pct,
@@ -228,6 +289,9 @@ class GrossExposureAllocator:
         return GrossExposureAllocation(
             enabled=True,
             reason=reason,
+            regime=regime_name,
+            target_config_source=target_config_source,
+            max_config_source=max_config_source,
             current_gross_exposure_pct=current_gross_pct,
             current_net_exposure_pct=current_net_pct,
             current_symbol_exposure_pct=current_symbol_pct,

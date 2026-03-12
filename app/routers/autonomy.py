@@ -25,6 +25,7 @@ from app.models.strategy import HistoricalStrategyRun, Strategy, StrategyRun
 from app.models.trading_plan import TradingPlan
 from app.models.trading_signal import SignalStatus, TradingSignal
 from app.services.autonomous_engine import autonomous_engine
+from app.services.gross_exposure_allocator import gross_exposure_allocator
 from app.services.portfolio_cache_service import invalidate_portfolio_view_caches
 from app.services.signal_quality_funnel import SignalQualityTier, signal_quality_funnel
 from app.services.signal_transition_service import signal_transition_service
@@ -348,6 +349,12 @@ def _build_signal_integrity_snapshot(signal: TradingSignal) -> dict[str, object]
     }
 
 
+def _build_gross_exposure_allocator_snapshot(signal: TradingSignal) -> dict[str, object] | None:
+    extra = signal.extra_metadata if isinstance(signal.extra_metadata, dict) else {}
+    allocator = extra.get("gross_exposure_allocator")
+    return allocator if isinstance(allocator, dict) else None
+
+
 async def _count_broker_filled_today(account_id: str) -> Optional[int]:
     """统计券商侧“今日已成交”订单笔数（用于展示口径对齐）。"""
     try:
@@ -490,6 +497,9 @@ async def get_autonomy_status(
         account_id,
     )
     regime_truth = await truth_source_service.get_regime_truth_snapshot(session)
+    effective_allocator_targets = gross_exposure_allocator.resolve_regime_targets(
+        regime_truth.get("regime")
+    )
     origin_counts: dict[str, int] = {
         "REAL": 0,
         "SYNTHETIC": 0,
@@ -585,6 +595,21 @@ async def get_autonomy_status(
             "target_gross_exposure_pct": float(settings.TARGET_GROSS_EXPOSURE_PCT),
             "max_gross_exposure_pct": float(settings.MAX_GROSS_EXPOSURE_PCT),
             "entry_slice_count": int(settings.GROSS_EXPOSURE_ENTRY_SLICE_COUNT),
+            "target_by_regime": str(settings.GROSS_EXPOSURE_TARGET_BY_REGIME),
+            "max_by_regime": str(settings.MAX_GROSS_EXPOSURE_BY_REGIME),
+            "effective_regime": str(regime_truth.get("regime") or "SIDEWAYS"),
+            "effective_target_gross_exposure_pct": float(
+                effective_allocator_targets.get("target_gross_exposure_pct") or 0.0
+            ),
+            "effective_max_gross_exposure_pct": float(
+                effective_allocator_targets.get("max_gross_exposure_pct") or 0.0
+            ),
+            "effective_target_config_source": str(
+                effective_allocator_targets.get("target_config_source") or "base"
+            ),
+            "effective_max_config_source": str(
+                effective_allocator_targets.get("max_config_source") or "base"
+            ),
         },
         "rollout": _build_v1054_rollout_state(),
         "signal_integrity": {
@@ -1137,6 +1162,7 @@ async def get_signal_pipeline(
                     else None
                 )
                 or funnel_map.get(s.id, {}).get("funnel_rejection_detail"),
+                "gross_exposure_allocator": _build_gross_exposure_allocator_snapshot(s),
                 **_build_signal_integrity_snapshot(s),
                 **_build_signal_quality_snapshot(s),
             }
