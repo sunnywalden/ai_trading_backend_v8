@@ -317,11 +317,8 @@ def _build_v1054_rollout_state() -> dict[str, object]:
 
 def _build_signal_integrity_snapshot(signal: TradingSignal) -> dict[str, object]:
     extra = signal.extra_metadata if isinstance(signal.extra_metadata, dict) else {}
-    payload = (
-        extra.get("signal_payload")
-        if isinstance(extra.get("signal_payload"), dict)
-        else {}
-    )
+    _raw_payload = extra.get("signal_payload")
+    payload: dict = _raw_payload if isinstance(_raw_payload, dict) else {}
     latest_transition = signal_transition_service.latest_transition(extra)
     origin_mode = _normalize_origin_mode(
         getattr(signal, "signal_origin_mode", None)
@@ -508,7 +505,8 @@ async def get_autonomy_status(
             == SignalEngine.CANONICAL_SIGNAL_PAYLOAD_VERSION
         ):
             canonical_ready += 1
-        if int(snapshot["signal_transition_count"] or 0) > 0:
+        _tc = snapshot["signal_transition_count"]
+        if isinstance(_tc, (int, float)) and _tc > 0:
             native_transition_ready += 1
     integrity_total = len(integrity_snapshots)
 
@@ -571,7 +569,7 @@ async def get_autonomy_status(
         "signal_pipeline": pipeline,
         "failed_trades_today": failed_today,
         "positions_source": positions_truth.get("source"),
-        "positions_count_truth": int(positions_truth.get("positions_count") or 0),
+        "positions_count_truth": int(_raw_pc) if isinstance(_raw_pc := positions_truth.get("positions_count"), (int, float)) else 0,
         "audit_source": (
             "AUTONOMY_AUDIT_LOG"
             if settings.NATIVE_AUDIT_V1054_ENABLED
