@@ -235,10 +235,13 @@ class Settings(BaseSettings):
     # Paper Trading 配置
     PAPER_INITIAL_CAPITAL: float = 100000.0
     PAPER_AUTO_GRADUATE: bool = True  # 达标后是否自动建议升级 Live
+    PAPER_GRADUATION_MAX_SYMBOLS: int = 12  # 毕业评估最多回测的真实交易标的数
 
     # DataHub 数据源优先级
     DATA_HUB_PRIMARY: str = "yfinance"  # yfinance / tiger
     DATA_HUB_FALLBACK: str = "tiger"  # 主源失败时使用
+    DATA_HUB_TIGER_OHLCV_RATE_LIMIT_COOLDOWN_SECONDS: int = 300
+    DATA_HUB_TIGER_OHLCV_PERMISSION_COOLDOWN_SECONDS: int = 1800
 
     # 期权分析缓存时间（小时）
     OPTIONS_ANALYSIS_CACHE_EXPIRE_HOURS: int = 24

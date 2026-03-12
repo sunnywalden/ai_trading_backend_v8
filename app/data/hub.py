@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import date, timedelta, datetime
 from typing import Optional
 
@@ -31,11 +32,68 @@ class DataHub:
         # Tiger 账户若未开通港股行情权限，港股请求会稳定返回 permission denied。
         # 记录该状态后，后续港股请求直接走 yfinance，避免重复错误日志和无意义重试。
         self._hk_tiger_permission_denied = False
+        self._tiger_ohlcv_cooldown_until = 0.0
+        self._tiger_ohlcv_cooldown_reason = ""
 
     @staticmethod
     def _is_tiger_hk_permission_error(exc: Exception) -> bool:
         msg = str(exc).lower()
         return "permission denied" in msg and "hk market" in msg
+
+    @staticmethod
+    def _is_tiger_ohlcv_rate_limit_error(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return "rate limit error" in msg and "kline" in msg
+
+    @staticmethod
+    def _is_tiger_ohlcv_permission_error(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return "permission denied" in msg and "hk market" not in msg
+
+    def _is_tiger_ohlcv_cooling_down(self) -> bool:
+        return time.monotonic() < self._tiger_ohlcv_cooldown_until
+
+    def _set_tiger_ohlcv_cooldown(self, seconds: int, reason: str) -> None:
+        self._tiger_ohlcv_cooldown_until = time.monotonic() + max(seconds, 0)
+        self._tiger_ohlcv_cooldown_reason = reason
+
+    def _resolve_ohlcv_source(
+        self,
+        requested_source: str,
+        alternate_source: str | None = None,
+    ) -> str | None:
+        if requested_source != "tiger":
+            return requested_source
+
+        if not self._is_tiger_ohlcv_cooling_down():
+            return requested_source
+
+        if alternate_source and alternate_source != "tiger":
+            return alternate_source
+
+        return None
+
+    def _record_tiger_ohlcv_failure(self, exc: Exception, symbol: str) -> None:
+        if self._is_tiger_ohlcv_rate_limit_error(exc):
+            self._set_tiger_ohlcv_cooldown(
+                settings.DATA_HUB_TIGER_OHLCV_RATE_LIMIT_COOLDOWN_SECONDS,
+                "rate-limit",
+            )
+            logger.warning(
+                "DataHub: Tiger OHLCV rate-limited for %s, cooling down %ss and preferring yfinance",
+                symbol,
+                settings.DATA_HUB_TIGER_OHLCV_RATE_LIMIT_COOLDOWN_SECONDS,
+            )
+        elif self._is_tiger_ohlcv_permission_error(exc):
+            self._set_tiger_ohlcv_cooldown(
+                settings.DATA_HUB_TIGER_OHLCV_PERMISSION_COOLDOWN_SECONDS,
+                "permission-denied",
+            )
+            logger.warning(
+                "DataHub: Tiger OHLCV permission denied for %s, cooling down %ss and preferring yfinance",
+                symbol,
+                settings.DATA_HUB_TIGER_OHLCV_PERMISSION_COOLDOWN_SECONDS,
+            )
 
     @staticmethod
     def _normalize_hk_symbols(symbol: str) -> tuple[str, str]:
@@ -85,14 +143,41 @@ class DataHub:
                     logger.warning(f"DataHub: Tiger fail for {normalized_tiger}: {e}, trying yfinance as fallback")
                 return await self._fetch_ohlcv("yfinance", normalized_yf, start, end, interval)
 
+        primary_source = self._resolve_ohlcv_source(primary, fallback)
+        fallback_source = self._resolve_ohlcv_source(fallback, "yfinance")
+
+        if primary == "tiger" and primary_source != "tiger":
+            logger.info(
+                "DataHub: Tiger OHLCV cooling down (%s), skip Tiger for %s and use %s",
+                self._tiger_ohlcv_cooldown_reason or "cooldown",
+                symbol,
+                primary_source,
+            )
+
+        if primary_source is None:
+            raise RuntimeError(
+                f"Tiger OHLCV cooling down for {symbol} and no non-Tiger primary source is available"
+            )
+
         try:
-            return await self._fetch_ohlcv(primary, symbol, start, end, interval)
+            return await self._fetch_ohlcv(primary_source, symbol, start, end, interval)
         except Exception as e:
-            logger.warning(f"DataHub primary={primary} failed for {symbol}: {e}, trying {fallback}")
+            if primary_source == "tiger":
+                self._record_tiger_ohlcv_failure(e, symbol)
+
+            if fallback_source is None or fallback_source == primary_source:
+                logger.error(
+                    f"DataHub fallback unavailable after primary={primary_source} failed for {symbol}: {e}"
+                )
+                raise
+
+            logger.warning(
+                f"DataHub primary={primary_source} failed for {symbol}: {e}, trying {fallback_source}"
+            )
             try:
-                return await self._fetch_ohlcv(fallback, symbol, start, end, interval)
+                return await self._fetch_ohlcv(fallback_source, symbol, start, end, interval)
             except Exception as e2:
-                logger.error(f"DataHub fallback={fallback} also failed for {symbol}: {e2}")
+                logger.error(f"DataHub fallback={fallback_source} also failed for {symbol}: {e2}")
                 raise
 
     async def get_quote(self, symbol: str) -> dict:
