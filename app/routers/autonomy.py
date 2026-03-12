@@ -580,6 +580,12 @@ async def get_autonomy_status(
             "confidence": regime_truth.get("confidence"),
             "source": regime_truth.get("source"),
         },
+        "gross_exposure_allocator": {
+            "enabled": bool(settings.GROSS_EXPOSURE_ALLOCATOR_ENABLED),
+            "target_gross_exposure_pct": float(settings.TARGET_GROSS_EXPOSURE_PCT),
+            "max_gross_exposure_pct": float(settings.MAX_GROSS_EXPOSURE_PCT),
+            "entry_slice_count": int(settings.GROSS_EXPOSURE_ENTRY_SLICE_COUNT),
+        },
         "rollout": _build_v1054_rollout_state(),
         "signal_integrity": {
             "sample_size": integrity_total,
@@ -783,6 +789,11 @@ async def get_audit_log(
                     )
                 ),
                 "risk_gate_detail": r.risk_gate_detail,
+                "gross_exposure_allocator": (
+                    ((r.risk_gate_detail or {}).get("gross_exposure_allocator"))
+                    if isinstance(r.risk_gate_detail, dict)
+                    else None
+                ),
                 "circuit_breaker_triggered": bool(r.circuit_breaker_triggered),
                 "signal_quality_tier": (
                     _build_signal_quality_snapshot(signal_map[str(r.order_id)])[

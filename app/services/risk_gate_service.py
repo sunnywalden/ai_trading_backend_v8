@@ -46,6 +46,73 @@ class RiskGateService:
         intent = str(signal_intent or "OPEN").upper()
         return intent in {"REDUCE", "EXIT", "STOP_LOSS_EXIT", "TAKE_PROFIT_EXIT", "FORCE_EXIT"}
 
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _resolve_position_price(
+        self,
+        symbol: str,
+        positions: dict[str, Any],
+        reference_price: float = 0.0,
+    ) -> float:
+        pos = positions.get(symbol, {}) if isinstance(positions, dict) else {}
+        if isinstance(pos, dict):
+            for key in ("price", "current_price", "market_price", "avg_cost"):
+                value = self._safe_float(pos.get(key), 0.0)
+                if value > 0:
+                    return value
+        return self._safe_float(reference_price, 0.0)
+
+    def _build_projected_positions(
+        self,
+        *,
+        symbol: str,
+        qty: float,
+        side: str,
+        current_positions: dict[str, Any],
+        reference_price: float = 0.0,
+    ) -> dict[str, dict[str, float]]:
+        projected: dict[str, dict[str, float]] = {}
+        for sym, raw in (current_positions or {}).items():
+            if not isinstance(raw, dict):
+                continue
+            projected[sym] = {
+                "qty": self._safe_float(raw.get("qty"), 0.0),
+                "price": self._resolve_position_price(sym, current_positions, reference_price=0.0),
+            }
+
+        price = self._resolve_position_price(symbol, current_positions, reference_price)
+        if price <= 0:
+            return projected
+
+        side_upper = str(side or "").upper()
+        signed_delta = qty
+        if side_upper in {"SELL", "SHORT"}:
+            signed_delta = -qty
+
+        current = projected.get(symbol, {"qty": 0.0, "price": price})
+        current["price"] = current.get("price") or price
+        current["qty"] = self._safe_float(current.get("qty"), 0.0) + self._safe_float(
+            signed_delta,
+            0.0,
+        )
+        projected[symbol] = current
+        return projected
+
+    def _gross_exposure_pct(self, positions: dict[str, Any], equity: float) -> float:
+        if equity <= 0:
+            return 0.0
+        total_market_value = sum(
+            abs(self._safe_float(pos.get("qty"), 0.0) * self._safe_float(pos.get("price"), 0.0))
+            for pos in positions.values()
+            if isinstance(pos, dict)
+        )
+        return total_market_value / equity
+
     async def check(
         self,
         account_id: str,
@@ -57,11 +124,13 @@ class RiskGateService:
         daily_trades_today: int = 0,
         daily_realized_pnl: float = 0.0,
         signal_intent: str = "OPEN",
+        reference_price: float = 0.0,
     ) -> RiskGateResult:
         details = {}
         is_closing = self._is_closing_intent(signal_intent)
         details["signal_intent"] = str(signal_intent or "OPEN").upper()
         details["is_closing_intent"] = is_closing
+        details["reference_price"] = round(self._safe_float(reference_price, 0.0), 6)
 
         # ── 1. 熔断检查（最优先）──
         daily_loss_pct = abs(daily_realized_pnl) / current_equity if daily_realized_pnl < 0 else 0
@@ -102,15 +171,26 @@ class RiskGateService:
                 details={"daily_trades": daily_trades_today},
             )
 
+        projected_positions = self._build_projected_positions(
+            symbol=symbol,
+            qty=qty,
+            side=side,
+            current_positions=current_positions,
+            reference_price=reference_price,
+        )
+        current_gross_pct = self._gross_exposure_pct(current_positions or {}, current_equity)
+        projected_gross_pct = self._gross_exposure_pct(projected_positions, current_equity)
+        details["current_gross_exposure_pct"] = round(current_gross_pct, 4)
+        details["projected_gross_exposure_pct"] = round(projected_gross_pct, 4)
+
         # ── 3. 单标的仓位占比 ──
-        if side == "BUY":
-            # 预估下单后仓位市值
-            existing_value = 0.0
-            if symbol in current_positions:
-                pos = current_positions[symbol]
-                existing_value = pos.get("qty", 0) * pos.get("price", 0)
-            new_value = qty * (current_positions.get(symbol, {}).get("price", 1.0))
-            projected_pct = (existing_value + new_value) / current_equity if current_equity > 0 else 0
+        if not is_closing:
+            projected_symbol = projected_positions.get(symbol, {})
+            projected_pct = (
+                abs(self._safe_float(projected_symbol.get("qty"), 0.0) * self._safe_float(projected_symbol.get("price"), 0.0)) / current_equity
+                if current_equity > 0
+                else 0.0
+            )
             details["projected_position_pct"] = round(projected_pct, 4)
 
             if projected_pct > settings.MAX_SINGLE_POSITION_PCT:
@@ -122,16 +202,19 @@ class RiskGateService:
 
         # ── 4. VaR@95% 估算（简化：正态分布假设）──
         if not is_closing:
-            var_pct = self._estimate_var(current_positions, current_equity)
-            details["estimated_var_pct"] = round(var_pct, 4)
+            current_var_pct = self._estimate_var(current_positions, current_equity)
+            projected_var_pct = self._estimate_var(projected_positions, current_equity)
+            details["estimated_var_pct"] = round(projected_var_pct, 4)
+            details["current_var_pct"] = round(current_var_pct, 4)
+            details["projected_var_pct"] = round(projected_var_pct, 4)
             # V10.2-M1: 应用体制感知 VaR 倍数
             effective_var_limit = settings.MAX_VAR_PCT * self._regime_var_multiplier
             details["regime_var_multiplier"] = self._regime_var_multiplier
             details["effective_var_limit"] = round(effective_var_limit, 4)
-            if var_pct > effective_var_limit:
+            if projected_var_pct > effective_var_limit:
                 return RiskGateResult(
                     passed=False,
-                    reason=f"VaR limit: {var_pct:.1%} > {effective_var_limit:.1%} (regime={self._current_regime}, ×{self._regime_var_multiplier:.2f})",
+                    reason=f"VaR limit: {projected_var_pct:.1%} > {effective_var_limit:.1%} (regime={self._current_regime}, ×{self._regime_var_multiplier:.2f})",
                     details=details,
                 )
         else:
@@ -139,12 +222,15 @@ class RiskGateService:
 
         # ── 5. 内置压力测试（GFC 场景 -50%，检查组合损失）──
         if not is_closing:
-            stress_loss_pct = self._estimate_stress_loss(current_positions, current_equity)
-            details["stress_loss_pct"] = round(stress_loss_pct, 4)
-            if stress_loss_pct > settings.MAX_STRESS_LOSS_PCT:
+            current_stress_loss_pct = self._estimate_stress_loss(current_positions, current_equity)
+            projected_stress_loss_pct = self._estimate_stress_loss(projected_positions, current_equity)
+            details["stress_loss_pct"] = round(projected_stress_loss_pct, 4)
+            details["current_stress_loss_pct"] = round(current_stress_loss_pct, 4)
+            details["projected_stress_loss_pct"] = round(projected_stress_loss_pct, 4)
+            if projected_stress_loss_pct > settings.MAX_STRESS_LOSS_PCT:
                 return RiskGateResult(
                     passed=False,
-                    reason=f"Stress test limit: {stress_loss_pct:.1%} > {settings.MAX_STRESS_LOSS_PCT:.1%}",
+                    reason=f"Stress test limit: {projected_stress_loss_pct:.1%} > {settings.MAX_STRESS_LOSS_PCT:.1%}",
                     details=details,
                 )
         else:
@@ -217,7 +303,7 @@ class RiskGateService:
         if equity <= 0:
             return 0.0
         total_market_value = sum(
-            pos.get("qty", 0) * pos.get("price", 0) for pos in positions.values()
+            abs(pos.get("qty", 0) * pos.get("price", 0)) for pos in positions.values()
         )
         exposure_pct = total_market_value / equity
         # 日波动率假设 30%/sqrt(252) ≈ 1.89%
@@ -232,7 +318,7 @@ class RiskGateService:
         if equity <= 0:
             return 0.0
         total_market_value = sum(
-            pos.get("qty", 0) * pos.get("price", 0) for pos in positions.values()
+            abs(pos.get("qty", 0) * pos.get("price", 0)) for pos in positions.values()
         )
         stress_shock = 0.50  # GFC -50%
         return (total_market_value * stress_shock) / equity
