@@ -843,6 +843,12 @@ class AutonomousEngine:
                     or signal.get("signal_type")
                     or ("EXIT" if is_closing else "OPEN")
                 ),
+                reference_price=float(
+                    decision.get("ref_price")
+                    or signal.get("suggested_price")
+                    or signal.get("price")
+                    or 0.0
+                ),
             )
             self._annotate_gate_details(
                 gate,
@@ -855,6 +861,11 @@ class AutonomousEngine:
                     signal_meta.get("closing_intent"),
                 ),
             )
+            gate_details = getattr(gate, "details", None) if gate is not None else None
+            if isinstance(gate_details, dict):
+                allocator_meta = decision.get("gross_exposure_allocator")
+                if isinstance(allocator_meta, dict):
+                    gate_details["gross_exposure_allocator"] = allocator_meta
 
             order_id: Optional[str] = None
             execution_intent_id: Optional[str] = None
@@ -1353,6 +1364,7 @@ class AutonomousEngine:
             qty_pct = quantity_value if quantity_value > 0 else 0.10
             if qty_pct > 1.0:
                 qty_pct = qty_pct / 100.0  # 兼容 17 => 0.17
+        has_explicit_abs_qty = target_abs_qty is not None and target_abs_qty > 0
 
         # ① 优先从持仓字典取价格
         pos_info = positions.get(symbol, {})
@@ -1414,6 +1426,39 @@ class AutonomousEngine:
             )
         else:
             ref_qty = 0.0
+
+        allocator_plan = None
+        allocator_ref_qty = ref_qty
+        try:
+            from app.services.gross_exposure_allocator import gross_exposure_allocator
+
+            _base_position_pct = qty_pct
+            if has_explicit_abs_qty and current_price > 0 and equity > 0:
+                _base_position_pct = min(
+                    max((float(target_abs_qty or 0.0) * current_price) / equity, 0.0),
+                    10.0,
+                )
+
+            allocator_plan = gross_exposure_allocator.allocate_entry(
+                symbol=symbol,
+                price=current_price,
+                equity=equity,
+                current_positions=positions,
+                base_position_pct=_base_position_pct,
+                explicit_abs_qty=has_explicit_abs_qty,
+            )
+            if allocator_plan.enabled and allocator_plan.target_qty > 0:
+                allocator_ref_qty = (
+                    float(int(round(allocator_plan.target_qty)))
+                    if _is_hk_ref(symbol)
+                    else round(float(allocator_plan.target_qty), 4)
+                )
+        except Exception as _alloc_err:
+            logger.warning(
+                "[AutonomousEngine._ai_decide] gross exposure allocator failed for %s: %s",
+                symbol,
+                _alloc_err,
+            )
 
         price_label = (
             f"${current_price:.2f}（最新可用价，含盘后）"
@@ -1501,7 +1546,8 @@ class AutonomousEngine:
 当前持仓: {json.dumps(dict(positions.items()), ensure_ascii=False)}
 账户净值: ${equity:,.2f}
 允许标的类型: {cfg.ALLOWED_ASSET_TYPES}
-参考：数量模式={quantity_mode}，信号建议仓位比例={qty_pct*100:.1f}%，参考价格={price_label}，对应参考股数={ref_qty if ref_qty > 0 else '请根据市价自行估算'}
+参考：数量模式={quantity_mode}，信号建议仓位比例={qty_pct*100:.1f}%，参考价格={price_label}，对应参考股数={allocator_ref_qty if allocator_ref_qty > 0 else '请根据市价自行估算'}
+组合仓位控制：当前 gross exposure={round(float(getattr(allocator_plan, 'current_gross_exposure_pct', 0.0))*100, 2)}%，目标={round(float(getattr(allocator_plan, 'target_gross_exposure_pct', 0.0))*100, 2)}%，本信号建议分配={round(float(getattr(allocator_plan, 'allocated_position_pct', qty_pct))*100, 2)}%。
 
 注意：
 1. qty 规则：{_qty_rule}。
@@ -1532,10 +1578,9 @@ class AutonomousEngine:
             #   1) confidence >= 0.80
             #   2) signal_strength >= 80
             #   3) 信号显式给出了 ABS_SHARES 数量
-            has_explicit_abs_qty = target_abs_qty is not None and target_abs_qty > 0
             should_fallback_entry_add = (
                 sig_type in ("ENTRY", "ADD")
-                and ref_qty > 0
+                and allocator_ref_qty > 0
                 and (sig_conf >= 0.80 or sig_strength >= 80 or has_explicit_abs_qty)
             )
 
@@ -1545,17 +1590,20 @@ class AutonomousEngine:
                     _fallback_algo = "LMT" if current_price > 0 else "MKT"
                     logger.warning(
                         f"[AutonomousEngine._ai_decide] Fallback triggered for {symbol}: "
-                        f"action={fallback_action}, qty={ref_qty}, algo={_fallback_algo}, reason={reason}, "
+                        f"action={fallback_action}, qty={allocator_ref_qty}, algo={_fallback_algo}, reason={reason}, "
                         f"sig_conf={sig_conf:.4f}, sig_strength={sig_strength:.2f}, explicit_abs={has_explicit_abs_qty}"
                     )
                     return {
                         "action": fallback_action,
                         "symbol": symbol,
-                        "qty": ref_qty,
+                        "qty": allocator_ref_qty,
                         "algo": _fallback_algo,
                         "confidence": max(0.7, sig_conf),
                         "reasoning": f"rule-based fallback: {reason}",
                         "ref_price": current_price if current_price > 0 else None,
+                        "gross_exposure_allocator": (
+                            allocator_plan.to_dict() if allocator_plan else None
+                        ),
                     }
 
             return {
@@ -1677,6 +1725,18 @@ class AutonomousEngine:
                     hold_reason="ai-hold",
                 )
 
+            if action in ("BUY", "SELL") and sig_type in ("ENTRY", "ADD") and allocator_plan:
+                if allocator_plan.max_qty_allowed <= 0:
+                    return _rule_based_fallback(
+                        f"gross exposure allocator blocked entry ({allocator_plan.reason})",
+                        hold_reason="gross-exposure-cap",
+                    )
+
+                if has_explicit_abs_qty:
+                    raw_qty = min(raw_qty, allocator_plan.max_qty_allowed)
+                elif allocator_ref_qty > 0:
+                    raw_qty = float(allocator_ref_qty)
+
             # 判断是否为港股（必须整数）；美股支持小数股（fractional shares）
             from app.broker.factory import is_hk_stock as _is_hk
 
@@ -1713,6 +1773,8 @@ class AutonomousEngine:
             # 港股取整；美股保留最多 4 位小数（fractional shares）
             decision["qty"] = int(round(raw_qty)) if _hk else round(raw_qty, 4)
             decision["action"] = action
+            if allocator_plan:
+                decision["gross_exposure_allocator"] = allocator_plan.to_dict()
             # 注入参考价格，_execute_order 降级 LMT 时使用，避免重复 fetch
             if current_price > 0:
                 decision.setdefault("ref_price", current_price)

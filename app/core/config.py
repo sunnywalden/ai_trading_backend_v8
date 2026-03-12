@@ -212,6 +212,10 @@ class Settings(BaseSettings):
     MAX_STRESS_LOSS_PCT: float = 0.15  # 压力测试最大损失占比
     MAX_DAILY_TRADES: int = 10  # 单日最大自主交易笔数
     ALLOW_CLOSING_DURING_CIRCUIT_BREAKER: bool = True  # 熔断期间允许减仓/平仓
+    GROSS_EXPOSURE_ALLOCATOR_ENABLED: bool = True  # 是否启用目标总敞口分配器
+    TARGET_GROSS_EXPOSURE_PCT: float = 1.5  # 目标总敞口（相对净值）
+    MAX_GROSS_EXPOSURE_PCT: float = 2.0  # 总敞口硬上限（相对净值）
+    GROSS_EXPOSURE_ENTRY_SLICE_COUNT: int = 4  # 向目标敞口收敛时的分仓片数
     AUTONOMOUS_ORDER_COOLDOWN_MINUTES: int = 120  # 开仓/加仓同标的同方向冷却（分钟）
     AUTONOMOUS_ORDER_LOCK_SECONDS: int = 180  # 开仓/加仓同标的同方向 Redis 并发锁（秒）
     EXIT_ORDER_COOLDOWN_MINUTES: int = 5  # 减仓/平仓方向最短冷却（分钟）
