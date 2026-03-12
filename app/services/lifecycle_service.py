@@ -13,9 +13,12 @@ from typing import Any, Optional
 from sqlalchemy import and_, desc, func, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.broker.factory import make_option_broker_client
+from app.core.config import settings
 from app.models.fsm_transition_log import FsmTransitionLog
 from app.models.trading_plan import TradingPlan
 from app.services.position_query_service import is_active_position_status
+from app.services.truth_source_service import truth_source_service
 from app.schemas.lifecycle import (
     PIPELINE_P50_BENCHMARKS,
     PIPELINE_STAGE_NAMES,
@@ -41,6 +44,7 @@ from app.schemas.lifecycle import (
 )
 
 logger = logging.getLogger(__name__)
+_ACCOUNT_ID_CACHE_TTL_SECONDS = 300
 
 _OPERATIONAL_PLAN_STATUSES = frozenset(
     {
@@ -144,6 +148,144 @@ def _make_position_snapshot_event(
 
 
 class LifecycleService:
+    def __init__(self) -> None:
+        self._cached_account_id: Optional[str] = None
+        self._cached_account_expires_at: Optional[datetime] = None
+
+    async def _resolve_account_id(self) -> Optional[str]:
+        now = datetime.now(timezone.utc)
+        if (
+            self._cached_account_id
+            and self._cached_account_expires_at
+            and self._cached_account_expires_at > now
+        ):
+            return self._cached_account_id
+        try:
+            broker = make_option_broker_client()
+            resolved = await broker.get_account_id()
+            if resolved:
+                self._cached_account_id = str(resolved)
+                self._cached_account_expires_at = now + timedelta(
+                    seconds=_ACCOUNT_ID_CACHE_TTL_SECONDS
+                )
+                return self._cached_account_id
+        except Exception:
+            pass
+        fallback = str(getattr(settings, "TIGER_ACCOUNT", "") or "").strip() or None
+        if fallback:
+            self._cached_account_id = fallback
+            self._cached_account_expires_at = now + timedelta(
+                seconds=_ACCOUNT_ID_CACHE_TTL_SECONDS
+            )
+        return fallback
+
+    def _build_position_board_from_read_items(
+        self,
+        items: list[dict[str, Any]],
+        *,
+        source: str,
+        mismatch_detected: bool,
+        mismatch_symbols: list[str],
+    ) -> PositionBoard:
+        now = datetime.now(timezone.utc)
+        state_map: dict[str, list[PositionBoardCard]] = {s: [] for s in POSITION_FSM_STATES}
+
+        for index, row in enumerate(items, start=1):
+            state = str(row.get("status") or "ACTIVE").upper()
+            if state not in state_map:
+                state = "ACTIVE"
+            state_map[state].append(
+                PositionBoardCard(
+                    id=int(row.get("id") or index),
+                    symbol=str(row.get("symbol") or ""),
+                    direction=row.get("direction"),
+                    total_qty=float(row.get("open_qty") or row.get("total_qty") or 0.0),
+                    avg_entry_price=(
+                        self._clean_float(row.get("avg_entry_price"))
+                        if row.get("avg_entry_price") is not None
+                        else None
+                    ),
+                    unrealized_pnl_pct=(
+                        self._clean_float(row.get("unrealized_pnl_pct"))
+                        if row.get("unrealized_pnl_pct") is not None
+                        else None
+                    ),
+                    hold_seconds=None,
+                    latest_plan_id=row.get("latest_plan_id"),
+                )
+            )
+
+        columns: list[PositionBoardColumn] = []
+        total_active = 0
+        for state in POSITION_FSM_STATES:
+            meta = POSITION_FSM_META.get(state, {"label": state, "color": "#9ca3af"})
+            cards = state_map.get(state, [])
+            is_terminal = state in ("CLOSED", "LIQUIDATED")
+            if is_active_position_status(state):
+                total_active += len(cards)
+            if is_terminal and not cards:
+                continue
+            columns.append(
+                PositionBoardColumn(
+                    state=state,
+                    label=meta["label"],
+                    color=meta["color"],
+                    count=len(cards),
+                    cards=cards,
+                )
+            )
+
+        return PositionBoard(
+            columns=columns,
+            total_active=total_active,
+            as_of=now,
+            source=source,
+            mismatch_detected=mismatch_detected,
+            mismatch_symbols=mismatch_symbols,
+        )
+
+    def _build_position_fsm_from_read_items(
+        self,
+        items: list[dict[str, Any]],
+        engine_stats: EngineStats,
+        *,
+        source: str,
+        mismatch_detected: bool,
+        mismatch_symbols: list[str],
+    ) -> PositionFsmSummary:
+        now = datetime.now(timezone.utc)
+        counts: dict[str, int] = {state: 0 for state in POSITION_FSM_STATES}
+        for row in items:
+            state = str(row.get("status") or "ACTIVE").upper()
+            if state not in counts:
+                state = "ACTIVE"
+            counts[state] += 1
+
+        states: list[PositionFsmStateCount] = []
+        total = 0
+        for state in POSITION_FSM_STATES:
+            meta = POSITION_FSM_META.get(state, {"label": state, "color": "#9ca3af"})
+            cnt = counts.get(state, 0)
+            if state not in ("CLOSED", "LIQUIDATED"):
+                total += cnt
+            states.append(
+                PositionFsmStateCount(
+                    state=state,
+                    label=meta["label"],
+                    count=cnt,
+                    color=meta["color"],
+                )
+            )
+
+        return PositionFsmSummary(
+            states=states,
+            engine_stats=engine_stats,
+            total=total,
+            as_of=now,
+            source=source,
+            mismatch_detected=mismatch_detected,
+            mismatch_symbols=mismatch_symbols,
+        )
 
     def _clean_float(self, val: Any, default: float = 0.0) -> float:
         """确保 float 值是 JSON 兼容的（处理 NaN/Inf）。"""
@@ -280,6 +422,17 @@ class LifecycleService:
         recently-closed positions (e.g. capacity-guard exits) remain visible
         without polluting the board with ancient history.
         """
+        account_id = await self._resolve_account_id()
+        if account_id:
+            read_model = await truth_source_service.get_positions_read_model(db, account_id)
+            if read_model.get("source") in {"BROKER_LIVE", "BROKER_LIVE_OVERRIDE"}:
+                return self._build_position_board_from_read_items(
+                    list(read_model.get("items") or []),
+                    source=str(read_model.get("source") or "UNKNOWN"),
+                    mismatch_detected=bool(read_model.get("mismatch_detected")),
+                    mismatch_symbols=list(read_model.get("mismatch_symbols") or []),
+                )
+
         now = datetime.now(timezone.utc)
 
         # Import Position model
@@ -362,7 +515,7 @@ class LifecycleService:
                 )
             )
 
-        return PositionBoard(columns=columns, total_active=total_active, as_of=now)
+        return PositionBoard(columns=columns, total_active=total_active, as_of=now, source="POSITION_LIFECYCLE", mismatch_detected=False, mismatch_symbols=[])
 
     async def get_position_fsm_counts(self, db: AsyncSession) -> PositionFsmSummary:
         now = datetime.now(timezone.utc)
@@ -410,8 +563,26 @@ class LifecycleService:
             total_triggers=sum(engine_rows.values()),
         )
 
+        account_id = await self._resolve_account_id()
+        if account_id:
+            read_model = await truth_source_service.get_positions_read_model(db, account_id)
+            if read_model.get("source") in {"BROKER_LIVE", "BROKER_LIVE_OVERRIDE"}:
+                return self._build_position_fsm_from_read_items(
+                    list(read_model.get("items") or []),
+                    engine_stats,
+                    source=str(read_model.get("source") or "UNKNOWN"),
+                    mismatch_detected=bool(read_model.get("mismatch_detected")),
+                    mismatch_symbols=list(read_model.get("mismatch_symbols") or []),
+                )
+
         return PositionFsmSummary(
-            states=states, engine_stats=engine_stats, total=total, as_of=now
+            states=states,
+            engine_stats=engine_stats,
+            total=total,
+            as_of=now,
+            source="POSITION_LIFECYCLE",
+            mismatch_detected=False,
+            mismatch_symbols=[],
         )
 
     async def sync_position_fsm_states(self, db: AsyncSession) -> int:

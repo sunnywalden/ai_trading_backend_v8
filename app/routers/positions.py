@@ -27,6 +27,7 @@ from app.models.db import get_session
 from app.services.broker_order_sync_service import reconcile_stale_closing_positions
 from app.services.position_lifecycle_manager import PositionLifecycleManager
 from app.services.position_query_service import PositionQueryService
+from app.services.truth_source_service import truth_source_service
 
 router = APIRouter(prefix="/api/v1/pos", tags=["Positions V2"])
 
@@ -51,9 +52,9 @@ async def list_active_positions(
     account_id: str = Query(..., description="账户 ID"),
     db: AsyncSession = Depends(get_session),
 ) -> list[dict[str, Any]]:
-    """返回账户下所有未结算仓位。"""
-    svc = PositionQueryService(db)
-    return await svc.get_active_positions(account_id)
+    """返回账户下当前活跃仓位（生产读侧优先使用券商真实持仓）。"""
+    snapshot = await truth_source_service.get_positions_read_model(db, account_id)
+    return list(snapshot.get("items") or [])
 
 
 @router.get("/exceptions", summary="异常仓位列表")
@@ -93,8 +94,24 @@ async def portfolio_summary(
     db: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """活跃仓位、异常仓位、卡单数量摘要，供仪表盘小组件使用。"""
+    snapshot = await truth_source_service.get_positions_read_model(db, account_id)
     svc = PositionQueryService(db)
-    return await svc.get_portfolio_summary(account_id)
+    lifecycle_summary = await svc.get_portfolio_summary(account_id)
+    read_items = list(snapshot.get("items") or [])
+    read_exception_positions = sum(
+        1 for item in read_items if str(item.get("status") or "").upper() == "EXCEPTION"
+    )
+    return {
+        **lifecycle_summary,
+        "active_positions": int(snapshot.get("active_positions") or 0),
+        "exception_positions": read_exception_positions,
+        "active_positions_source": snapshot.get("source"),
+        "broker_active_positions": int(snapshot.get("broker_active_positions") or 0),
+        "lifecycle_active_positions": int(snapshot.get("lifecycle_active_positions") or 0),
+        "lifecycle_exception_positions": int(lifecycle_summary.get("exception_positions") or 0),
+        "mismatch_detected": bool(snapshot.get("mismatch_detected")),
+        "mismatch_symbols": list(snapshot.get("mismatch_symbols") or []),
+    }
 
 
 @router.post("/reconcile-stale-closing", summary="手动收口卡在平仓中的仓位")

@@ -139,6 +139,9 @@ class PositionFsmSummary(BaseModel):
     engine_stats: EngineStats
     total: int
     as_of: datetime
+    source: Optional[str] = None
+    mismatch_detected: bool = False
+    mismatch_symbols: list[str] = Field(default_factory=list)
 
 
 # ── FSM Transition Events ─────────────────────────────────────────────────────
@@ -211,6 +214,9 @@ class PositionBoard(BaseModel):
     columns: list[PositionBoardColumn]
     total_active: int
     as_of: datetime
+    source: Optional[str] = None
+    mismatch_detected: bool = False
+    mismatch_symbols: list[str] = Field(default_factory=list)
 
 
 # ── Decision Provenance ───────────────────────────────────────────────────────
