@@ -212,6 +212,8 @@ class Settings(BaseSettings):
     MAX_STRESS_LOSS_PCT: float = 0.15  # 压力测试最大损失占比
     MAX_DAILY_TRADES: int = 10  # 单日最大自主交易笔数
     ALLOW_CLOSING_DURING_CIRCUIT_BREAKER: bool = True  # 熔断期间允许减仓/平仓
+    AUTONOMOUS_ORDER_COOLDOWN_MINUTES: int = 120  # 开仓/加仓同标的同方向冷却（分钟）
+    AUTONOMOUS_ORDER_LOCK_SECONDS: int = 180  # 开仓/加仓同标的同方向 Redis 并发锁（秒）
     EXIT_ORDER_COOLDOWN_MINUTES: int = 5  # 减仓/平仓方向最短冷却（分钟）
     EXIT_ORDER_LOCK_SECONDS: int = 30  # 减仓/平仓 Redis 并发锁（秒）
 
