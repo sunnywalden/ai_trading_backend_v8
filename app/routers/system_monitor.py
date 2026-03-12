@@ -15,6 +15,7 @@ from sqlalchemy import desc, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.market_hours import is_symbol_market_active
+from app.data.hub import data_hub
 from app.models.db import get_session, redis_client
 from app.models.execution_intent import AutonomousExecutionIntent
 from app.models.fsm_transition_log import FsmTransitionLog
@@ -1229,9 +1230,59 @@ async def _build_service_payload(db: AsyncSession, window_minutes: int) -> tuple
             tags=["monitoring"],
         )
 
+    async def _probe_tiger_ohlcv_gateway() -> ServiceHealthItem:
+        runtime = data_hub.get_tiger_ohlcv_runtime_status()
+        cooling_down = bool(runtime.get("cooling_down"))
+        reason = str(runtime.get("reason") or "")
+        status = (
+            "CRITICAL" if reason == "permission-denied"
+            else "WARN" if cooling_down
+            else "HEALTHY"
+        )
+        remaining_seconds = int(runtime.get("remaining_seconds") or 0)
+        last_error_message = str(runtime.get("message") or "")
+
+        if cooling_down and runtime.get("last_error_message"):
+            last_error_message = (
+                f"{last_error_message} · last_error={runtime.get('last_error_message')}"
+            )
+
+        return ServiceHealthItem(
+            service_key="tiger_ohlcv_gateway",
+            service_label="Tiger OHLCV Gateway",
+            module_key="market_data",
+            service_kind="external",
+            status=status,
+            degraded=cooling_down,
+            latency_ms=None,
+            p95_latency_ms=None,
+            error_count_1h=1 if cooling_down else 0,
+            error_count_24h=1 if cooling_down else 0,
+            last_heartbeat_at=now,
+            last_success_at=(None if cooling_down else now),
+            last_error_code=(
+                "TIGER_OHLCV_PERMISSION_DENIED"
+                if reason == "permission-denied"
+                else "TIGER_OHLCV_RATE_LIMIT"
+                if reason == "rate-limit"
+                else None
+            ),
+            last_error_message=last_error_message if cooling_down else None,
+            last_recovered_at=runtime.get("last_recovered_at"),
+            dependencies=["data_hub", "tiger_gateway"],
+            owners=["market-data"],
+            tags=[
+                "external",
+                "broker",
+                "ohlcv",
+                *( ["cooldown", reason, f"remaining:{remaining_seconds}s"] if cooling_down else ["healthy"] ),
+            ],
+        )
+
     for probe in (
         _probe_mysql,
         _probe_redis,
+        _probe_tiger_ohlcv_gateway,
         _probe_lifecycle,
         _probe_autonomy_health,
         _probe_situational_awareness,

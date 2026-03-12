@@ -34,6 +34,11 @@ class DataHub:
         self._hk_tiger_permission_denied = False
         self._tiger_ohlcv_cooldown_until = 0.0
         self._tiger_ohlcv_cooldown_reason = ""
+        self._tiger_ohlcv_cooldown_started_at: datetime | None = None
+        self._tiger_ohlcv_last_error_at: datetime | None = None
+        self._tiger_ohlcv_last_recovered_at: datetime | None = None
+        self._tiger_ohlcv_last_error_message: str | None = None
+        self._tiger_ohlcv_last_symbol: str | None = None
 
     @staticmethod
     def _is_tiger_hk_permission_error(exc: Exception) -> bool:
@@ -56,6 +61,10 @@ class DataHub:
     def _set_tiger_ohlcv_cooldown(self, seconds: int, reason: str) -> None:
         self._tiger_ohlcv_cooldown_until = time.monotonic() + max(seconds, 0)
         self._tiger_ohlcv_cooldown_reason = reason
+        now = datetime.now()
+        self._tiger_ohlcv_cooldown_started_at = now
+        self._tiger_ohlcv_last_error_at = now
+        self._tiger_ohlcv_last_recovered_at = None
 
     def _resolve_ohlcv_source(
         self,
@@ -74,6 +83,8 @@ class DataHub:
         return None
 
     def _record_tiger_ohlcv_failure(self, exc: Exception, symbol: str) -> None:
+        self._tiger_ohlcv_last_error_message = str(exc)
+        self._tiger_ohlcv_last_symbol = symbol
         if self._is_tiger_ohlcv_rate_limit_error(exc):
             self._set_tiger_ohlcv_cooldown(
                 settings.DATA_HUB_TIGER_OHLCV_RATE_LIMIT_COOLDOWN_SECONDS,
@@ -94,6 +105,37 @@ class DataHub:
                 symbol,
                 settings.DATA_HUB_TIGER_OHLCV_PERMISSION_COOLDOWN_SECONDS,
             )
+
+    def get_tiger_ohlcv_runtime_status(self) -> dict[str, object]:
+        now = datetime.now()
+        remaining_seconds = max(0, int(round(self._tiger_ohlcv_cooldown_until - time.monotonic())))
+        cooling_down = remaining_seconds > 0
+
+        if not cooling_down and self._tiger_ohlcv_cooldown_reason and self._tiger_ohlcv_last_recovered_at is None:
+            self._tiger_ohlcv_last_recovered_at = now
+
+        if cooling_down:
+            message = (
+                f"Tiger OHLCV cooling down: reason={self._tiger_ohlcv_cooldown_reason or 'cooldown'}"
+                f" · remaining={remaining_seconds}s"
+                + (f" · symbol={self._tiger_ohlcv_last_symbol}" if self._tiger_ohlcv_last_symbol else "")
+            )
+        elif self._tiger_ohlcv_last_recovered_at is not None:
+            message = "Tiger OHLCV cooldown recovered; primary path is available again"
+        else:
+            message = "Tiger OHLCV path is healthy"
+
+        return {
+            "cooling_down": cooling_down,
+            "reason": self._tiger_ohlcv_cooldown_reason or None,
+            "remaining_seconds": remaining_seconds,
+            "started_at": self._tiger_ohlcv_cooldown_started_at,
+            "last_error_at": self._tiger_ohlcv_last_error_at,
+            "last_recovered_at": self._tiger_ohlcv_last_recovered_at,
+            "last_error_message": self._tiger_ohlcv_last_error_message,
+            "last_symbol": self._tiger_ohlcv_last_symbol,
+            "message": message,
+        }
 
     @staticmethod
     def _normalize_hk_symbols(symbol: str) -> tuple[str, str]:
