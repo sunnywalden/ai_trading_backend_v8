@@ -389,6 +389,43 @@ async def _count_broker_filled_today(account_id: str) -> Optional[int]:
         return None
 
 
+async def _get_runtime_equity(
+    session: AsyncSession,
+    account_id: str,
+) -> tuple[float, str]:
+    try:
+        broker = make_option_broker_client()
+        account_info = await asyncio.wait_for(
+            broker.get_account_equity(account_id),
+            timeout=3.0,
+        )
+        if not isinstance(account_info, dict):
+            account_info = {}
+        equity_val = account_info.get("net_liquidation") or account_info.get("equity")
+        if equity_val:
+            return float(equity_val), "BROKER_LIVE"
+    except Exception:
+        pass
+
+    try:
+        from app.models.equity_snapshot import EquitySnapshot
+
+        snap_stmt = (
+            select(EquitySnapshot)
+            .where(EquitySnapshot.account_id == account_id)
+            .order_by(EquitySnapshot.snapshot_date.desc())
+            .limit(1)
+        )
+        snap_res = await session.execute(snap_stmt)
+        snap = snap_res.scalars().first()
+        if snap and snap.total_equity:
+            return float(snap.total_equity), "EQUITY_SNAPSHOT"
+    except Exception:
+        pass
+
+    return 0.0, "UNKNOWN"
+
+
 @router.get("/status")
 async def get_autonomy_status(
     session: AsyncSession = Depends(get_session),
@@ -497,8 +534,11 @@ async def get_autonomy_status(
         account_id,
     )
     regime_truth = await truth_source_service.get_regime_truth_snapshot(session)
-    effective_allocator_targets = gross_exposure_allocator.resolve_regime_targets(
-        regime_truth.get("regime")
+    equity_value, equity_source = await _get_runtime_equity(session, account_id)
+    allocator_runtime = gross_exposure_allocator.build_runtime_summary(
+        positions=positions_truth.get("positions") or {},
+        equity=equity_value,
+        regime=regime_truth.get("regime"),
     )
     origin_counts: dict[str, int] = {
         "REAL": 0,
@@ -598,17 +638,31 @@ async def get_autonomy_status(
             "target_by_regime": str(settings.GROSS_EXPOSURE_TARGET_BY_REGIME),
             "max_by_regime": str(settings.MAX_GROSS_EXPOSURE_BY_REGIME),
             "effective_regime": str(regime_truth.get("regime") or "SIDEWAYS"),
+            "equity": float(equity_value),
+            "equity_source": equity_source,
             "effective_target_gross_exposure_pct": float(
-                effective_allocator_targets.get("target_gross_exposure_pct") or 0.0
+                allocator_runtime.get("target_gross_exposure_pct") or 0.0
             ),
             "effective_max_gross_exposure_pct": float(
-                effective_allocator_targets.get("max_gross_exposure_pct") or 0.0
+                allocator_runtime.get("max_gross_exposure_pct") or 0.0
             ),
             "effective_target_config_source": str(
-                effective_allocator_targets.get("target_config_source") or "base"
+                allocator_runtime.get("target_config_source") or "base"
             ),
             "effective_max_config_source": str(
-                effective_allocator_targets.get("max_config_source") or "base"
+                allocator_runtime.get("max_config_source") or "base"
+            ),
+            "current_gross_exposure_pct": float(
+                allocator_runtime.get("current_gross_exposure_pct") or 0.0
+            ),
+            "current_net_exposure_pct": float(
+                allocator_runtime.get("current_net_exposure_pct") or 0.0
+            ),
+            "distance_to_target_gross_exposure_pct": float(
+                allocator_runtime.get("distance_to_target_gross_exposure_pct") or 0.0
+            ),
+            "remaining_to_max_gross_exposure_pct": float(
+                allocator_runtime.get("remaining_to_max_gross_exposure_pct") or 0.0
             ),
         },
         "rollout": _build_v1054_rollout_state(),

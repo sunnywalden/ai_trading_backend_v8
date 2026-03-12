@@ -164,3 +164,36 @@ def test_resolve_regime_targets_falls_back_to_base_when_mapping_missing():
     assert resolved["max_gross_exposure_pct"] == pytest.approx(2.0)
     assert resolved["target_config_source"] == "base"
     assert resolved["max_config_source"] == "base"
+
+
+def test_build_runtime_summary_reports_current_and_distance_metrics():
+    allocator = GrossExposureAllocator()
+    positions = {
+        "AAPL": {"qty": 100, "current_price": 100.0},
+        "MSFT": {"qty": -50, "current_price": 200.0},
+    }
+
+    with patch(
+        "app.services.gross_exposure_allocator.settings.TARGET_GROSS_EXPOSURE_PCT",
+        1.5,
+    ), patch(
+        "app.services.gross_exposure_allocator.settings.MAX_GROSS_EXPOSURE_PCT",
+        2.0,
+    ), patch(
+        "app.services.gross_exposure_allocator.settings.GROSS_EXPOSURE_TARGET_BY_REGIME",
+        "BULL_TREND:1.8",
+    ), patch(
+        "app.services.gross_exposure_allocator.settings.MAX_GROSS_EXPOSURE_BY_REGIME",
+        "BULL_TREND:2.2",
+    ):
+        summary = allocator.build_runtime_summary(
+            positions=positions,
+            equity=100000.0,
+            regime="BULL_TREND",
+        )
+
+    assert summary["regime"] == "BULL_TREND"
+    assert summary["current_gross_exposure_pct"] == pytest.approx(0.2)
+    assert summary["current_net_exposure_pct"] == pytest.approx(0.0)
+    assert summary["distance_to_target_gross_exposure_pct"] == pytest.approx(1.6)
+    assert summary["remaining_to_max_gross_exposure_pct"] == pytest.approx(2.0)
