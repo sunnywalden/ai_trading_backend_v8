@@ -189,10 +189,38 @@ class PaperTradingService:
         start = end - timedelta(days=30)
 
         try:
-            await self.get_or_create_account(account_id, db)
+            account = await self.get_or_create_account(account_id, db)
+            resolved_symbols = self._resolve_graduation_symbols(
+                account,
+                symbols,
+                max_symbols=settings.PAPER_GRADUATION_MAX_SYMBOLS,
+            )
+            if not resolved_symbols:
+                return {
+                    "eligible": False,
+                    "strategy": strategy_name,
+                    "metrics": {},
+                    "governance_gate": self._build_governance_gate({}),
+                    "criteria": {
+                        "sharpe_required": 1.0,
+                        "max_drawdown_limit": 0.20,
+                        "win_rate_required": 0.50,
+                    },
+                    "message": "暂无 paper 真实交易/持仓符号，暂不执行毕业评估",
+                }
+
+            if len(resolved_symbols) < len(symbols):
+                logger.info(
+                    "[paper_graduation] Account %s graduation symbols narrowed from %s to %s: %s",
+                    account_id,
+                    len(symbols),
+                    len(resolved_symbols),
+                    resolved_symbols,
+                )
+
             result = await backtest_runner.run(
                 strategy_name=strategy_name,
-                symbols=symbols,
+                symbols=resolved_symbols,
                 start=start,
                 end=end,
                 initial_capital=settings.PAPER_INITIAL_CAPITAL,
@@ -220,6 +248,40 @@ class PaperTradingService:
             }
         except Exception as e:
             return {"eligible": False, "error": str(e)}
+
+    @staticmethod
+    def _resolve_graduation_symbols(
+        account: PaperAccount,
+        candidate_symbols: list[str],
+        max_symbols: int,
+    ) -> list[str]:
+        ordered: list[str] = []
+        seen: set[str] = set()
+
+        def _add(symbol: object) -> None:
+            value = str(symbol or "").strip().upper()
+            if not value or value in seen:
+                return
+            seen.add(value)
+            ordered.append(value)
+
+        positions = account.positions or {}
+        for symbol in positions.keys():
+            _add(symbol)
+
+        trade_log = account.trade_log or []
+        for entry in reversed(trade_log):
+            _add(entry.get("symbol"))
+
+        if candidate_symbols and not ordered:
+            logger.info(
+                "[paper_graduation] Skip candidate-only graduation universe: account has no real paper positions/trades, candidates=%s",
+                len(candidate_symbols),
+            )
+
+        if max_symbols <= 0:
+            return ordered
+        return ordered[:max_symbols]
 
     @staticmethod
     def _build_governance_gate(result: dict) -> dict:
