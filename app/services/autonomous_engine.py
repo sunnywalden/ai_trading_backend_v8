@@ -394,6 +394,7 @@ class AutonomousEngine:
         signal_quality_tier: Optional[str] = None,
         signal_quality_score: Optional[float] = None,
         signal_quality_quota_exempt: Optional[bool] = None,
+        gross_exposure_allocator: Optional[dict[str, Any]] = None,
     ) -> None:
         if not signal_db_id:
             return
@@ -431,6 +432,8 @@ class AutonomousEngine:
                 meta["signal_quality_score"] = signal_quality_score
             if signal_quality_quota_exempt is not None:
                 meta["signal_quality_quota_exempt"] = signal_quality_quota_exempt
+            if gross_exposure_allocator is not None:
+                meta["gross_exposure_allocator"] = gross_exposure_allocator
 
             if stage == "QUALITY_FUNNEL":
                 meta["funnel_rejected_at_layer"] = rejected_at_layer
@@ -634,11 +637,38 @@ class AutonomousEngine:
                     }
                 )
                 continue
-            decision = await self._ai_decide(signal, current_positions, current_equity)
+            decision = await self._ai_decide(
+                signal,
+                current_positions,
+                current_equity,
+                regime_at_decision,
+            )
             signal_meta = self._signal_extra_metadata(signal)
             is_force_exit = self._is_force_exit(signal)
             is_closing = self._is_closing_intent(signal, decision, is_force_exit)
             execution_path = self._resolve_execution_path(is_closing, is_force_exit)
+            allocator_meta = decision.get("gross_exposure_allocator")
+            if isinstance(allocator_meta, dict):
+                await self._update_signal_watchtower_metadata(
+                    db,
+                    signal.get("id"),
+                    stage="CONTROL_PLANE",
+                    result="ALLOCATED",
+                    reason_code="GROSS_EXPOSURE_ALLOCATED",
+                    reason_detail=(
+                        f"regime={allocator_meta.get('regime')} "
+                        f"target={allocator_meta.get('target_gross_exposure_pct')} "
+                        f"allocated={allocator_meta.get('allocated_position_pct')}"
+                    ),
+                    reason_category="GROSS_EXPOSURE_ALLOCATOR",
+                    regime=regime_at_decision,
+                    signal_quality_tier=signal.get("signal_quality_tier"),
+                    signal_quality_score=signal.get("signal_quality_score"),
+                    signal_quality_quota_exempt=bool(
+                        signal.get("signal_quality_quota_exempt")
+                    ),
+                    gross_exposure_allocator=allocator_meta,
+                )
             decision["execution_path"] = execution_path
             decision["signal_quality_tier"] = signal.get("signal_quality_tier")
             decision["signal_quality_score"] = signal.get("signal_quality_score")
@@ -1331,7 +1361,13 @@ class AutonomousEngine:
     # AI 决策（调用复杂模型）
     # ──────────────────────────────────────────
 
-    async def _ai_decide(self, signal: dict, positions: dict, equity: float) -> dict:
+    async def _ai_decide(
+        self,
+        signal: dict,
+        positions: dict,
+        equity: float,
+        regime: Optional[str] = None,
+    ) -> dict:
         """
         调用 AI 复杂推理模型，返回决策字典：
         {"action":"BUY","symbol":"AAPL","qty":50,"algo":"TWAP","confidence":0.85,"reasoning":"..."}
@@ -1446,6 +1482,7 @@ class AutonomousEngine:
                 current_positions=positions,
                 base_position_pct=_base_position_pct,
                 explicit_abs_qty=has_explicit_abs_qty,
+                regime=regime,
             )
             if allocator_plan.enabled and allocator_plan.target_qty > 0:
                 allocator_ref_qty = (

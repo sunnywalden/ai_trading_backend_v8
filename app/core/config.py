@@ -216,6 +216,14 @@ class Settings(BaseSettings):
     TARGET_GROSS_EXPOSURE_PCT: float = 1.5  # 目标总敞口（相对净值）
     MAX_GROSS_EXPOSURE_PCT: float = 2.0  # 总敞口硬上限（相对净值）
     GROSS_EXPOSURE_ENTRY_SLICE_COUNT: int = 4  # 向目标敞口收敛时的分仓片数
+    GROSS_EXPOSURE_TARGET_BY_REGIME: str = (
+        "BULL_TREND:1.8,SIDEWAYS:1.3,BEAR_TREND:0.8,"
+        "HIGH_VOL:0.8,MEAN_REVERT:1.2,RANGE_BOUND:1.1,CRISIS:0.3"
+    )
+    MAX_GROSS_EXPOSURE_BY_REGIME: str = (
+        "BULL_TREND:2.2,SIDEWAYS:1.6,BEAR_TREND:1.0,"
+        "HIGH_VOL:1.0,MEAN_REVERT:1.5,RANGE_BOUND:1.4,CRISIS:0.5"
+    )
     AUTONOMOUS_ORDER_COOLDOWN_MINUTES: int = 120  # 开仓/加仓同标的同方向冷却（分钟）
     AUTONOMOUS_ORDER_LOCK_SECONDS: int = 180  # 开仓/加仓同标的同方向 Redis 并发锁（秒）
     EXIT_ORDER_COOLDOWN_MINUTES: int = 5  # 减仓/平仓方向最短冷却（分钟）
