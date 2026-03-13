@@ -91,11 +91,28 @@ async def refresh_technical_indicators_job():
             f"{success_count} success, {error_count} errors, "
             f"symbols={symbols}, took {elapsed:.2f}s"
         )
+        return {
+            "success": True,
+            "success_count": success_count,
+            "failure_count": error_count,
+            "symbols_attempted": symbols,
+            "refreshed_symbols": refresh_result.get("refreshed_symbols", []),
+            "latest_seen": refresh_result.get("latest_seen"),
+        }
 
     except Exception as e:
         logger.error(
             f"Technical indicators refresh job failed: {str(e)}", exc_info=True
         )
+        return {
+            "success": False,
+            "error": str(e),
+            "success_count": 0,
+            "failure_count": 0,
+            "symbols_attempted": [],
+            "refreshed_symbols": [],
+            "latest_seen": None,
+        }
 
 
 async def refresh_fundamental_data_job():

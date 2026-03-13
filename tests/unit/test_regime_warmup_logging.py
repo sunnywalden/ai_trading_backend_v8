@@ -6,7 +6,12 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from app.main import _log_regime_bootstrap_result, _warm_up_regime_cache
+from app.main import (
+    _log_factor_snapshot_warmup_result,
+    _log_regime_bootstrap_result,
+    _log_technical_warmup_result,
+    _warm_up_regime_cache,
+)
 from app.services.regime_classifier import RegimeClassifier
 
 
@@ -41,6 +46,30 @@ def test_log_regime_bootstrap_result_skipped(caplog):
     assert "regime bootstrap skipped" in caplog.text
     assert "REAL_REGIME_INPUTS_UNAVAILABLE" in caplog.text
     assert "Market regime refreshed" not in caplog.text
+
+
+def test_log_technical_warmup_result_deferred(caplog):
+    with caplog.at_level(logging.WARNING):
+        _log_technical_warmup_result(
+            {
+                "success": True,
+                "success_count": 0,
+                "failure_count": 1,
+                "symbols_attempted": ["SPY"],
+            }
+        )
+
+    assert "technical indicator warm-up deferred" in caplog.text
+    assert "SPY" in caplog.text
+    assert "Technical indicators seeded" not in caplog.text
+
+
+def test_log_factor_snapshot_warmup_result_deferred(caplog):
+    with caplog.at_level(logging.WARNING):
+        _log_factor_snapshot_warmup_result({"success": True, "seeded_accounts": 0})
+
+    assert "factor snapshot warm-up deferred" in caplog.text
+    assert "Factor exposure snapshot seeded" not in caplog.text
 
 
 @pytest.mark.asyncio
