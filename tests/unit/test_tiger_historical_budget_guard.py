@@ -126,6 +126,39 @@ async def test_market_data_provider_refresh_writes_redis_bars_cache(monkeypatch)
     cache_set.assert_awaited()
 
 
+@pytest.mark.asyncio
+async def test_market_data_provider_uses_cached_key_statistics_before_live_fetch(monkeypatch):
+    provider = MarketDataProvider()
+    cache_get = AsyncMock(return_value={"roe": 0.21, "debt_to_equity": 18.0})
+    cache_set = AsyncMock(return_value=True)
+    live_call = AsyncMock(side_effect=AssertionError("should not fetch live when cache exists"))
+
+    monkeypatch.setattr("app.providers.market_data_provider.cache.get", cache_get)
+    monkeypatch.setattr("app.providers.market_data_provider.cache.set", cache_set)
+    monkeypatch.setattr(provider, "_run_external", live_call)
+
+    stats = await provider.get_key_statistics("AAPL")
+
+    assert stats["roe"] == pytest.approx(0.21)
+    live_call.assert_not_awaited()
+    cache_set.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_market_data_provider_cache_only_key_statistics_returns_empty_without_cache(monkeypatch):
+    provider = MarketDataProvider()
+    cache_get = AsyncMock(return_value=None)
+    live_call = AsyncMock(side_effect=AssertionError("cache_only should not fetch live"))
+
+    monkeypatch.setattr("app.providers.market_data_provider.cache.get", cache_get)
+    monkeypatch.setattr(provider, "_run_external", live_call)
+
+    stats = await provider.get_key_statistics("MSFT", cache_only=True)
+
+    assert stats == {}
+    live_call.assert_not_awaited()
+
+
 def test_data_hub_permission_budget_allows_only_occupied_symbols():
     hub = DataHub()
     hub._record_tiger_ohlcv_failure(RuntimeError(_permission_error_message()), "00001")

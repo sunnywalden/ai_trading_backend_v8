@@ -13,7 +13,7 @@
 """
 
 import pandas as pd
-from typing import Optional, List, Dict
+from typing import Any, Optional, List, Dict
 from datetime import datetime, timedelta
 from functools import lru_cache
 import time
@@ -212,6 +212,9 @@ class MarketDataProvider:
         symbol, period, interval = cache_key
         return f"historical_bars:{symbol}:{period}:{interval}"
 
+    def _redis_key_statistics_cache_key(self, symbol: str) -> str:
+        return f"key_statistics:{self._canonical_history_symbol(symbol)}"
+
     @staticmethod
     def _serialize_bars_df(df: pd.DataFrame) -> dict:
         if df is None or df.empty:
@@ -286,6 +289,17 @@ class MarketDataProvider:
             self._redis_bars_cache_key(cache_key),
             self._serialize_bars_df(data),
             expire=expire,
+        )
+
+    async def _get_cached_key_statistics(self, symbol: str) -> Dict[str, Any]:
+        payload = await cache.get(self._redis_key_statistics_cache_key(symbol))
+        return payload if isinstance(payload, dict) else {}
+
+    async def _cache_key_statistics(self, symbol: str, payload: Dict[str, Any]) -> None:
+        await cache.set(
+            self._redis_key_statistics_cache_key(symbol),
+            payload,
+            expire=int(settings.KEY_STATISTICS_CACHE_TTL_SECONDS or 86400),
         )
 
     def _is_tiger_historical_permission_limit_error(self, error_message: str | None) -> bool:
@@ -716,32 +730,100 @@ class MarketDataProvider:
             'quarterly_cashflow': ticker.quarterly_cashflow,
         }
     
-    async def get_key_statistics(self, symbol: str) -> Dict:
-        """获取关键统计数据"""
-        ticker = self.get_ticker(symbol)
-        info = ticker.info
-        
+    async def get_key_statistics(
+        self,
+        symbol: str,
+        *,
+        force_refresh: bool = False,
+        cache_only: bool = False,
+    ) -> Dict:
+        """获取关键统计数据（优先缓存，非实时数据建议由定时任务预热）。"""
+        if not force_refresh:
+            cached = await self._get_cached_key_statistics(symbol)
+            if cached:
+                return cached
+
+        if cache_only:
+            return {}
+
+        gate = await api_monitor.can_call_provider(APIProvider.YAHOO_FINANCE)
+        if not gate.get("can_call", True):
+            return {}
+
+        start_time = time.time()
+        success = False
+        error_msg = None
+        payload: Dict[str, Any] = {}
+        try:
+            ticker = self.get_ticker(symbol)
+            info = await self._run_external(lambda: ticker.info)
+            payload = {
+                'pe_ratio': info.get('trailingPE'),
+                'forward_pe': info.get('forwardPE'),
+                'peg_ratio': info.get('pegRatio'),
+                'pb_ratio': info.get('priceToBook'),
+                'ps_ratio': info.get('priceToSalesTrailing12Months'),
+                'price_to_book': info.get('priceToBook'),
+                'roe': info.get('returnOnEquity'),
+                'roa': info.get('returnOnAssets'),
+                'profit_margin': info.get('profitMargins'),
+                'operating_margin': info.get('operatingMargins'),
+                'revenue_growth': info.get('revenueGrowth'),
+                'earnings_growth': info.get('earningsGrowth'),
+                'debt_to_equity': info.get('debtToEquity'),
+                'current_ratio': info.get('currentRatio'),
+                'quick_ratio': info.get('quickRatio'),
+                'free_cash_flow': info.get('freeCashflow'),
+                'operating_cash_flow': info.get('operatingCashflow'),
+                'beta': info.get('beta'),
+                'fifty_two_week_high': info.get('fiftyTwoWeekHigh'),
+                'fifty_two_week_low': info.get('fiftyTwoWeekLow'),
+            }
+            success = bool(payload)
+            if payload:
+                await self._cache_key_statistics(symbol, payload)
+            return payload
+        except Exception as exc:
+            error_msg = str(exc)
+            logger.debug("[MarketData] get_key_statistics failed for %s: %s", symbol, exc)
+            return await self._get_cached_key_statistics(symbol)
+        finally:
+            response_time = (time.time() - start_time) * 1000
+            await api_monitor.record_api_call(
+                provider=APIProvider.YAHOO_FINANCE,
+                endpoint=f"key_statistics:{self._to_yahoo_symbol(symbol)}",
+                success=success,
+                response_time_ms=response_time,
+                error_message=error_msg,
+            )
+
+    async def prewarm_key_statistics(self, symbols: List[str]) -> Dict[str, object]:
+        attempted: list[str] = []
+        refreshed: list[str] = []
+        failures: dict[str, str] = {}
+
+        seen: set[str] = set()
+        for raw_symbol in symbols:
+            symbol = str(raw_symbol or "").strip().upper()
+            if not symbol or symbol in seen:
+                continue
+            seen.add(symbol)
+            attempted.append(symbol)
+            try:
+                payload = await self.get_key_statistics(symbol, force_refresh=True)
+                if payload:
+                    refreshed.append(symbol)
+                else:
+                    failures[symbol] = "empty key statistics"
+            except Exception as exc:
+                failures[symbol] = str(exc)[:160]
+
         return {
-            'pe_ratio': info.get('trailingPE'),
-            'forward_pe': info.get('forwardPE'),
-            'peg_ratio': info.get('pegRatio'),
-            'pb_ratio': info.get('priceToBook'),
-            'ps_ratio': info.get('priceToSalesTrailing12Months'),
-            'price_to_book': info.get('priceToBook'),
-            'roe': info.get('returnOnEquity'),
-            'roa': info.get('returnOnAssets'),
-            'profit_margin': info.get('profitMargins'),
-            'operating_margin': info.get('operatingMargins'),
-            'revenue_growth': info.get('revenueGrowth'),
-            'earnings_growth': info.get('earningsGrowth'),
-            'debt_to_equity': info.get('debtToEquity'),
-            'current_ratio': info.get('currentRatio'),
-            'quick_ratio': info.get('quickRatio'),
-            'free_cash_flow': info.get('freeCashflow'),
-            'operating_cash_flow': info.get('operatingCashflow'),
-            'beta': info.get('beta'),
-            'fifty_two_week_high': info.get('fiftyTwoWeekHigh'),
-            'fifty_two_week_low': info.get('fiftyTwoWeekLow'),
+            "attempted_symbols": attempted,
+            "refreshed_symbols": refreshed,
+            "success_count": len(refreshed),
+            "failure_count": len(failures),
+            "failures": failures,
         }
     
     async def get_analyst_recommendations(self, symbol: str) -> pd.DataFrame:
