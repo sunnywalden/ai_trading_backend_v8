@@ -47,6 +47,10 @@ class AiAdviceService:
         self.session = session
         self.market_provider = MarketDataProvider()
 
+    @staticmethod
+    def _rule_fallback_allowed() -> bool:
+        return bool(getattr(settings, "RUNTIME_ALLOW_RULE_BASED_FALLBACK", False))
+
     async def build_state_snapshot(self, account_id: str) -> AiStateView:
         """复用 /ai/state 的逻辑，内部构建出 AiStateView。"""
         from app.schemas.ai_state import AiStateView, LimitsView, SymbolBehaviorView, ExposureView
@@ -180,13 +184,9 @@ class AiAdviceService:
 
         if not settings.OPENAI_API_KEY:
             return AiAdviceResponse(
-                summary="占位建议：未配置 OPENAI_API_KEY，仅返回示例。",
-                reasoning="真实环境下调会调用 LLM 综合风险与行为生成建议。",
-                suggested_orders=[
-                    AdviceOrderSuggestion(
-                        symbol="AAPL", instrument="STOCK", side="BUY", quantity=0, note="示例订单", intent="ENTRY"
-                    )
-                ],
+                summary="AI 建议不可用",
+                reasoning="未配置 AI 提供商密钥，且平台已禁用占位/示例建议。",
+                suggested_orders=[],
             )
 
         try:
@@ -410,8 +410,17 @@ class AiAdviceService:
             )
             
             if not content:
-                logger.info(f"AI Advisor: Analysis fallback to rule-based engine for {symbol}")
-                return await self._get_rule_based_kline_analysis(symbol)
+                if self._rule_fallback_allowed():
+                    logger.info(f"AI Advisor: Analysis fallback to rule-based engine for {symbol}")
+                    return await self._get_rule_based_kline_analysis(symbol)
+                return KlineAnalysisResponse(
+                    symbol=symbol,
+                    prediction="AI 分析不可用",
+                    suggestion="规则回退已禁用，暂不生成自动技术分析结论",
+                    direction="NEUTRAL",
+                    action="HOLD",
+                    details="AI 提供商无可用结果，且运行时已禁用 rule-based fallback。",
+                )
             
             data = json.loads(content)
             
@@ -448,8 +457,17 @@ class AiAdviceService:
             return KlineAnalysisResponse(symbol=symbol, **data)
         except Exception as e:
             logger.error(f"AI Advisor: Analysis error for {symbol} | {e}")
-            logger.info(f"AI Advisor: Triggering rule-based fallback for {symbol}")
-            return await self._get_rule_based_kline_analysis(symbol)
+            if self._rule_fallback_allowed():
+                logger.info(f"AI Advisor: Triggering rule-based fallback for {symbol}")
+                return await self._get_rule_based_kline_analysis(symbol)
+            return KlineAnalysisResponse(
+                symbol=symbol,
+                prediction="AI 分析失败",
+                suggestion="规则回退已禁用，暂不生成自动技术分析结论",
+                direction="NEUTRAL",
+                action="HOLD",
+                details=f"AI 分析异常且 rule-based fallback 已禁用：{e}",
+            )
 
     async def _get_rule_based_kline_analysis(self, symbol: str) -> KlineAnalysisResponse:
         """模型降级：基于规则系统生成技术面分析报告"""

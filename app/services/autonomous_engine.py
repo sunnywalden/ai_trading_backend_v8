@@ -1606,6 +1606,15 @@ class AutonomousEngine:
 
         # 高置信度信号兜底：AI 返回 HOLD/qty=0 时，避免整批信号都不执行
         def _rule_based_fallback(reason: str, hold_reason: str = "ai-hold") -> dict:
+            if not bool(getattr(settings, "RUNTIME_ALLOW_RULE_BASED_FALLBACK", False)):
+                return {
+                    "action": "HOLD",
+                    "symbol": symbol,
+                    "qty": 0,
+                    "confidence": 0.0,
+                    "reasoning": f"rule-based fallback disabled: {reason}",
+                    "noop_reason": f"fallback-disabled:{hold_reason}",
+                }
             # REDUCE/EXIT 兜底：强制规则执行，避免 no-op(HOLD/qty<=0)
             if sig_type in ("REDUCE", "EXIT"):
                 return _build_reduce_exit_decision(reason)
