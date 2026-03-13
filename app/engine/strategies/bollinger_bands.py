@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from app.engine.strategies.base_strategy import BaseStrategy
 from app.models.technical_indicator import TechnicalIndicator
-from app.providers.market_data_provider import MarketDataProvider
+from app.providers.market_data_provider import market_data_provider
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ class BollingerBandsMeanReversion(BaseStrategy):
             universe = await self._get_default_universe()
         
         # 获取市场数据提供商
-        market_data = MarketDataProvider()
+        market_data = market_data_provider
         
         # 对每个标的进行分析
         for symbol in universe:

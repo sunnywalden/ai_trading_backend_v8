@@ -58,6 +58,7 @@ class MarketDataProvider:
     _shared_tiger_client = None
     _tiger_client_init_lock = threading.Lock()
     _shared_executor = ThreadPoolExecutor(max_workers=4)
+    _class_bars_cache: Dict[tuple, tuple] = {}
     # ── 类级别共享价格缓存（所有实例共享，避免重复请求）──
     _class_price_cache: Dict[str, tuple] = {}
     # ── 负面缓存：记录无效或不存在的 symbol 避免重复请求 ──
@@ -66,6 +67,7 @@ class MarketDataProvider:
     _tiger_historical_denied_cache: Dict[str, float] = {}
     _tiger_historical_occupied_symbols: set[str] = set()
     _tiger_historical_occupied_updated_at: float = 0.0
+    _tiger_historical_occupied_authoritative: bool = False
     _tiger_historical_cache_ttl_seconds: int = 1800
     _tiger_historical_occupied_pattern = re.compile(r"occupied symbols:\s*\[(.*?)\]", re.IGNORECASE | re.DOTALL)
     
@@ -83,7 +85,7 @@ class MarketDataProvider:
         self._ext_api_semaphore = asyncio.Semaphore(settings.EXTERNAL_API_CONCURRENCY)
         
         # K线数据缓存: {(symbol, period, interval): (data, timestamp)}
-        self._bars_cache: Dict[tuple, tuple] = {}
+        self._bars_cache = MarketDataProvider._class_bars_cache
         self._bars_cache_ttl = 1800  # K线缓存30分钟（历史数据变动慢）
         
         # 价格数据缓存：指向类级别共享字典（所有实例共享同一份缓存）
@@ -228,6 +230,7 @@ class MarketDataProvider:
         if occupied:
             MarketDataProvider._tiger_historical_occupied_symbols = occupied
             MarketDataProvider._tiger_historical_occupied_updated_at = now
+            MarketDataProvider._tiger_historical_occupied_authoritative = True
             if canonical in occupied:
                 MarketDataProvider._tiger_historical_denied_cache.pop(canonical, None)
 
@@ -238,8 +241,9 @@ class MarketDataProvider:
     def _remember_tiger_historical_success(self, symbol: str) -> None:
         canonical = self._canonical_history_symbol(symbol)
         MarketDataProvider._tiger_historical_denied_cache.pop(canonical, None)
-        MarketDataProvider._tiger_historical_occupied_symbols.add(canonical)
-        MarketDataProvider._tiger_historical_occupied_updated_at = time.time()
+        if MarketDataProvider._tiger_historical_occupied_authoritative:
+            MarketDataProvider._tiger_historical_occupied_symbols.add(canonical)
+            MarketDataProvider._tiger_historical_occupied_updated_at = time.time()
 
     def _should_attempt_tiger_historical(self, symbol: str) -> bool:
         now = time.time()
@@ -252,6 +256,8 @@ class MarketDataProvider:
             del MarketDataProvider._tiger_historical_denied_cache[canonical]
 
         if (
+            MarketDataProvider._tiger_historical_occupied_authoritative
+            and
             MarketDataProvider._tiger_historical_occupied_symbols
             and now - MarketDataProvider._tiger_historical_occupied_updated_at < self._tiger_historical_cache_ttl_seconds
         ):
@@ -306,6 +312,14 @@ class MarketDataProvider:
         # 2. 依次尝试数据源
         primary = self.primary_source
         fallback = self.fallback_source
+        tiger_capable = bool(
+            self._tiger_quote_client
+            and interval.lower() in ("1d", "day")
+            and BarPeriod is not None
+        )
+
+        if tiger_capable and self._should_attempt_tiger_historical(symbol):
+            primary, fallback = "tiger", "yfinance"
         
         sources = [primary, fallback]
         if primary == fallback:
@@ -314,7 +328,7 @@ class MarketDataProvider:
         for source in sources:
             if source == "tiger":
                 # Tiger 仅支持 1d 日线且有客户端
-                if self._tiger_quote_client and interval.lower() in ("1d", "day") and BarPeriod is not None:
+                if tiger_capable:
                     if not self._should_attempt_tiger_historical(symbol):
                         logger.debug("[MarketData] Skip Tiger historical for %s: known outside current occupied symbol budget", symbol)
                         continue

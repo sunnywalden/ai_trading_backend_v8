@@ -2,14 +2,14 @@
 低波动率策略
 """
 from typing import Any, Dict, List, Optional
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 import statistics
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.engine.strategies.base_strategy import BaseStrategy
-from app.providers.market_data_provider import MarketDataProvider
+from app.providers.market_data_provider import market_data_provider
 
 
 class LowVolatility(BaseStrategy):
@@ -37,14 +37,14 @@ class LowVolatility(BaseStrategy):
         if not universe:
             universe = await self._get_default_universe()
         
-        market_data = MarketDataProvider()
+        market_data = market_data_provider
         
         candidates = []
         
         for symbol in universe:
             try:
                 # 获取历史价格
-                end_date = datetime.utcnow()
+                end_date = datetime.now(UTC).replace(tzinfo=None)
                 start_date = end_date - timedelta(days=lookback_days + 30)
                 
                 prices = await market_data.get_historical_prices(

@@ -43,6 +43,7 @@ class DataHub:
         self._tiger_ohlcv_denied_symbols: dict[str, float] = {}
         self._tiger_ohlcv_occupied_symbols: set[str] = set()
         self._tiger_ohlcv_occupied_updated_at: float = 0.0
+        self._tiger_ohlcv_occupied_authoritative = False
         self._tiger_ohlcv_permission_pattern = re.compile(r"occupied symbols:\s*\[(.*?)\]", re.IGNORECASE | re.DOTALL)
 
     @staticmethod
@@ -108,6 +109,7 @@ class DataHub:
             if occupied:
                 self._tiger_ohlcv_occupied_symbols = occupied
                 self._tiger_ohlcv_occupied_updated_at = now
+                self._tiger_ohlcv_occupied_authoritative = True
                 if normalized in occupied:
                     self._tiger_ohlcv_denied_symbols.pop(normalized, None)
             logger.warning(
@@ -137,7 +139,11 @@ class DataHub:
                 return False
             self._tiger_ohlcv_denied_symbols.pop(normalized, None)
 
-        if self._tiger_ohlcv_occupied_symbols and now - self._tiger_ohlcv_occupied_updated_at < ttl:
+        if (
+            self._tiger_ohlcv_occupied_authoritative
+            and self._tiger_ohlcv_occupied_symbols
+            and now - self._tiger_ohlcv_occupied_updated_at < ttl
+        ):
             return normalized in self._tiger_ohlcv_occupied_symbols
         return True
 

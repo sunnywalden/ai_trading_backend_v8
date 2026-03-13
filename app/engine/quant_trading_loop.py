@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -27,6 +28,8 @@ from app.engine.adaptive_optimizer import AdaptiveOptimizer
 from app.engine.order_executor import OrderExecutor
 from app.engine.performance_analyzer import PerformanceAnalyzer
 from app.engine.signal_engine import SignalEngine
+from app.models.db import SessionLocal
+from app.models.strategy import HistoricalStrategyRun
 from app.models.trading_signal import TradingSignal
 from app.services.strategy_auto_selection_service import StrategyAutoSelectionService
 from app.services.strategy_service import StrategyRunService
@@ -106,14 +109,31 @@ class QuantTradingLoop:
                 execute_strategy_run_job,
             )
 
+            async def _load_run_signal_count(run_id: str) -> int:
+                async with SessionLocal() as read_session:
+                    stmt = select(HistoricalStrategyRun).where(HistoricalStrategyRun.strategy_run_id == run_id)
+                    result = await read_session.execute(stmt)
+                    history = result.scalars().first()
+                    if history is None:
+                        return 0
+                    payload = history.status_payload or {}
+                    signal_generation = payload.get("signal_generation") if isinstance(payload, dict) else {}
+                    raw_count = signal_generation.get("raw_signal_count") if isinstance(signal_generation, dict) else None
+                    if raw_count is not None:
+                        try:
+                            return max(0, int(raw_count))
+                        except (TypeError, ValueError):
+                            pass
+                    return max(0, int(history.hits or 0))
+
             strategy_limit = StrategyAutoSelectionService.resolve_scan_limit(
                 settings.AUTO_STRATEGY_SCAN_BATCH_SIZE
             )
-            strategies = await StrategyAutoSelectionService.select_auto_scan_strategies(
+            all_strategies = await StrategyAutoSelectionService.select_auto_scan_strategies(
                 self.session,
-                limit=strategy_limit,
+                limit=10,
             )
-            if not strategies:
+            if not all_strategies:
                 return {
                     "triggered": False,
                     "reason": "NO_ACTIVE_STRATEGY",
@@ -125,7 +145,11 @@ class QuantTradingLoop:
 
             triggered_runs = []
             failures = []
-            for strategy in strategies:
+            productive_runs = 0
+            selected_strategies = all_strategies[:strategy_limit]
+            fallback_strategies = all_strategies[strategy_limit:]
+
+            async def _run_strategy(strategy, *, attempt_kind: str) -> bool:
                 try:
                     run = await self.strategy_run_svc.create_run(
                         strategy=strategy,
@@ -142,29 +166,47 @@ class QuantTradingLoop:
                         run.id,
                         task_id=f"auto_cycle:{run.id}",
                     )
+                    signal_count = await _load_run_signal_count(run.id)
                     triggered_runs.append(
                         {
                             "run_id": run.id,
                             "strategy_id": strategy.id,
                             "strategy_name": strategy.name,
                             "target_universe": AUTO_UNIVERSE_KEY,
+                            "signal_count": signal_count,
+                            "attempt_kind": attempt_kind,
                         }
                     )
+                    return signal_count > 0
                 except Exception as exc:
                     failures.append(
                         {
                             "strategy_id": strategy.id,
                             "strategy_name": strategy.name,
                             "error": str(exc),
+                            "attempt_kind": attempt_kind,
                         }
                     )
+                    return False
+
+            for strategy in selected_strategies:
+                if await _run_strategy(strategy, attempt_kind="primary"):
+                    productive_runs += 1
+
+            if productive_runs == 0:
+                for strategy in fallback_strategies:
+                    if await _run_strategy(strategy, attempt_kind="fallback"):
+                        productive_runs += 1
+                        break
 
             return {
                 "triggered": bool(triggered_runs),
                 "selection_policy": "least_recently_run_first",
                 "requested_strategy_limit": strategy_limit,
                 "triggered_count": len(triggered_runs),
-                "selected_strategies": [strategy.name for strategy in strategies],
+                "selected_strategies": [strategy.name for strategy in selected_strategies],
+                "fallback_strategies_considered": [strategy.name for strategy in fallback_strategies],
+                "productive_runs": productive_runs,
                 "runs": triggered_runs,
                 "failures": failures,
                 "target_universe": AUTO_UNIVERSE_KEY,
