@@ -1664,11 +1664,20 @@ class AutonomousEngine:
         def _parse_ai_json(raw: str) -> Optional[dict]:
             import ast as _ast
             import json as _json
+            import re as _re
 
             if not raw:
                 return None
 
             text = raw.strip()
+
+            # 0) 去掉 DeepSeek Reasoner 的 <think>...</think> 推理块
+            #    部分 API 版本将 reasoning_content 内嵌于 content，其中含有大量 {/}
+            #    会干扰后续的深度计数器提取逻辑
+            if "<think>" in text:
+                text = _re.sub(r"<think>[\s\S]*?</think>", "", text, flags=_re.DOTALL).strip()
+                if not text:
+                    return None
 
             # 1) 直接整段解析
             try:
@@ -1754,6 +1763,12 @@ class AutonomousEngine:
                     decision = parsed
 
             if not isinstance(decision, dict):
+                logger.warning(
+                    "[AutonomousEngine._ai_decide] AI response parse failed for %s. "
+                    "Raw response (first 600 chars): %s",
+                    symbol,
+                    str(decision)[:600] if decision is not None else "None (API returned no content)",
+                )
                 return _rule_based_fallback(
                     "Parse failed", hold_reason="ai-parse-failed"
                 )
@@ -1870,8 +1885,13 @@ class AutonomousEngine:
                     "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": 1000,
                 }
-                # 尽量要求结构化 JSON 输出，降低 Parse failed 概率
-                req_kwargs["response_format"] = {"type": "json_object"}
+                # reasoning/thinking 模型（deepseek-reasoner、o1 等）不支持 response_format
+                # 这类模型的 content 已经是最终答案，无需强制 JSON 模式
+                _is_reasoning_model = any(
+                    kw in model.lower() for kw in ("reasoner", "thinking", "-r1", "o1", "o3")
+                )
+                if not _is_reasoning_model:
+                    req_kwargs["response_format"] = {"type": "json_object"}
 
                 resp = await asyncio.wait_for(
                     client.chat.completions.create(**req_kwargs),
