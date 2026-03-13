@@ -415,7 +415,7 @@ async def reconcile_broker_order_status(
 
         if status in ("CANCELLED", "REJECTED"):
             # 让现有逻辑回写信号状态（会将 EXECUTING -> VALIDATED 并清空失效 order_id）
-            await executor.monitor_order_status(real_account_id, oid)
+            await executor.monitor_order_status(real_account_id, oid, status_resp=status_resp)
 
             # 审计日志补充撤销标记
             await session.execute(
@@ -445,7 +445,7 @@ async def reconcile_broker_order_status(
             cancelled_synced += 1
 
         elif status == "FILLED":
-            await executor.monitor_order_status(real_account_id, oid)
+            await executor.monitor_order_status(real_account_id, oid, status_resp=status_resp)
             filled_synced += 1
 
     # 3) 【关键修正】同步 TradingPlan 的 Pipeline 阶段 (针对 V10.3 看板)

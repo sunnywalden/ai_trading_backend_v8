@@ -528,7 +528,8 @@ class OrderExecutor:
     async def monitor_order_status(
         self,
         account_id: str,
-        order_id: str
+        order_id: str,
+        status_resp: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """监控订单状态并同步到信号状态"""
         
@@ -537,8 +538,11 @@ class OrderExecutor:
             return {"status": "UNKNOWN", "message": "No order_id provided"}
 
         # 1. 从券商获取最新状态
-        print(f"[OrderExecutor] Checking status for order {order_id}")
-        resp = await self.broker.get_order_status(account_id, order_id)
+        if status_resp is None:
+            print(f"[OrderExecutor] Checking status for order {order_id}")
+            resp = await self.broker.get_order_status(account_id, order_id)
+        else:
+            resp = status_resp
         status = resp.get("status")
         intent = None
         
