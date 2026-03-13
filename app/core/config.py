@@ -283,6 +283,7 @@ class Settings(BaseSettings):
     RUNTIME_ALLOW_MOCK_DATA: bool = False
     RUNTIME_ALLOW_DUMMY_BROKER: bool = False
     RUNTIME_ALLOW_RULE_BASED_FALLBACK: bool = False
+    RUNTIME_ALLOW_DECISION_DEFAULTS: bool = False
 
     # ==================== V10.2-M1: 市场体制感知配置 ====================
     # 是否启用市场体制分类（关闭后体制固定为 BULL_TREND，不影响其他模块）

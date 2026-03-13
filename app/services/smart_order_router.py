@@ -14,6 +14,7 @@ from enum import Enum
 from sqlalchemy import select, and_, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.services.benchmark_service import BenchmarkService
 
 
@@ -254,7 +255,7 @@ class SmartOrderRouter:
         avg_volume = market_data.get("avg_volume", 1000000)
         
         if avg_volume == 0:
-            return 1.0  # 没有成交量数据，保守估计为100%
+            return float("inf")
         
         return quantity / avg_volume
     
@@ -279,23 +280,21 @@ class SmartOrderRouter:
         """
         获取市场数据
         
-        实际实现中应该调用Tiger Broker API获取实时数据
-        这里返回模拟数据
+        实际实现中应该调用 Tiger Broker API 获取实时数据。
+        默认禁止返回硬编码模拟行情。
         """
-        # TODO: 集成Tiger Broker API
-        # market_data = await self.tiger_client.get_quote(symbol)
-        
-        # 模拟数据
-        return {
-            "symbol": symbol,
-            "last_price": 150.00,
-            "bid": 149.95,
-            "ask": 150.05,
-            "avg_volume": 5_000_000,  # 日均500万股
-            "volatility": 0.25,  # 25%年化波动率
-            "spread": 0.10,
-            "market_cap": 10_000_000_000  # 100亿市值
-        }
+        if getattr(settings, "RUNTIME_ALLOW_MOCK_DATA", False):
+            return {
+                "symbol": symbol,
+                "last_price": 150.00,
+                "bid": 149.95,
+                "ask": 150.05,
+                "avg_volume": 5_000_000,
+                "volatility": 0.25,
+                "spread": 0.10,
+                "market_cap": 10_000_000_000,
+            }
+        return None
     
     def _create_market_order(
         self,

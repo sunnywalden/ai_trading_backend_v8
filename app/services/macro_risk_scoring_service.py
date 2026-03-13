@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 import yfinance as yf
 
+from app.core.config import settings
 from app.models.macro_risk import MacroRiskScore, GeopoliticalEvent
 from app.services.api_monitoring_service import api_monitor, APIProvider, APIRateLimit
 
@@ -218,9 +219,9 @@ class MacroRiskScoringService:
         self,
         calc_func,
         dimension_name: str,
-        fallback_value: float,
+        fallback_value: Optional[float],
         provider: Optional[APIProvider] = None
-    ) -> float:
+    ) -> Optional[float]:
         """
         带重试机制的计算函数
         
@@ -290,7 +291,7 @@ class MacroRiskScoringService:
         monetary = await self._calculate_with_retry(
             self._calculate_monetary_policy_risk,
             "monetary_policy",
-            cached.monetary_policy_score if cached else 65.0,
+            cached.monetary_policy_score if cached else None,
             provider=APIProvider.YAHOO_FINANCE
         )
         await self._sleep_request_delay()
@@ -298,7 +299,7 @@ class MacroRiskScoringService:
         sector_bubble = await self._calculate_with_retry(
             self._calculate_sector_bubble_risk,
             "sector_bubble",
-            cached.sector_bubble_score if cached else 60.0,
+            cached.sector_bubble_score if cached else None,
             provider=APIProvider.YAHOO_FINANCE
         )
         await self._sleep_request_delay()
@@ -306,7 +307,7 @@ class MacroRiskScoringService:
         economic_cycle = await self._calculate_with_retry(
             self._calculate_economic_cycle_risk,
             "economic_cycle",
-            cached.economic_cycle_score if cached else 65.0,
+            cached.economic_cycle_score if cached else None,
             provider=APIProvider.YAHOO_FINANCE
         )
         await self._sleep_request_delay()
@@ -314,7 +315,7 @@ class MacroRiskScoringService:
         market_sentiment = await self._calculate_with_retry(
             self._calculate_market_sentiment_risk,
             "market_sentiment",
-            cached.sentiment_score if cached else 65.0,
+            cached.sentiment_score if cached else None,
             provider=APIProvider.YAHOO_FINANCE
         )
 
@@ -322,11 +323,25 @@ class MacroRiskScoringService:
         shock_penalty = await self._calculate_with_retry(
             self._calculate_market_shock_penalty,
             "market_shock_penalty",
-            0.0,
+            0.0 if getattr(settings, "RUNTIME_ALLOW_DECISION_DEFAULTS", False) else None,
             provider=APIProvider.YAHOO_FINANCE
         )
 
-        if shock_penalty > 0:
+        missing_dims = [
+            name
+            for name, value in {
+                "monetary_policy": monetary,
+                "geopolitical": geopolitical,
+                "sector_bubble": sector_bubble,
+                "economic_cycle": economic_cycle,
+                "market_sentiment": market_sentiment,
+            }.items()
+            if value is None
+        ]
+        if missing_dims and not getattr(settings, "RUNTIME_ALLOW_DECISION_DEFAULTS", False):
+            raise RuntimeError(f"missing real macro risk inputs: {', '.join(missing_dims)}")
+
+        if shock_penalty and shock_penalty > 0:
             monetary = max(0.0, monetary - shock_penalty * 0.5)
             geopolitical = max(0.0, geopolitical - shock_penalty * 0.35)
             market_sentiment = max(0.0, market_sentiment - shock_penalty * 0.7)

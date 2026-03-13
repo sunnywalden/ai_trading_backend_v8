@@ -218,6 +218,10 @@ class RegimeClassifier:
 
     FALLBACK_REGIME = RegimeType.RANGE_BOUND
 
+    @staticmethod
+    def _decision_defaults_allowed() -> bool:
+        return bool(getattr(settings, "RUNTIME_ALLOW_DECISION_DEFAULTS", False))
+
     async def run(self, db: AsyncSession) -> dict:
         """
         主入口：执行完整分类流程。
@@ -241,7 +245,13 @@ class RegimeClassifier:
             logger.error(
                 f"[RegimeClassifier] Failed to compute scores: {exc}", exc_info=True
             )
-            scores = RegimeScores(50, 50, 50, 50, 50)  # 回退到中性分数
+            if not self._decision_defaults_allowed():
+                return {
+                    "skipped": True,
+                    "reason": "REAL_REGIME_INPUTS_UNAVAILABLE",
+                    "error": str(exc),
+                }
+            scores = RegimeScores(50, 50, 50, 50, 50)
 
         candidate_regime, confidence = scores.classify()
 
@@ -438,20 +448,37 @@ class RegimeClassifier:
         )
 
         # 任何维度出错则使用中性分数 50
-        def safe(v: float | BaseException, default: float = 50.0) -> float:
+        missing: list[str] = []
+
+        def safe(v: float | None | BaseException, label: str, default: float = 50.0) -> float:
             # asyncio.gather with return_exceptions=True may return BaseException
             # (KeyboardInterrupt/SystemExit etc).  Treat any exception as default.
             if isinstance(v, BaseException):
                 logger.warning(f"[RegimeClassifier] Score computation error: {v}")
+                if not self._decision_defaults_allowed():
+                    missing.append(label)
+                return default
+            if v is None:
+                if not self._decision_defaults_allowed():
+                    missing.append(label)
                 return default
             return float(v)
 
+        trend_score = safe(trend, "trend")
+        vol_score = safe(vol, "vol")
+        breadth_score = safe(breadth, "breadth")
+        macro_score = safe(macro, "macro")
+        momentum_score = safe(momentum, "momentum")
+
+        if missing and not self._decision_defaults_allowed():
+            raise RuntimeError(f"missing real regime inputs: {', '.join(sorted(set(missing)))}")
+
         return RegimeScores(
-            trend=safe(trend),
-            vol=safe(vol),
-            breadth=safe(breadth),
-            macro=safe(macro),
-            momentum=safe(momentum),
+            trend=trend_score,
+            vol=vol_score,
+            breadth=breadth_score,
+            macro=macro_score,
+            momentum=momentum_score,
         )
 
     @staticmethod
@@ -501,7 +528,7 @@ class RegimeClassifier:
                 pass
         return float(value)
 
-    async def _score_trend(self) -> float:
+    async def _score_trend(self) -> Optional[float]:
         """
         趋势强度评分（0~100）。
 
@@ -526,14 +553,14 @@ class RegimeClassifier:
             logger.warning(
                 "[RegimeClassifier] Insufficient SPY data for trend score; using 50"
             )
-            return 50.0
+            return 50.0 if self._decision_defaults_allowed() else None
 
         close = self._extract_close_series(spy_data, "SPY")
         if close is None or len(close) < 50:
             logger.warning(
                 "[RegimeClassifier] Insufficient SPY close series for trend score; using 50"
             )
-            return 50.0
+            return 50.0 if self._decision_defaults_allowed() else None
 
         price = self._series_float(close, -1)
         ma20 = self._series_float(close.rolling(20).mean().dropna(), -1)
@@ -569,7 +596,7 @@ class RegimeClassifier:
 
         return max(0.0, min(100.0, score))
 
-    async def _score_volatility(self) -> float:
+    async def _score_volatility(self) -> Optional[float]:
         """
         波动率制度评分（0~100，越高越恐慌）。
 
@@ -589,11 +616,11 @@ class RegimeClassifier:
         )
 
         if vix_data is None or vix_data.empty:
-            return 50.0
+            return 50.0 if self._decision_defaults_allowed() else None
 
         vix_close = self._extract_close_series(vix_data, "^VIX")
         if vix_close is None:
-            return 50.0
+            return 50.0 if self._decision_defaults_allowed() else None
 
         vix_now = self._series_float(vix_close, -1)
         vix_ma30 = (
@@ -625,7 +652,7 @@ class RegimeClassifier:
 
         return max(0.0, min(100.0, base_score + ratio_bonus))
 
-    async def _score_breadth(self) -> float:
+    async def _score_breadth(self) -> Optional[float]:
         """
         市场广度评分（0~100，越高越健康）。
 
@@ -645,16 +672,16 @@ class RegimeClassifier:
         )
 
         if data is None or data.empty or "Close" not in data.columns:
-            return 55.0  # 中性偏高
+            return 55.0 if self._decision_defaults_allowed() else None
 
         spy_close = self._extract_close_series(data, "SPY")
         rsp_close = self._extract_close_series(data, "RSP")
 
         if spy_close is None or rsp_close is None:
-            return 55.0
+            return 55.0 if self._decision_defaults_allowed() else None
 
         if len(spy_close) < 20 or len(rsp_close) < 20:
-            return 55.0
+            return 55.0 if self._decision_defaults_allowed() else None
 
         # RSP/SPY 比率：>1 表示等权更强（广度健康），<1 表示大盘被巨头拉升（广度弱）
         ratio_now = self._series_float(rsp_close, -1) / self._series_float(spy_close, -1)
@@ -673,7 +700,7 @@ class RegimeClassifier:
 
         return max(0.0, min(100.0, score))
 
-    async def _score_macro(self) -> float:
+    async def _score_macro(self) -> Optional[float]:
         """
         宏观环境评分（0~100，越高越宽松/正向）。
 
@@ -699,9 +726,9 @@ class RegimeClassifier:
             return max(0.0, min(100.0, score))
         except Exception as exc:
             logger.warning(f"[RegimeClassifier] macro score fallback: {exc}")
-            return 50.0
+            return 50.0 if self._decision_defaults_allowed() else None
 
-    async def _score_momentum(self) -> float:
+    async def _score_momentum(self) -> Optional[float]:
         """
         价格动量评分（0~100，越高动量越强）。
 
@@ -721,12 +748,12 @@ class RegimeClassifier:
         )
 
         if spy_data is None or spy_data.empty or len(spy_data) < 20:
-            return 50.0
+            return 50.0 if self._decision_defaults_allowed() else None
 
         close = self._extract_close_series(spy_data, "SPY")
 
         if close is None or len(close) < 20:
-            return 50.0
+            return 50.0 if self._decision_defaults_allowed() else None
 
         # 20 日动量
         latest_close = self._series_float(close, -1)
@@ -735,6 +762,8 @@ class RegimeClassifier:
 
         # RSI(14)
         rsi = self._compute_rsi(close, window=14)
+        if rsi is None:
+            return 50.0 if self._decision_defaults_allowed() else None
 
         score = 50.0
         # 每 1% 20日动量 → +2 分，上限 ±25
@@ -745,7 +774,7 @@ class RegimeClassifier:
         return max(0.0, min(100.0, score))
 
     @staticmethod
-    def _compute_rsi(prices, window: int = 14) -> float:
+    def _compute_rsi(prices, window: int = 14) -> Optional[float]:
         """计算最新 RSI 值。"""
         import pandas as pd
 
@@ -756,7 +785,7 @@ class RegimeClassifier:
         rs = gain / loss.replace(0, float("nan"))
         rsi = 100 - (100 / (1 + rs))
         val = rsi.iloc[-1]
-        return float(val) if not (val != val) else 50.0  # nan → 50
+        return float(val) if not (val != val) else None
 
     # ─────────────────────────────────────────────────
     # 三天确认机制

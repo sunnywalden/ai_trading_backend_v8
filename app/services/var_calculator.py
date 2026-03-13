@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models.equity_snapshot import EquitySnapshot
 from app.services.benchmark_service import BenchmarkService
 
@@ -61,6 +62,11 @@ class VaRCalculator:
         
         # 获取当前账户权益
         current_equity = await self._get_current_equity(account_id)
+        if current_equity is None:
+            return {
+                "error": "缺少真实权益数据",
+                "message": "未找到真实 EquitySnapshot，且已禁用默认权益值"
+            }
         
         # 获取当前持有头寸的 Beta（如果有基准数据）
         beta = await self._calculate_portfolio_beta(returns)
@@ -112,12 +118,14 @@ class VaRCalculator:
             "interpretation": self._interpret_var(var_95, cvar_95, max_drawdown)
         }
 
-    async def _calculate_portfolio_beta(self, returns: List[float]) -> float:
+    async def _calculate_portfolio_beta(self, returns: List[float]) -> Optional[float]:
         """计算投资组合相对于SPY的Beta"""
         try:
             benchmark_returns = await self.benchmark_service.get_benchmark_returns("SPY", len(returns))
             if not benchmark_returns or len(benchmark_returns) < 10:
-                return 1.0  # 默认值
+                if getattr(settings, "RUNTIME_ALLOW_DECISION_DEFAULTS", False):
+                    return 1.0
+                return None
             
             # 取两者重合的长度
             n = min(len(returns), len(benchmark_returns))
@@ -131,10 +139,16 @@ class VaRCalculator:
             cov_pm = sum((p - mean_p) * (m - mean_m) for p, m in zip(p_returns, m_returns)) / (n - 1)
             var_m = statistics.variance(m_returns)
             
-            return cov_pm / var_m if var_m > 0 else 1.0
+            if var_m <= 0:
+                if getattr(settings, "RUNTIME_ALLOW_DECISION_DEFAULTS", False):
+                    return 1.0
+                return None
+            return cov_pm / var_m
         except Exception as e:
             print(f"Beta计算失败: {e}")
-            return 1.0
+            if getattr(settings, "RUNTIME_ALLOW_DECISION_DEFAULTS", False):
+                return 1.0
+            return None
 
     def _calculate_sharpe_ratio(self, returns: List[float], risk_free_annual: float = 0.045) -> float:
         """计算夏普比率（年化）"""
@@ -334,7 +348,7 @@ class VaRCalculator:
         
         return returns
     
-    async def _get_current_equity(self, account_id: str) -> float:
+    async def _get_current_equity(self, account_id: str) -> Optional[float]:
         """获取当前账户权益"""
         from sqlalchemy import desc
         
@@ -351,7 +365,9 @@ class VaRCalculator:
         if snapshot:
             return float(snapshot.total_equity)
         
-        return 100000.0  # 默认值
+        if getattr(settings, "RUNTIME_ALLOW_DECISION_DEFAULTS", False):
+            return 100000.0
+        return None
     
     async def stress_test(
         self,
@@ -370,6 +386,8 @@ class VaRCalculator:
         """
         # 获取当前持仓
         current_equity = await self._get_current_equity(account_id)
+        if current_equity is None:
+            raise ValueError("缺少真实权益数据，无法执行压力测试")
         
         # 定义压力情景
         stress_scenarios = {
@@ -392,9 +410,10 @@ class VaRCalculator:
         
         scenario_config = stress_scenarios.get(scenario, stress_scenarios["2008_crisis"])
         
-        # 获取当前Beta（假设组合Beta）
-        # 简化处理：假设Beta = 0.8
-        portfolio_beta = 0.8
+        returns = await self._get_historical_returns(account_id, 252)
+        portfolio_beta = await self._calculate_portfolio_beta(returns)
+        if portfolio_beta is None:
+            raise ValueError("缺少真实基准收益数据，无法估算组合 Beta 并执行压力测试")
         
         # 估算组合损失
         estimated_loss_pct = scenario_config["market_drop"] * portfolio_beta
