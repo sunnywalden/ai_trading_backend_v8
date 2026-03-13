@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.cache import cache
 from app.models.fundamental_data import FundamentalData
 from app.services.api_monitoring_service import APIProvider, api_monitor
 
@@ -35,6 +36,23 @@ class FundamentalAnalysisService:
 
     def __init__(self):
         self.cache_ttl_hours = settings.CACHE_TTL_FUNDAMENTAL_HOURS
+        self.redis_cache_ttl_seconds = int(settings.FUNDAMENTAL_REDIS_CACHE_TTL_SECONDS or 86400)
+
+    def _redis_cache_key(self, symbol: str) -> str:
+        return f"fundamental_analysis:{str(symbol or '').strip().upper()}"
+
+    async def _get_cached_result_from_redis(self, symbol: str) -> Optional[SimpleNamespace]:
+        payload = await cache.get(self._redis_cache_key(symbol))
+        if not isinstance(payload, dict) or not payload:
+            return None
+        return SimpleNamespace(**payload)
+
+    async def _cache_result_to_redis(self, symbol: str, result: SimpleNamespace) -> None:
+        await cache.set(
+            self._redis_cache_key(symbol),
+            vars(result),
+            expire=self.redis_cache_ttl_seconds,
+        )
 
     async def get_fundamental_data(
         self, symbol: str, force_refresh: bool = False
@@ -49,13 +67,24 @@ class FundamentalAnalysisService:
         Returns:
             包含基本面数据和评分的字典，如果失败返回None
         """
+        symbol = str(symbol or "").strip().upper()
+        if not symbol:
+            return None
+
+        if not force_refresh:
+            redis_cached = await self._get_cached_result_from_redis(symbol)
+            if redis_cached is not None:
+                return redis_cached
+
         async with _get_session() as session:
             # 检查缓存
             if not force_refresh:
                 cached = await self._get_cached_data(session, symbol)
                 if cached:
                     # 将ORM对象转换为字典并添加评分
-                    return self._build_result_dict(cached)
+                    result = self._build_result_dict(cached)
+                    await self._cache_result_to_redis(symbol, result)
+                    return result
 
             # 获取新数据
             fundamental_dict = await self._fetch_fundamental_from_yfinance(symbol)
@@ -112,7 +141,7 @@ class FundamentalAnalysisService:
             await session.refresh(fundamental)
 
             # 返回包含评分的字典
-            return self._build_result_dict(
+            result = self._build_result_dict(
                 fundamental,
                 valuation_score,
                 profitability_score,
@@ -120,6 +149,8 @@ class FundamentalAnalysisService:
                 health_score,
                 overall_score,
             )
+            await self._cache_result_to_redis(symbol, result)
+            return result
 
     def _build_result_dict(
         self,

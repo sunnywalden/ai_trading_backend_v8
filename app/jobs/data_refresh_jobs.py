@@ -244,36 +244,41 @@ async def refresh_fundamental_data_job():
         logger.info("Starting fundamental data refresh job")
         start_time = datetime.now()
 
-        # 获取所有需要刷新的symbol
-        trade_client = make_option_broker_client()
-        account_id = await trade_client.get_account_id()
-        positions = await trade_client.list_underlying_positions(account_id)
-
-        if not positions:
-            logger.info("No positions found, skipping fundamental refresh")
-            return
-
-        symbols = [pos.symbol for pos in positions]
-        success_count = 0
-        error_count = 0
-
         # 调用FundamentalAnalysisService刷新基本面数据
         from app.services.fundamental_analysis_service import \
             FundamentalAnalysisService
 
         fundamental_service = FundamentalAnalysisService()
 
+        symbols: list[str] = []
+        try:
+            trade_client = make_option_broker_client()
+            account_id = await trade_client.get_account_id()
+            positions = await trade_client.list_underlying_positions(account_id)
+            symbols.extend(pos.symbol for pos in positions)
+        except Exception as e:
+            logger.warning("Fundamental refresh: unable to load broker positions: %s", e)
+
+        async with _get_session() as session:
+            symbols.extend(await _collect_symbols_for_historical_refresh(session))
+
+        seen: set[str] = set()
+        normalized_symbols: list[str] = []
         for symbol in symbols:
-            try:
-                await fundamental_service.get_fundamental_data(
-                    symbol, force_refresh=True
-                )
-                success_count += 1
-            except Exception as e:
-                logger.error(
-                    f"Failed to refresh fundamental data for {symbol}: {str(e)}"
-                )
-                error_count += 1
+            clean = str(symbol or "").strip().upper()
+            if not clean or clean in seen:
+                continue
+            seen.add(clean)
+            normalized_symbols.append(clean)
+
+        normalized_symbols = normalized_symbols[: max(1, int(settings.FUNDAMENTAL_REFRESH_SYMBOL_LIMIT or 80))]
+        if not normalized_symbols:
+            logger.info("No symbols found, skipping fundamental refresh")
+            return
+
+        results = await fundamental_service.batch_refresh_fundamentals(normalized_symbols)
+        success_count = sum(1 for ok in results.values() if ok)
+        error_count = len(results) - success_count
 
         elapsed = (datetime.now() - start_time).total_seconds()
         logger.info(
