@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from datetime import date, timedelta, datetime
 from typing import Optional
@@ -39,6 +40,10 @@ class DataHub:
         self._tiger_ohlcv_last_recovered_at: datetime | None = None
         self._tiger_ohlcv_last_error_message: str | None = None
         self._tiger_ohlcv_last_symbol: str | None = None
+        self._tiger_ohlcv_denied_symbols: dict[str, float] = {}
+        self._tiger_ohlcv_occupied_symbols: set[str] = set()
+        self._tiger_ohlcv_occupied_updated_at: float = 0.0
+        self._tiger_ohlcv_permission_pattern = re.compile(r"occupied symbols:\s*\[(.*?)\]", re.IGNORECASE | re.DOTALL)
 
     @staticmethod
     def _is_tiger_hk_permission_error(exc: Exception) -> bool:
@@ -96,15 +101,45 @@ class DataHub:
                 settings.DATA_HUB_TIGER_OHLCV_RATE_LIMIT_COOLDOWN_SECONDS,
             )
         elif self._is_tiger_ohlcv_permission_error(exc):
-            self._set_tiger_ohlcv_cooldown(
-                settings.DATA_HUB_TIGER_OHLCV_PERMISSION_COOLDOWN_SECONDS,
-                "permission-denied",
-            )
+            now = time.monotonic()
+            normalized = normalize_hk_symbol(symbol) if is_hk_stock(symbol) else str(symbol).strip().upper()
+            self._tiger_ohlcv_denied_symbols[normalized] = now
+            occupied = self._parse_tiger_ohlcv_occupied_symbols(str(exc))
+            if occupied:
+                self._tiger_ohlcv_occupied_symbols = occupied
+                self._tiger_ohlcv_occupied_updated_at = now
+                if normalized in occupied:
+                    self._tiger_ohlcv_denied_symbols.pop(normalized, None)
             logger.warning(
-                "DataHub: Tiger OHLCV permission denied for %s, cooling down %ss and preferring yfinance",
+                "DataHub: Tiger OHLCV permission denied for %s, preferring yfinance and caching occupied-symbol budget",
                 symbol,
-                settings.DATA_HUB_TIGER_OHLCV_PERMISSION_COOLDOWN_SECONDS,
             )
+
+    def _parse_tiger_ohlcv_occupied_symbols(self, message: str) -> set[str]:
+        match = self._tiger_ohlcv_permission_pattern.search(message or "")
+        if not match:
+            return set()
+        parsed: set[str] = set()
+        for token in match.group(1).split(","):
+            cleaned = token.strip().strip("'\"")
+            if not cleaned:
+                continue
+            parsed.add(normalize_hk_symbol(cleaned) if is_hk_stock(cleaned) else cleaned.upper())
+        return parsed
+
+    def _should_attempt_tiger_ohlcv_for_symbol(self, symbol: str) -> bool:
+        normalized = normalize_hk_symbol(symbol) if is_hk_stock(symbol) else str(symbol).strip().upper()
+        now = time.monotonic()
+        denied_at = self._tiger_ohlcv_denied_symbols.get(normalized)
+        ttl = settings.DATA_HUB_TIGER_OHLCV_PERMISSION_COOLDOWN_SECONDS
+        if denied_at is not None:
+            if now - denied_at < ttl:
+                return False
+            self._tiger_ohlcv_denied_symbols.pop(normalized, None)
+
+        if self._tiger_ohlcv_occupied_symbols and now - self._tiger_ohlcv_occupied_updated_at < ttl:
+            return normalized in self._tiger_ohlcv_occupied_symbols
+        return True
 
     def get_tiger_ohlcv_runtime_status(self) -> dict[str, object]:
         now = datetime.now()
@@ -268,6 +303,8 @@ class DataHub:
                 self._yf_ohlcv, symbol, start, end, interval
             )
         elif source == "tiger":
+            if not self._should_attempt_tiger_ohlcv_for_symbol(symbol):
+                raise RuntimeError(f"Tiger OHLCV budget skip for {symbol}: symbol not in occupied historical set")
             return await self._tiger_ohlcv(symbol, start, end, interval)
         else:
             raise ValueError(f"Unknown data source: {source}")
