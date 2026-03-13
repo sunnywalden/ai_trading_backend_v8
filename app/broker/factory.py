@@ -9,10 +9,10 @@ _tiger_instance: TigerOptionClient | None = None
 
 
 def make_option_broker_client() -> OptionBrokerClient:
-    """根据配置返回 Tiger 或 Dummy 客户端（单例，进程内复用）。
+    """根据配置返回 Tiger 或显式允许的 Dummy 客户端（单例，进程内复用）。
 
     - 如果在 .env 中配置了 TIGER_PRIVATE_KEY_PATH / TIGER_ID，则用 TigerOptionClient；
-    - 否则退回 DummyOptionClient（Greeks/仓位全 0，系统仍可运行）。
+    - 否则仅在显式允许时退回 DummyOptionClient。
     """
     global _broker_instance
     if _broker_instance is not None:
@@ -26,6 +26,10 @@ def make_option_broker_client() -> OptionBrokerClient:
             account=settings.TIGER_ACCOUNT,
         )
     else:
+        if not getattr(settings, "RUNTIME_ALLOW_DUMMY_BROKER", False):
+            raise RuntimeError(
+                "Tiger API config missing and runtime dummy broker fallback is disabled"
+            )
         print("[BrokerFactory] No Tiger API config found, using DummyOptionClient")
         _broker_instance = DummyOptionClient()
 

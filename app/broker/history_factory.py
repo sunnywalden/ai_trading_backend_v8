@@ -5,7 +5,7 @@ from .tiger_trade_history_client import TigerTradeHistoryClient
 
 
 def make_trade_history_client() -> TradeHistoryClient:
-    """根据配置返回 Tiger 或 Dummy 历史成交客户端。
+    """根据配置返回 Tiger 或显式允许的 Dummy 历史成交客户端。
     
     - 如果在 .env 中配置了 TIGER_PRIVATE_KEY_PATH / TIGER_ID，则用 TigerTradeHistoryClient；
     - 否则退回 DummyTradeHistoryClient（返回空列表，系统仍可运行）。
@@ -15,5 +15,9 @@ def make_trade_history_client() -> TradeHistoryClient:
             private_key_path=settings.TIGER_PRIVATE_KEY_PATH,
             tiger_id=settings.TIGER_ID,
             account=settings.TIGER_ACCOUNT,
+        )
+    if not getattr(settings, "RUNTIME_ALLOW_DUMMY_BROKER", False):
+        raise RuntimeError(
+            "Tiger history client config missing and runtime dummy history fallback is disabled"
         )
     return DummyTradeHistoryClient()

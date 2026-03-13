@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from typing import Dict
 
+import logging
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -14,6 +16,8 @@ from app.services.safety_guard import SafetyGuard
 from app.services.risk_event_logger import log_risk_event
 from app.broker.factory import make_option_broker_client
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class HedgeOrderPlan:
@@ -25,17 +29,6 @@ class HedgeOrderPlan:
     meta: Dict
 
 
-class MockOrderExecutor:
-    def __init__(self, session: AsyncSession):
-        self.session = session
-
-    async def place_stock_order(self, account_id: str, symbol: str, side: str, quantity: int, reason: str, intent: str):
-        print(f"[MOCK ORDER] {intent} {side} {quantity} {symbol} reason={reason}")
-
-    async def place_option_hedge_order(self, account_id: str, symbol: str, side: str, quantity: int, meta: Dict, reason: str, intent: str):
-        print(f"[MOCK ORDER] {intent} OPTION {side} {quantity} {symbol} meta={meta} reason={reason}")
-
-
 class AutoHedgeEngine:
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -44,8 +37,8 @@ class AutoHedgeEngine:
         self.account_svc = AccountService(session)
         # 使用工厂方法选择 Tiger 或 Dummy 客户端
         broker_client = make_option_broker_client()
+        self.broker = broker_client
         self.expo_svc = OptionExposureService(session, broker_client)
-        self.order_executor = MockOrderExecutor(session)
 
     async def run_once(self) -> None:
         account_id = settings.TIGER_ACCOUNT
@@ -104,11 +97,33 @@ class AutoHedgeEngine:
             )
             return
 
+        order_params = {
+            "symbol": plan.symbol,
+            "direction": "LONG" if str(plan.side).upper() == "BUY" else "SHORT",
+            "quantity": int(plan.quantity),
+            "price": None,
+            "order_type": "MARKET",
+            "time_in_force": "DAY",
+        }
+        if plan.instrument != "STOCK":
+            order_params.update({
+                "asset_type": "OPTION",
+                "option_meta": plan.meta,
+            })
+
+        resp = await self.broker.place_order(account_id, order_params)
+        if not resp.get("success"):
+            raise RuntimeError(f"Auto hedge broker order failed: {resp.get('message') or 'unknown error'}")
+
+        logger.info(
+            "[AutoHedge] Submitted real hedge order symbol=%s instrument=%s qty=%s order_id=%s",
+            plan.symbol,
+            plan.instrument,
+            plan.quantity,
+            resp.get("order_id"),
+        )
+
         if plan.instrument == "STOCK":
-            await self.order_executor.place_stock_order(
-                account_id, plan.symbol, plan.side, plan.quantity, plan.reason, str(OrderIntent.HEDGE)
-            )
+            pass
         else:
-            await self.order_executor.place_option_order(
-                account_id, plan.symbol, plan.side, plan.quantity, plan.meta, plan.reason, str(OrderIntent.HEDGE)
-            )
+            pass
