@@ -58,7 +58,7 @@ def test_normalize_real_signal_payload_marks_real_origin_and_dimensions():
 @pytest.mark.asyncio
 async def test_momentum_quality_generates_real_candidates(monkeypatch):
     class _FakeMarketDataProvider:
-        async def get_historical_prices(self, symbol, start_date, end_date):
+        async def get_historical_prices(self, symbol, start_date, end_date, **kwargs):
             return [
                 {"close": 100.0 + i, "open": 99.0 + i, "high": 101.0 + i, "low": 98.0 + i, "volume": 1_000_000 + i * 1000}
                 for i in range(160)
@@ -98,7 +98,7 @@ async def test_momentum_quality_generates_real_candidates(monkeypatch):
 @pytest.mark.asyncio
 async def test_momentum_quality_tolerates_missing_key_statistics(monkeypatch):
     class _FakeMarketDataProvider:
-        async def get_historical_prices(self, symbol, start_date, end_date):
+        async def get_historical_prices(self, symbol, start_date, end_date, **kwargs):
             return [
                 {"close": 100.0 + i, "open": 99.0 + i, "high": 101.0 + i, "low": 98.0 + i, "volume": 1_000_000 + i * 1000}
                 for i in range(160)
@@ -133,7 +133,7 @@ async def test_momentum_quality_tolerates_missing_key_statistics(monkeypatch):
 @pytest.mark.asyncio
 async def test_momentum_quality_ranked_fallback_uses_real_data_when_threshold_not_met(monkeypatch):
     class _FakeMarketDataProvider:
-        async def get_historical_prices(self, symbol, start_date, end_date):
+        async def get_historical_prices(self, symbol, start_date, end_date, **kwargs):
             base = {
                 "00700": 100.0,
                 "09988": 98.0,
@@ -173,7 +173,7 @@ async def test_momentum_quality_ranked_fallback_uses_real_data_when_threshold_no
 @pytest.mark.asyncio
 async def test_momentum_quality_generates_sell_signals_for_negative_momentum(monkeypatch):
     class _FakeMarketDataProvider:
-        async def get_historical_prices(self, symbol, start_date, end_date):
+        async def get_historical_prices(self, symbol, start_date, end_date, **kwargs):
             closes = [150.0 - i * 0.5 for i in range(160)]
             return [
                 {"close": close, "open": close + 0.2, "high": close + 0.4, "low": close - 0.4, "volume": 1_000_000}

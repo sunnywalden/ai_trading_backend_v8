@@ -13,6 +13,7 @@ from app.models.position_trend_snapshot import PositionTrendSnapshot
 from app.providers.market_data_provider import MarketDataProvider
 from app.providers.technical_calculator import TechnicalIndicatorCalculator
 from app.schemas.position_assessment import TechnicalAnalysisDTO
+from app.services.non_realtime_data_policy import NonRealtimeDataPolicy
 
 
 class TechnicalAnalysisService:
@@ -30,7 +31,8 @@ class TechnicalAnalysisService:
         use_cache: bool = True,
         account_id: str = "DEMO",
         pre_fetched_df=None,
-        use_ai: bool = True
+        use_ai: bool = True,
+        data_policy: NonRealtimeDataPolicy | None = None,
     ) -> TechnicalAnalysisDTO:
         """获取技术分析（改进：支持重用已拉取的K线并可禁用AI以降低延迟）
         
@@ -50,7 +52,12 @@ class TechnicalAnalysisService:
                 )
         
         # 2. 从市场获取最新数据（允许重用 pre_fetched_df）
-        df = pre_fetched_df if pre_fetched_df is not None else await self.market_provider.get_historical_data(symbol, period="1y", interval="1d")
+        df = pre_fetched_df if pre_fetched_df is not None else await self.market_provider.get_historical_data(
+            symbol,
+            period="1y",
+            interval="1d",
+            cache_only=bool(data_policy.historical_cache_only) if data_policy else False,
+        )
         
         if df is None or getattr(df, 'empty', True):
             raise ValueError(f"No data available for {symbol}")
@@ -70,6 +77,7 @@ class TechnicalAnalysisService:
             account_id,
             df=df,
             use_ai=use_ai
+            ,data_policy=data_policy
         )
 
         # 6. 确保把缓存更新写入数据库（兼容旧行为：单次调用时提交）
@@ -232,12 +240,19 @@ class TechnicalAnalysisService:
         timeframe: str,
         account_id: str,
         df=None,
-        use_ai: bool = True
+        use_ai: bool = True,
+        data_policy: NonRealtimeDataPolicy | None = None,
     ) -> TechnicalAnalysisDTO:
         """构建技术分析结果（支持传入预计算的 df 并可禁用 AI）"""
         # 确保 df 已包含必要的历史数据与指标
         if df is None:
-            df = await self.market_provider.get_historical_data(symbol, period="6mo")
+            df = await self.market_provider.get_historical_data(
+                symbol,
+                period="6mo",
+                cache_only=bool(data_policy.historical_cache_only) if data_policy else False,
+            )
+            if df is None or getattr(df, "empty", True):
+                raise ValueError(f"No data available for {symbol}")
             df = self.calculator.calculate_all_indicators(df)
         else:
             if 'MA_5' not in df.columns:

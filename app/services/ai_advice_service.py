@@ -23,6 +23,7 @@ from app.broker.factory import make_option_broker_client
 from app.services.trading_plan_service import TradingPlanService
 from app.providers.market_data_provider import MarketDataProvider
 from app.providers.technical_calculator import TechnicalIndicatorCalculator
+from app.services.non_realtime_data_policy import NonRealtimeDataPolicyService
 from app.models.market_universe_symbol import MarketUniverseSymbol
 
 try:
@@ -472,8 +473,14 @@ class AiAdviceService:
     async def _get_rule_based_kline_analysis(self, symbol: str) -> KlineAnalysisResponse:
         """模型降级：基于规则系统生成技术面分析报告"""
         try:
+            policy = NonRealtimeDataPolicyService.runtime_advisory()
             # 获取日线数据
-            df = await self.market_provider.get_historical_data(symbol, period="1y", interval="1d")
+            df = await self.market_provider.get_historical_data(
+                symbol,
+                period="1y",
+                interval="1d",
+                cache_only=policy.historical_cache_only,
+            )
             if df is None or df.empty:
                 return KlineAnalysisResponse(
                     symbol=symbol, prediction="无法获取行情数据", suggestion="请检查标的代码",

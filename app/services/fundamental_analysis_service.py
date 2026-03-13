@@ -48,14 +48,23 @@ class FundamentalAnalysisService:
         return SimpleNamespace(**payload)
 
     async def _cache_result_to_redis(self, symbol: str, result: SimpleNamespace) -> None:
+        payload = dict(vars(result))
+        for key in ("timestamp", "fiscal_date"):
+            value = payload.get(key)
+            if value is not None:
+                payload[key] = str(value)
         await cache.set(
             self._redis_cache_key(symbol),
-            vars(result),
+            payload,
             expire=self.redis_cache_ttl_seconds,
         )
 
     async def get_fundamental_data(
-        self, symbol: str, force_refresh: bool = False
+        self,
+        symbol: str,
+        force_refresh: bool = False,
+        *,
+        cache_only: bool = False,
     ) -> Optional[SimpleNamespace]:
         """
         获取基本面数据（带缓存）
@@ -85,6 +94,9 @@ class FundamentalAnalysisService:
                     result = self._build_result_dict(cached)
                     await self._cache_result_to_redis(symbol, result)
                     return result
+
+            if cache_only:
+                return None
 
             # 获取新数据
             fundamental_dict = await self._fetch_fundamental_from_yfinance(symbol)

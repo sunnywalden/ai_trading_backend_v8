@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from app.engine.strategies.base_strategy import BaseStrategy
 from app.providers.market_data_provider import market_data_provider
+from app.services.non_realtime_data_policy import NonRealtimeDataPolicyService
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ class MomentumQuality(BaseStrategy):
             universe = await self._get_default_universe()
 
         market_data = market_data_provider
+        data_policy = NonRealtimeDataPolicyService.runtime_signal_generation()
         momentum_lookback = int(self.get_param("momentum_lookback", 126) or 126)
         top_n = int(self.get_param("position_cap", 5) or 5)
         momentum_weight = float(self.get_param("momentum_weight", 0.6) or 0.6)
@@ -37,7 +39,12 @@ class MomentumQuality(BaseStrategy):
 
         for symbol in universe:
             try:
-                prices = await market_data.get_historical_prices(symbol, start_date, end_date)
+                prices = await market_data.get_historical_prices(
+                    symbol,
+                    start_date,
+                    end_date,
+                    cache_only=data_policy.historical_cache_only,
+                )
                 if len(prices) < max(40, momentum_lookback // 2):
                     continue
 
@@ -49,7 +56,10 @@ class MomentumQuality(BaseStrategy):
                 momentum_return = (latest_close - anchor_close) / anchor_close
 
                 try:
-                    stats = await market_data.get_key_statistics(symbol, cache_only=True)
+                    stats = await market_data.get_key_statistics(
+                        symbol,
+                        cache_only=data_policy.key_statistics_cache_only,
+                    )
                 except Exception as exc:
                     logger.debug("MomentumQuality key statistics unavailable for %s: %s", symbol, exc)
                     stats = {}
