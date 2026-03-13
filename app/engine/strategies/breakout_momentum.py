@@ -3,13 +3,13 @@
 """
 import logging
 from typing import Any, Dict, List, Optional
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
 from app.engine.strategies.base_strategy import BaseStrategy
 from app.models.technical_indicator import TechnicalIndicator
-from app.providers.market_data_provider import MarketDataProvider
+from app.providers.market_data_provider import market_data_provider
 
 logger = logging.getLogger(__name__)
 
@@ -38,12 +38,12 @@ class BreakoutMomentum(BaseStrategy):
         if not universe:
             universe = await self._get_default_universe()
         
-        market_data = MarketDataProvider()
+        market_data = market_data_provider
         
         for symbol in universe:
             try:
                 # 获取历史价格数据
-                end_date = datetime.utcnow()
+                end_date = datetime.now(UTC).replace(tzinfo=None)
                 start_date = end_date - timedelta(days=lookback_days + 30)
                 
                 prices = await market_data.get_historical_prices(

@@ -29,7 +29,7 @@ from app.models.strategy import (
     HistoricalStrategyRun,
     StrategyNotification,
 )
-from app.providers.market_data_provider import MarketDataProvider
+from app.providers.market_data_provider import market_data_provider
 from app.services.market_universe_service import MarketUniverseService
 
 logger = logging.getLogger(__name__)
@@ -165,8 +165,8 @@ async def _probe_hk_historical_ready_symbols(
             "hk_history_probe_candidates": 0,
         }
 
-    provider = MarketDataProvider()
-    end_date = datetime.utcnow()
+    provider = market_data_provider
+    end_date = datetime.now(timezone.utc).replace(tzinfo=None)
     start_date = end_date - timedelta(days=180)
     ready_symbols: list[str] = []
 
@@ -647,7 +647,7 @@ async def execute_strategy_run_job(run_id: str, task_id: Optional[str] = None) -
             
             logger.info("Executing strategy with universe: %s, symbols count: %d", universe_key, len(universe_symbols))
             
-            candidate_count = min(len(universe_symbols), run.max_results or 5)
+            max_results = int(run.max_results or 5)
             strategy_name = run.strategy.name if run.strategy else ""
 
             sampled, generation_meta = await _generate_real_assets(
@@ -673,7 +673,7 @@ async def execute_strategy_run_job(run_id: str, task_id: Optional[str] = None) -
                     "synthetic_fallback_used": False,
                 }
 
-            sampled = sampled[:candidate_count]
+            sampled = sampled[:max_results]
 
             assets_records = []
             total_strength = 0.0
@@ -694,18 +694,19 @@ async def execute_strategy_run_job(run_id: str, task_id: Optional[str] = None) -
                 total_strength += asset_payload["signal_strength"]
             await session.flush()
 
-            avg_strength = total_strength / candidate_count if candidate_count else 0.0
+            generated_count = len(sampled)
+            avg_strength = total_strength / generated_count if generated_count else 0.0
             history = HistoricalStrategyRun(
                 strategy_run_id=run.id,
-                hits=candidate_count,
+                hits=generated_count,
                 scanned_total=len(universe_symbols),
-                hit_rate=round(candidate_count / max(1, len(universe_symbols)), 4),
+                hit_rate=round(generated_count / max(1, len(universe_symbols)), 4),
                 avg_signal_strength=round(avg_strength, 2),
                 assets=sampled,
                 timeline=timeline,
                 notify_channels=run.notify_channels,
                 status_payload={
-                    "status": "COMPLETED" if candidate_count else "FAILED",
+                    "status": "COMPLETED" if generated_count else "FAILED",
                     "signal_generation": generation_meta,
                     "universe": {
                         "target_universe": run.target_universe,

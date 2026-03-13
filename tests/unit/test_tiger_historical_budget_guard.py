@@ -14,6 +14,7 @@ def _reset_market_data_provider_budget_state() -> None:
     MarketDataProvider._tiger_historical_denied_cache = {}
     MarketDataProvider._tiger_historical_occupied_symbols = set()
     MarketDataProvider._tiger_historical_occupied_updated_at = 0.0
+    MarketDataProvider._tiger_historical_occupied_authoritative = False
 
 
 def _permission_error_message(requested: str = "00002") -> str:
@@ -34,6 +35,16 @@ def test_market_data_provider_parses_occupied_symbols_with_hk_normalization():
     assert "00700HK" not in MarketDataProvider._tiger_historical_occupied_symbols
     assert provider._should_attempt_tiger_historical("00700HK") is True
     assert provider._should_attempt_tiger_historical("00001") is False
+
+
+def test_market_data_provider_success_does_not_create_authoritative_budget_snapshot():
+    _reset_market_data_provider_budget_state()
+    provider = MarketDataProvider()
+
+    provider._remember_tiger_historical_success("AAPL")
+
+    assert MarketDataProvider._tiger_historical_occupied_authoritative is False
+    assert provider._should_attempt_tiger_historical("MSFT") is True
 
 
 @pytest.mark.asyncio
