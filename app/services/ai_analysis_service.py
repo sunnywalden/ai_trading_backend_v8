@@ -213,6 +213,10 @@ class AIAnalysisService:
         self.max_tokens = settings.OPENAI_MAX_TOKENS
         self.timeout = settings.OPENAI_TIMEOUT_SECONDS
         self._models = None  # 延迟初始化
+
+    @staticmethod
+    def _rule_fallback_allowed() -> bool:
+        return bool(getattr(settings, "RUNTIME_ALLOW_RULE_BASED_FALLBACK", False))
     
     async def _get_models(self, prefer_cheap: bool = False) -> List[str]:
         """获取模型列表（延迟初始化）"""
@@ -312,10 +316,12 @@ class AIAnalysisService:
         advice = await self._call_gpt(prompt, max_tokens=400)
         
         if not advice:
-            # 回退到规则生成
-            advice = self._rule_based_position_advice(
-                symbol, overall_score, technical_score, fundamental_score
-            )
+            if self._rule_fallback_allowed():
+                advice = self._rule_based_position_advice(
+                    symbol, overall_score, technical_score, fundamental_score
+                )
+            else:
+                advice = "AI 不可用，且已禁用规则回退；未生成自动持仓建议。"
         
         return advice
 
@@ -368,8 +374,12 @@ class AIAnalysisService:
                     response_text[:200].replace("\n", " "),
                 )
         
-        # 规则回退
-        return self._rule_based_portfolio_assessment(avg_score, total_beta, sector_distribution)
+        if self._rule_fallback_allowed():
+            return self._rule_based_portfolio_assessment(avg_score, total_beta, sector_distribution)
+        return {
+            "summary": "AI 不可用，且已禁用规则回退；未生成自动组合建议。",
+            "recommendations": [],
+        }
 
     def _parse_json_object_response(self, response_text: str) -> Dict[str, Any]:
         clean_text = response_text.strip()
@@ -459,8 +469,10 @@ class AIAnalysisService:
         analysis = await self._call_gpt(prompt, max_tokens=500)
         
         if not analysis:
-            # 回退到规则生成
-            analysis = self._rule_based_macro_analysis(macro_data)
+            if self._rule_fallback_allowed():
+                analysis = self._rule_based_macro_analysis(macro_data)
+            else:
+                analysis = "AI 不可用，且已禁用规则回退；未生成自动宏观分析。"
         
         return analysis
 
