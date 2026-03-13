@@ -253,9 +253,6 @@ class MarketDataProvider:
                     except Exception as e:
                         logger.debug("[MarketData] Tiger API failed for %s: %s", symbol, e)
             elif source == "yfinance":
-                if self.primary_source == "tiger" and self._is_hk_symbol(symbol):
-                    logger.debug("[MarketData] Skip Yahoo fallback for HK symbol=%s after Tiger miss", symbol)
-                    continue
                 df = await self._get_yahoo_data_with_retry(symbol, period, interval)
                 if df is not None and len(df) > 0:
                     self._cache_bars(cache_key, df, ttl=3600)  # Yahoo 数据通常变动更慢，可多缓存一会
@@ -293,9 +290,6 @@ class MarketDataProvider:
                 if price > 0:
                     return price
             elif source == "yfinance":
-                if self.primary_source == "tiger" and self._is_hk_symbol(symbol):
-                    logger.debug("[MarketData] Skip Yahoo price fallback for HK symbol=%s after Tiger miss", symbol)
-                    continue
                 price = await self._get_yahoo_price_robust(symbol)
                 if price > 0:
                     self._cache_price(symbol, price)

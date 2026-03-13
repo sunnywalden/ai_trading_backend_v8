@@ -87,6 +87,46 @@ async def test_breakout_momentum_reads_flat_atr_column(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_breakout_momentum_can_compute_atr_without_cached_indicator(monkeypatch):
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=_FakeExecResult(SimpleNamespace(atr_14=0.0)))
+
+    class _FakeMarketDataProvider:
+        async def get_historical_prices(self, symbol, start_date, end_date):
+            prices = []
+            for i in range(60):
+                close = 100.0 + i
+                high = close + 2.0
+                low = close - 2.0
+                volume = 1_000_000 + i * 5_000
+                if i == 59:
+                    close = 170.0
+                    high = 174.0
+                    low = 166.0
+                    volume = 2_500_000
+                prices.append(
+                    {
+                        "close": close,
+                        "high": high,
+                        "low": low,
+                        "volume": volume,
+                    }
+                )
+            return prices
+
+    monkeypatch.setattr(
+        "app.engine.strategies.breakout_momentum.MarketDataProvider",
+        _FakeMarketDataProvider,
+    )
+
+    strategy = BreakoutMomentum(params={"lookback_days": 20, "volume_multiplier": 1.1}, session=cast(Any, session))
+    signals = await strategy.generate_signals(universe=["00700"])
+
+    assert len(signals) == 1
+    assert signals[0]["metadata"]["atr"] > 0
+
+
+@pytest.mark.asyncio
 async def test_bollinger_strategy_reads_flat_band_columns(monkeypatch):
     session = MagicMock()
     session.execute = AsyncMock(

@@ -270,22 +270,24 @@ def _restore_signal_handlers() -> None:
     _original_signal_handlers.clear()
 
 
-async def _warm_up_caches() -> None:
-    """系统启动后异步预热关键缓存，提升用户首次请求响应速度。
+def _log_regime_bootstrap_result(result: dict | None) -> None:
+    if not isinstance(result, dict):
+        logger.warning("[WarmUp] regime bootstrap returned unexpected result: %r", result)
+        return
 
-    预热项目：
-      1. 当前市场体制（Redis）
-      2. Dashboard 汇总数据（净值 / 仓位概览）
-      3. 宏观风险指标
-      4. 活跃告警列表
-      5. ETF 标的池最新信号
-      6. 待处理交易信号数量
-    所有操作均包裹在独立 try/except 中，任何一项失败不影响其他项。
-    """
-    await asyncio.sleep(5)  # 等待调度器与 DB 连接池完全就绪
-    logger.info("[WarmUp] Starting cache pre-warming...")
+    if result.get("skipped"):
+        logger.warning(
+            "[WarmUp] regime bootstrap skipped: reason=%s error=%s",
+            result.get("reason"),
+            result.get("error"),
+        )
+        return
 
-    # 1. 市场体制（若表为空或超过 24h 未刷新，则立即同步跑一次分类）
+    logger.info("[WarmUp] ✓ Market regime refreshed")
+
+
+async def _warm_up_regime_cache() -> None:
+    """WarmUp 阶段的 Regime 预热，严格模式下先做输入就绪探测。"""
     try:
         from app.services.regime_classifier import regime_classifier
 
@@ -300,20 +302,49 @@ async def _warm_up_caches() -> None:
                 / 3600
                 > _REGIME_STALE_H
             )
-            if _regime_stale and settings.REGIME_ENABLED:
-                _reason = "no data" if _current_regime is None else "stale"
-                logger.info(
-                    "[WarmUp] Regime %s, bootstrapping synchronously...", _reason
-                )
-                try:
-                    await regime_classifier.run(_db)
-                    logger.info("[WarmUp] ✓ Market regime refreshed")
-                except Exception as _re:
-                    logger.warning(f"[WarmUp] regime bootstrap failed: {_re}")
-            else:
+            if not (_regime_stale and settings.REGIME_ENABLED):
                 logger.info("[WarmUp] ✓ Market regime cached")
+                return
+
+            _reason = "no data" if _current_regime is None else "stale"
+            logger.info("[WarmUp] Regime %s, bootstrapping synchronously...", _reason)
+
+            if not getattr(settings, "RUNTIME_ALLOW_DECISION_DEFAULTS", False):
+                probe = await regime_classifier.probe_real_inputs_ready()
+                if not probe.get("ready"):
+                    missing = ", ".join(probe.get("missing") or []) or "unknown"
+                    logger.warning(
+                        "[WarmUp] regime bootstrap deferred: real inputs not ready (missing=%s)",
+                        missing,
+                    )
+                    return
+
+            try:
+                result = await regime_classifier.run(_db)
+                _log_regime_bootstrap_result(result)
+            except Exception as _re:
+                logger.warning(f"[WarmUp] regime bootstrap failed: {_re}")
     except Exception as _e:
         logger.warning(f"[WarmUp] regime warm-up failed: {_e}")
+
+
+async def _warm_up_caches() -> None:
+    """系统启动后异步预热关键缓存，提升用户首次请求响应速度。
+
+    预热项目：
+        1. 当前市场体制（Redis）
+        2. Dashboard 汇总数据（净值 / 仓位概览）
+        3. 宏观风险指标
+        4. 活跃告警列表
+        5. ETF 标的池最新信号
+        6. 待处理交易信号数量
+    所有操作均包裹在独立 try/except 中，任何一项失败不影响其他项。
+    """
+    await asyncio.sleep(5)  # 等待调度器与 DB 连接池完全就绪
+    logger.info("[WarmUp] Starting cache pre-warming...")
+
+    # 1. 市场体制（若表为空或超过 24h 未刷新，则立即同步跑一次分类）
+    await _warm_up_regime_cache()
 
     # 2. Dashboard 净值汇总
     try:
