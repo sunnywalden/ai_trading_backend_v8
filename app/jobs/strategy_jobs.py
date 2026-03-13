@@ -112,6 +112,32 @@ _STRATEGY_ALIAS_HINTS = {
 }
 
 
+def _prioritize_auto_scan_symbols(symbols: list[str], market: str) -> list[str]:
+    anchors = HK_DEFAULT_SYMBOLS if market == "HK" else DEFAULT_SYMBOLS
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for symbol in [*anchors, *symbols]:
+        normalized = str(symbol).upper()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            ordered.append(normalized)
+    return ordered
+
+
+def _maybe_trim_auto_scan_universe(
+    *,
+    symbols: list[str],
+    market: str,
+    task_id: str | None,
+) -> list[str]:
+    if not task_id or not task_id.startswith("auto_cycle:"):
+        return symbols
+
+    limit = max(1, int(getattr(settings, "AUTO_STRATEGY_SCAN_SYMBOL_LIMIT", 120) or 120))
+    prioritized = _prioritize_auto_scan_symbols(symbols, market)
+    return prioritized[:limit]
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -688,6 +714,19 @@ async def execute_strategy_run_job(run_id: str, task_id: Optional[str] = None) -
 
             # 根据 target_universe / 扫描时间 选择股票池（本地全量优先）
             universe_key, universe_symbols, universe_meta = await _select_universe_symbols(session, run)
+            resolved_market = str(universe_meta.get("resolved_market") or "US").upper()
+            original_universe_count = len(universe_symbols)
+            universe_symbols = _maybe_trim_auto_scan_universe(
+                symbols=universe_symbols,
+                market=resolved_market,
+                task_id=task_id,
+            )
+            universe_meta = {
+                **universe_meta,
+                "pre_trim_symbols_count": original_universe_count,
+                "auto_trimmed_symbols_count": len(universe_symbols),
+                "auto_trim_applied": len(universe_symbols) != original_universe_count,
+            }
             
             logger.info("Executing strategy with universe: %s, symbols count: %d", universe_key, len(universe_symbols))
             

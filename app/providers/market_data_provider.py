@@ -17,10 +17,13 @@ from typing import Optional, List, Dict
 from datetime import datetime, timedelta
 from functools import lru_cache
 import time
+import logging
 
 from app.core.config import settings
 from app.core.cache import cache
 from app.services.api_monitoring_service import api_monitor, APIProvider
+
+logger = logging.getLogger(__name__)
 
 try:
     import yfinance as yf
@@ -202,6 +205,10 @@ class MarketDataProvider:
         if len(MarketDataProvider._invalid_symbol_cache) > 200:
             oldest = min(MarketDataProvider._invalid_symbol_cache.items(), key=lambda x: x[1])[0]
             del MarketDataProvider._invalid_symbol_cache[oldest]
+
+    def _is_hk_symbol(self, symbol: str) -> bool:
+        s = symbol.strip().upper()
+        return s.endswith(".HK") or s.isdigit()
     
     async def get_historical_data(
         self,
@@ -244,15 +251,18 @@ class MarketDataProvider:
                             self._cache_bars(cache_key, df)
                             return df
                     except Exception as e:
-                        print(f"[MarketData] Tiger API failed for {symbol}: {e}")
+                        logger.debug("[MarketData] Tiger API failed for %s: %s", symbol, e)
             elif source == "yfinance":
+                if self.primary_source == "tiger" and self._is_hk_symbol(symbol):
+                    logger.debug("[MarketData] Skip Yahoo fallback for HK symbol=%s after Tiger miss", symbol)
+                    continue
                 df = await self._get_yahoo_data_with_retry(symbol, period, interval)
                 if df is not None and len(df) > 0:
                     self._cache_bars(cache_key, df, ttl=3600)  # Yahoo 数据通常变动更慢，可多缓存一会
                     return df
         
         # 最终失败
-        print(f"[MarketData] All data sources failed for {symbol}")
+        logger.debug("[MarketData] All data sources failed for %s", symbol)
         # 短时间内不再请求该无效/缺失 symbol
         self._mark_invalid(symbol)
         return pd.DataFrame()
@@ -283,13 +293,16 @@ class MarketDataProvider:
                 if price > 0:
                     return price
             elif source == "yfinance":
+                if self.primary_source == "tiger" and self._is_hk_symbol(symbol):
+                    logger.debug("[MarketData] Skip Yahoo price fallback for HK symbol=%s after Tiger miss", symbol)
+                    continue
                 price = await self._get_yahoo_price_robust(symbol)
                 if price > 0:
                     self._cache_price(symbol, price)
                     return price
                     
         # 3. 最终失败，标记为无效（短期内不再请求）
-        print(f"[MarketData] All sources failed for price of {symbol}")
+        logger.debug("[MarketData] All sources failed for price of %s", symbol)
         self._mark_invalid(symbol)
         return 0.0
 
@@ -368,7 +381,7 @@ class MarketDataProvider:
                         self._cache_price(symbol, price)
                         return price
         except Exception as e:
-            print(f"[MarketData] Tiger API single price failed for {symbol} ({tiger_sym}): {e}")
+            logger.debug("[MarketData] Tiger API single price failed for %s (%s): %s", symbol, tiger_sym, e)
         return 0.0
 
     async def _get_yahoo_price_robust(self, symbol: str) -> float:

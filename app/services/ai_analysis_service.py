@@ -15,6 +15,7 @@ import logging
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
 import json
+import re
 import time
 
 from app.core.config import settings
@@ -350,24 +351,52 @@ class AIAnalysisService:
         """
         
         # 默认使用最新模型
-        response_text = await self._call_gpt(prompt, max_tokens=600)
+        response_text = await self._call_gpt(
+            prompt,
+            max_tokens=600,
+            temperature=0.2,
+            response_format={"type": "json_object"},
+        )
         
         if response_text:
             try:
-                # 尝试解析 JSON
-                # 有时 GPT 会返回带 ```json 的格式，需要清理
-                clean_text = response_text.strip()
-                if clean_text.startswith("```json"):
-                    clean_text = clean_text[7:-3].strip()
-                elif clean_text.startswith("```"):
-                    clean_text = clean_text[3:-3].strip()
-                
-                return json.loads(clean_text)
+                return self._parse_json_object_response(response_text)
             except Exception as e:
-                print(f"Failed to parse AI portfolio assessment JSON: {e}")
+                logger.warning(
+                    "Failed to parse AI portfolio assessment JSON: %s | preview=%s",
+                    e,
+                    response_text[:200].replace("\n", " "),
+                )
         
         # 规则回退
         return self._rule_based_portfolio_assessment(avg_score, total_beta, sector_distribution)
+
+    def _parse_json_object_response(self, response_text: str) -> Dict[str, Any]:
+        clean_text = response_text.strip()
+        if clean_text.startswith("```json"):
+            clean_text = clean_text[7:]
+        elif clean_text.startswith("```"):
+            clean_text = clean_text[3:]
+        if clean_text.endswith("```"):
+            clean_text = clean_text[:-3]
+        clean_text = clean_text.strip()
+
+        candidates = [clean_text]
+        match = re.search(r"(\{.*\})", clean_text, re.DOTALL)
+        if match:
+            candidates.append(match.group(1).strip())
+
+        for candidate in candidates:
+            if not candidate:
+                continue
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                continue
+
+        raise ValueError("AI response is not valid JSON object")
 
     def _rule_based_portfolio_assessment(self, avg_score, total_beta, sector_distribution) -> Dict[str, Any]:
         """规则导向的组合评估回退"""
@@ -506,7 +535,8 @@ class AIAnalysisService:
         prompt: str,
         max_tokens: Optional[int] = None,
         temperature: float = 0.5,
-        prefer_cheap: bool = False
+        prefer_cheap: bool = False,
+        response_format: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
         """调用 AI API（支持 OpenAI + DeepSeek 多提供商降级）
         
@@ -548,6 +578,7 @@ class AIAnalysisService:
                 messages=messages,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                response_format=response_format,
             )
             
             if content:

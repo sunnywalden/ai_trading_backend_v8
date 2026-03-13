@@ -1,14 +1,16 @@
 """
 黄金交叉策略
 """
+import logging
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select, and_
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from app.engine.strategies.base_strategy import BaseStrategy
 from app.models.technical_indicator import TechnicalIndicator
 from app.providers.market_data_provider import MarketDataProvider
+
+logger = logging.getLogger(__name__)
 
 
 class GoldenCross(BaseStrategy):
@@ -39,26 +41,25 @@ class GoldenCross(BaseStrategy):
         
         for symbol in universe:
             try:
-                # 获取短期和长期均线
-                stmt = select(TechnicalIndicator).where(
-                    and_(
-                        TechnicalIndicator.symbol == symbol,
-                        TechnicalIndicator.indicator_type.in_(["sma_50", "sma_200", "macd"])
-                    )
-                ).order_by(TechnicalIndicator.timestamp.desc()).limit(10)
-                
+                # TechnicalIndicator 当前为扁平列模型（ma_50/ma_200/macd/macd_signal），
+                # 不再是老的 indicator_type + value 结构。
+                stmt = (
+                    select(TechnicalIndicator)
+                    .where(TechnicalIndicator.symbol == symbol, TechnicalIndicator.timeframe == "1D")
+                    .order_by(TechnicalIndicator.timestamp.desc())
+                    .limit(1)
+                )
+
                 result = await self.session.execute(stmt)
-                indicators = list(result.scalars().all())
-                
-                sma_50_data = next((ind for ind in indicators if ind.indicator_type == "sma_50"), None)
-                sma_200_data = next((ind for ind in indicators if ind.indicator_type == "sma_200"), None)
-                macd_data = next((ind for ind in indicators if ind.indicator_type == "macd"), None)
-                
-                if not all([sma_50_data, sma_200_data]):
+                indicator = result.scalars().first()
+
+                if not indicator:
                     continue
-                
-                sma_50 = sma_50_data.value.get("value")
-                sma_200 = sma_200_data.value.get("value")
+
+                sma_50 = float(indicator.ma_50 or 0.0)
+                sma_200 = float(indicator.ma_200 or 0.0)
+                macd_value = float(indicator.macd or 0.0)
+                signal_line = float(indicator.macd_signal or 0.0)
                 
                 if not sma_50 or not sma_200:
                     continue
@@ -74,9 +75,7 @@ class GoldenCross(BaseStrategy):
                 
                 # MACD确认
                 macd_confirm = True
-                if macd_data:
-                    macd_value = macd_data.value.get("macd", 0)
-                    signal_line = macd_data.value.get("signal", 0)
+                if macd_value or signal_line:
                     macd_confirm = (is_golden_cross and macd_value > signal_line) or \
                                   (is_death_cross and macd_value < signal_line)
                 
@@ -127,7 +126,7 @@ class GoldenCross(BaseStrategy):
                     signals.append(signal)
                     
             except Exception as e:
-                print(f"Error processing {symbol}: {e}")
+                logger.debug("GoldenCross processing failed for %s: %s", symbol, e)
                 continue
         
         return signals

@@ -1,15 +1,17 @@
 """
 突破动量策略
 """
+import logging
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta
 
-from sqlalchemy import select, and_
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from app.engine.strategies.base_strategy import BaseStrategy
 from app.models.technical_indicator import TechnicalIndicator
 from app.providers.market_data_provider import MarketDataProvider
+
+logger = logging.getLogger(__name__)
 
 
 class BreakoutMomentum(BaseStrategy):
@@ -63,17 +65,17 @@ class BreakoutMomentum(BaseStrategy):
                 avg_volume = sum(p["volume"] for p in prices[-lookback_days:-1]) / (lookback_days - 1)
                 
                 # 获取ATR指标
-                stmt = select(TechnicalIndicator).where(
-                    and_(
-                        TechnicalIndicator.symbol == symbol,
-                        TechnicalIndicator.indicator_type == "atr"
-                    )
-                ).order_by(TechnicalIndicator.timestamp.desc()).limit(1)
+                stmt = (
+                    select(TechnicalIndicator)
+                    .where(TechnicalIndicator.symbol == symbol, TechnicalIndicator.timeframe == "1D")
+                    .order_by(TechnicalIndicator.timestamp.desc())
+                    .limit(1)
+                )
                 
                 result = await self.session.execute(stmt)
                 atr_data = result.scalars().first()
                 
-                atr_value = atr_data.value.get("atr") if atr_data else current_price * 0.02
+                atr_value = float(getattr(atr_data, "atr_14", 0.0) or current_price * 0.02)
                 
                 # 突破判断
                 is_breakout = current_price > n_day_high
@@ -105,7 +107,7 @@ class BreakoutMomentum(BaseStrategy):
                     signals.append(signal)
                     
             except Exception as e:
-                print(f"Error processing {symbol}: {e}")
+                logger.debug("BreakoutMomentum processing failed for %s: %s", symbol, e)
                 continue
         
         return signals
