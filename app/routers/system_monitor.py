@@ -46,6 +46,7 @@ from app.schemas.system_monitor import (DataFlowDetailResponse,
 from app.services.api_monitoring_service import api_monitor
 from app.services.autonomy_health_monitor import autonomy_health_monitor
 from app.services.lifecycle_service import lifecycle_service
+from app.services.non_realtime_data_policy import NonRealtimeDataPolicyService
 from app.services.position_query_service import ACTIVE_POSITION_STATUSES
 from app.services.situational_awareness_service import \
     situational_awareness_service
@@ -1279,10 +1280,72 @@ async def _build_service_payload(db: AsyncSession, window_minutes: int) -> tuple
             ],
         )
 
+    async def _probe_non_realtime_data_policy() -> ServiceHealthItem:
+        runtime = await NonRealtimeDataPolicyService.get_runtime_status()
+        runtime_signal = runtime.get("runtime_signal_generation") or {}
+        runtime_advisory = runtime.get("runtime_advisory") or {}
+        jobs = runtime.get("jobs") or {}
+
+        policy_safe = bool(runtime_signal.get("historical_cache_only")) and bool(runtime_advisory.get("historical_cache_only"))
+        last_runs: list[datetime] = []
+        job_failures = 0
+        job_messages: list[str] = []
+
+        for job_key, payload in jobs.items():
+            if not isinstance(payload, dict):
+                job_messages.append(f"{job_key}:missing")
+                continue
+            last_run = _to_utc(payload.get("last_run_at"))
+            if last_run is not None:
+                last_runs.append(last_run)
+            success = bool(payload.get("success"))
+            if not success:
+                job_failures += 1
+            job_messages.append(
+                f"{job_key}:{'ok' if success else 'fail'}:succ={payload.get('success_count', 0)}:fail={payload.get('failure_count', 0)}"
+            )
+
+        latest_run = max(last_runs) if last_runs else None
+        stale = latest_run is None or ((_now() - latest_run).total_seconds() > 24 * 3600)
+        if job_failures > 0 or stale:
+            status = "WARN" if policy_safe else "CRITICAL"
+        else:
+            status = "HEALTHY" if policy_safe else "WARN"
+
+        return ServiceHealthItem(
+            service_key="non_realtime_data_policy",
+            service_label="Non-Realtime Data Policy",
+            module_key="market_data",
+            service_kind="internal",
+            status=status,
+            degraded=status != "HEALTHY",
+            latency_ms=None,
+            p95_latency_ms=None,
+            error_count_1h=job_failures,
+            error_count_24h=job_failures,
+            last_heartbeat_at=latest_run or now,
+            last_success_at=(latest_run if job_failures == 0 else None),
+            last_error_code=("NON_REALTIME_REFRESH_STALE" if stale else "NON_REALTIME_REFRESH_FAILED" if job_failures else None),
+            last_error_message=(
+                "; ".join(job_messages)
+                if job_messages and (job_failures or stale or not policy_safe)
+                else None
+            ),
+            dependencies=["redis_cache", "scheduler", "market_data_provider"],
+            owners=["market-data"],
+            tags=[
+                "policy",
+                f"runtime-signal-cache-only:{bool(runtime_signal.get('historical_cache_only'))}",
+                f"runtime-advisory-cache-only:{bool(runtime_advisory.get('historical_cache_only'))}",
+                *(job_messages[:6]),
+            ],
+        )
+
     for probe in (
         _probe_mysql,
         _probe_redis,
         _probe_tiger_ohlcv_gateway,
+        _probe_non_realtime_data_policy,
         _probe_lifecycle,
         _probe_autonomy_health,
         _probe_situational_awareness,
