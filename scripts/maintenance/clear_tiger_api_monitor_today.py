@@ -16,7 +16,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 from datetime import datetime
+from pathlib import Path
+import sys
 from typing import Iterable
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from app.core.cache import cache
 from app.models.db import redis_client
