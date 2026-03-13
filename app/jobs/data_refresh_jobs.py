@@ -29,6 +29,7 @@ from app.services.geopolitical_events_service import GeopoliticalEventsService
 from app.services.macro_indicators_service import MacroIndicatorsService
 from app.services.macro_risk_scoring_service import MacroRiskScoringService
 from app.services.market_universe_service import MarketUniverseService
+from app.services.non_realtime_data_policy import NonRealtimeDataPolicyService
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +175,12 @@ async def refresh_historical_bars_cache_job():
             us_success,
             elapsed,
         )
+        await NonRealtimeDataPolicyService.record_job_status(
+            "historical_bars_cache",
+            success=True,
+            success_count=int(result.get("success_count", 0) or 0),
+            failure_count=int(result.get("failure_count", 0) or 0),
+        )
         return {
             "success": True,
             **result,
@@ -182,6 +189,11 @@ async def refresh_historical_bars_cache_job():
         }
     except Exception as e:
         logger.error(f"Historical bars cache refresh job failed: {str(e)}", exc_info=True)
+        await NonRealtimeDataPolicyService.record_job_status(
+            "historical_bars_cache",
+            success=False,
+            error=str(e),
+        )
         return {
             "success": False,
             "error": str(e),
@@ -217,12 +229,23 @@ async def refresh_key_statistics_cache_job():
             result.get("failure_count", 0),
             elapsed,
         )
+        await NonRealtimeDataPolicyService.record_job_status(
+            "key_statistics_cache",
+            success=True,
+            success_count=int(result.get("success_count", 0) or 0),
+            failure_count=int(result.get("failure_count", 0) or 0),
+        )
         return {
             "success": True,
             **result,
         }
     except Exception as e:
         logger.error(f"Key statistics cache refresh job failed: {str(e)}", exc_info=True)
+        await NonRealtimeDataPolicyService.record_job_status(
+            "key_statistics_cache",
+            success=False,
+            error=str(e),
+        )
         return {
             "success": False,
             "error": str(e),
@@ -286,9 +309,20 @@ async def refresh_fundamental_data_job():
             f"{success_count} success, {error_count} errors, "
             f"took {elapsed:.2f}s"
         )
+        await NonRealtimeDataPolicyService.record_job_status(
+            "fundamental_data_cache",
+            success=error_count == 0,
+            success_count=success_count,
+            failure_count=error_count,
+        )
 
     except Exception as e:
         logger.error(f"Fundamental data refresh job failed: {str(e)}", exc_info=True)
+        await NonRealtimeDataPolicyService.record_job_status(
+            "fundamental_data_cache",
+            success=False,
+            error=str(e),
+        )
 
 
 async def refresh_macro_indicators_job():
