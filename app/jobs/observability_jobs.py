@@ -11,7 +11,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-async def take_factor_exposure_snapshot() -> None:
+async def take_factor_exposure_snapshot() -> dict[str, object]:
     """每 5 分钟采样一次五因子敞口。
 
     V10.4 T1.3 修复：
@@ -22,6 +22,7 @@ async def take_factor_exposure_snapshot() -> None:
     from app.models.db import SessionLocal
     from app.services.risk_observability_service import risk_observability_service
     try:
+        seeded_accounts = 0
         async with SessionLocal() as db:
             async with db.begin():
                 from app.models.trading_plan import TradingPlan
@@ -40,7 +41,8 @@ async def take_factor_exposure_snapshot() -> None:
                         if r.account_id:
                             users.add(str(r.account_id))
                     for user_id in users:
-                        await risk_observability_service.seed_snapshot_from_live_data(db, user_id)
+                        if await risk_observability_service.seed_snapshot_from_live_data(db, user_id):
+                            seeded_accounts += 1
                 else:
                     # ─── 2. V10.4 T1.3: 无活跃持仓 → 写零快照 ───
                     stmt_all = select(distinct(TradingPlan.account_id)).where(
@@ -55,9 +57,10 @@ async def take_factor_exposure_snapshot() -> None:
                         )
                         for user_id in all_account_ids:
                             try:
-                                await risk_observability_service.seed_snapshot_from_live_data(
+                                if await risk_observability_service.seed_snapshot_from_live_data(
                                     db, user_id
-                                )
+                                ):
+                                    seeded_accounts += 1
                             except Exception as exc:
                                 logger.warning(
                                     "[ObsJobs] 账户 %s 零快照写入失败: %s", user_id, exc
@@ -65,8 +68,11 @@ async def take_factor_exposure_snapshot() -> None:
                     else:
                         logger.debug("[ObsJobs] 无任何历史账户，跳过本次快照")
 
+        return {"success": True, "seeded_accounts": seeded_accounts}
+
     except Exception as e:
         logger.error("take_factor_exposure_snapshot failed: %s", e)
+        return {"success": False, "seeded_accounts": 0, "error": str(e)}
 
 
 def register_observability_jobs(scheduler) -> None:

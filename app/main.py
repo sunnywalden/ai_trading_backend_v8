@@ -286,6 +286,38 @@ def _log_regime_bootstrap_result(result: dict | None) -> None:
     logger.info("[WarmUp] ✓ Market regime refreshed")
 
 
+def _log_technical_warmup_result(result: dict | None) -> None:
+    if not isinstance(result, dict):
+        logger.warning("[WarmUp] technical indicator warm-up returned unexpected result: %r", result)
+        return
+    if not result.get("success"):
+        logger.warning("[WarmUp] technical indicator warm-up failed: %s", result.get("error"))
+        return
+    success_count = int(result.get("success_count") or 0)
+    attempted = list(result.get("symbols_attempted") or [])
+    if success_count <= 0:
+        logger.warning(
+            "[WarmUp] technical indicator warm-up deferred: no symbols refreshed (attempted=%s)",
+            attempted,
+        )
+        return
+    logger.info("[WarmUp] ✓ Technical indicators seeded (%d symbols)", success_count)
+
+
+def _log_factor_snapshot_warmup_result(result: dict | None) -> None:
+    if not isinstance(result, dict):
+        logger.warning("[WarmUp] factor snapshot warm-up returned unexpected result: %r", result)
+        return
+    if not result.get("success"):
+        logger.warning("[WarmUp] factor snapshot warm-up failed: %s", result.get("error"))
+        return
+    seeded_accounts = int(result.get("seeded_accounts") or 0)
+    if seeded_accounts <= 0:
+        logger.warning("[WarmUp] factor snapshot warm-up deferred: no account snapshot seeded")
+        return
+    logger.info("[WarmUp] ✓ Factor exposure snapshot seeded (%d accounts)", seeded_accounts)
+
+
 async def _warm_up_regime_cache() -> None:
     """WarmUp 阶段的 Regime 预热，严格模式下先做输入就绪探测。"""
     try:
@@ -417,8 +449,8 @@ async def _warm_up_caches() -> None:
     try:
         from app.jobs.data_refresh_jobs import refresh_technical_indicators_job
 
-        await refresh_technical_indicators_job()
-        logger.info("[WarmUp] ✓ Technical indicators seeded")
+        result = await refresh_technical_indicators_job()
+        _log_technical_warmup_result(result)
     except Exception as _e:
         logger.warning(f"[WarmUp] technical indicator warm-up failed: {_e}")
 
@@ -426,8 +458,8 @@ async def _warm_up_caches() -> None:
     try:
         from app.jobs.observability_jobs import take_factor_exposure_snapshot
 
-        await take_factor_exposure_snapshot()
-        logger.info("[WarmUp] ✓ Factor exposure snapshot seeded")
+        result = await take_factor_exposure_snapshot()
+        _log_factor_snapshot_warmup_result(result)
     except Exception as _e:
         logger.warning(f"[WarmUp] factor snapshot warm-up failed: {_e}")
 
