@@ -9,6 +9,7 @@ from app.engine.strategies.momentum_quality import MomentumQuality
 from app.jobs.strategy_jobs import (
     _is_live_trading_context,
     _normalize_real_signal_payload,
+    _probe_hk_historical_ready_symbols,
     _resolve_strategy_implementation_key,
 )
 
@@ -93,8 +94,66 @@ async def test_momentum_quality_generates_real_candidates(monkeypatch):
     assert all(signal["metadata"]["strategy"] == "momentum_quality" for signal in signals)
 
 
+@pytest.mark.asyncio
+async def test_momentum_quality_tolerates_missing_key_statistics(monkeypatch):
+    class _FakeMarketDataProvider:
+        async def get_historical_prices(self, symbol, start_date, end_date):
+            return [
+                {"close": 100.0 + i, "open": 99.0 + i, "high": 101.0 + i, "low": 98.0 + i, "volume": 1_000_000 + i * 1000}
+                for i in range(160)
+            ]
+
+        async def get_key_statistics(self, symbol):
+            raise RuntimeError("stats unavailable")
+
+    monkeypatch.setattr(
+        "app.engine.strategies.momentum_quality.MarketDataProvider",
+        _FakeMarketDataProvider,
+    )
+
+    strategy = MomentumQuality(
+        params={
+            "momentum_lookback": 120,
+            "position_cap": 3,
+            "momentum_weight": 0.6,
+            "quality_weight": 0.4,
+            "momentum_threshold": 0.05,
+        },
+        session=cast(Any, SimpleNamespace()),
+    )
+
+    signals = await strategy.generate_signals(universe=["00700", "09988", "03690"])
+
+    assert len(signals) == 3
+    assert all(signal["metadata"]["quality_score"] is None for signal in signals)
+    assert all(signal["direction"] == "BUY" for signal in signals)
+
+
 def test_live_trading_context_detects_real_modes(monkeypatch):
     monkeypatch.setattr("app.jobs.strategy_jobs.settings.TRADE_MODE", "REAL")
     monkeypatch.setattr("app.jobs.strategy_jobs.settings.ORDER_MODE", "REAL")
 
     assert _is_live_trading_context() is True
+
+
+@pytest.mark.asyncio
+async def test_probe_hk_historical_ready_symbols_prefers_real_ready_subset(monkeypatch):
+    class _FakeMarketDataProvider:
+        async def get_historical_prices(self, symbol, start_date, end_date):
+            if symbol in {"00700", "01528"}:
+                return [{"close": 1, "open": 1, "high": 1, "low": 1, "volume": 1}] * 60
+            return []
+
+    monkeypatch.setattr(
+        "app.jobs.strategy_jobs.MarketDataProvider",
+        _FakeMarketDataProvider,
+    )
+
+    symbols, meta = await _probe_hk_historical_ready_symbols(
+        symbols=["00700", "09988", "03690", "01528"],
+        task_id="auto_cycle:test-run",
+    )
+
+    assert symbols == ["00700", "01528"]
+    assert meta["hk_history_probe_applied"] is True
+    assert meta["hk_history_ready_count"] == 2

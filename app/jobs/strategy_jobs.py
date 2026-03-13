@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
@@ -29,6 +29,7 @@ from app.models.strategy import (
     HistoricalStrategyRun,
     StrategyNotification,
 )
+from app.providers.market_data_provider import MarketDataProvider
 from app.services.market_universe_service import MarketUniverseService
 
 logger = logging.getLogger(__name__)
@@ -135,6 +136,64 @@ def _maybe_trim_auto_scan_universe(
     limit = max(1, int(getattr(settings, "AUTO_STRATEGY_SCAN_SYMBOL_LIMIT", 120) or 120))
     prioritized = _prioritize_auto_scan_symbols(symbols, market)
     return prioritized[:limit]
+
+
+async def _probe_hk_historical_ready_symbols(
+    *,
+    symbols: list[str],
+    task_id: str | None,
+) -> tuple[list[str], dict[str, Any]]:
+    """在 auto_cycle 场景下，仅保留当前确实可获取真实历史 bars 的 HK symbol。
+
+    背景：Tiger 港股历史行情权限可能存在 symbol 数量上限；实时价可用并不代表 bars 可用。
+    这里通过小范围真实探测，避免策略在 HK_ALL_LOCAL 120 上盲扫后全量返回空。
+    """
+    if not task_id or not task_id.startswith("auto_cycle:"):
+        return symbols, {
+            "hk_history_probe_applied": False,
+            "hk_history_ready_count": None,
+            "hk_history_probe_candidates": 0,
+        }
+
+    prioritized = _prioritize_auto_scan_symbols(symbols, "HK")
+    probe_limit = min(len(prioritized), 12)
+    probe_candidates = prioritized[:probe_limit]
+    if not probe_candidates:
+        return symbols, {
+            "hk_history_probe_applied": True,
+            "hk_history_ready_count": 0,
+            "hk_history_probe_candidates": 0,
+        }
+
+    provider = MarketDataProvider()
+    end_date = datetime.utcnow()
+    start_date = end_date - timedelta(days=180)
+    ready_symbols: list[str] = []
+
+    for symbol in probe_candidates:
+        try:
+            prices = await provider.get_historical_prices(symbol, start_date, end_date)
+            if len(prices) >= 40:
+                ready_symbols.append(symbol)
+        except Exception:
+            continue
+
+    if ready_symbols:
+        return ready_symbols, {
+            "hk_history_probe_applied": True,
+            "hk_history_ready_count": len(ready_symbols),
+            "hk_history_probe_candidates": len(probe_candidates),
+            "hk_history_ready_symbols": ready_symbols,
+            "fallback_reason": None,
+        }
+
+    return probe_candidates, {
+        "hk_history_probe_applied": True,
+        "hk_history_ready_count": 0,
+        "hk_history_probe_candidates": len(probe_candidates),
+        "hk_history_ready_symbols": [],
+        "fallback_reason": "HK_HISTORY_ACCESS_LIMITED_OR_UNAVAILABLE",
+    }
 
 
 def _now_iso() -> str:
@@ -570,6 +629,15 @@ async def execute_strategy_run_job(run_id: str, task_id: Optional[str] = None) -
                 market=resolved_market,
                 task_id=task_id,
             )
+            if resolved_market == "HK":
+                universe_symbols, hk_probe_meta = await _probe_hk_historical_ready_symbols(
+                    symbols=universe_symbols,
+                    task_id=task_id,
+                )
+                universe_meta = {
+                    **universe_meta,
+                    **hk_probe_meta,
+                }
             universe_meta = {
                 **universe_meta,
                 "pre_trim_symbols_count": original_universe_count,

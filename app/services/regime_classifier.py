@@ -222,6 +222,12 @@ class RegimeClassifier:
     def _decision_defaults_allowed() -> bool:
         return bool(getattr(settings, "RUNTIME_ALLOW_DECISION_DEFAULTS", False))
 
+    @classmethod
+    def _missing_input_notice(cls, label: str, fallback_value: float = 50.0) -> str:
+        if cls._decision_defaults_allowed():
+            return f"{label}; using {fallback_value:g}"
+        return f"{label}; strict real-input mode returns missing input"
+
     async def run(self, db: AsyncSession) -> dict:
         """
         主入口：执行完整分类流程。
@@ -528,6 +534,81 @@ class RegimeClassifier:
                 pass
         return float(value)
 
+    async def probe_real_inputs_ready(self) -> dict[str, Any]:
+        """静默探测 Regime 所需真实市场输入是否已就绪。
+
+        仅用于 WarmUp 前置检查，避免在严格模式下明知缺输入还触发一串 warning/error。
+        """
+        import asyncio
+
+        import yfinance as yf
+
+        async def _download(tickers: str, period: str):
+            try:
+                return await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: yf.download(
+                        tickers,
+                        period=period,
+                        interval="1d",
+                        progress=False,
+                        auto_adjust=True,
+                    ),
+                )
+            except Exception as exc:
+                return exc
+
+        missing: list[str] = []
+        details: dict[str, Any] = {}
+
+        spy_data, vix_data, breadth_data = await asyncio.gather(
+            _download("SPY", "1y"),
+            _download("^VIX", "60d"),
+            _download("SPY RSP", "60d"),
+        )
+
+        if isinstance(spy_data, BaseException):
+            missing.extend(["trend", "momentum"])
+            details["spy_error"] = str(spy_data)
+        else:
+            spy_close = self._extract_close_series(spy_data, "SPY")
+            spy_len = len(spy_close) if spy_close is not None else 0
+            details["spy_close_len"] = spy_len
+            if spy_len < 50:
+                missing.append("trend")
+            if spy_len < 20:
+                missing.append("momentum")
+
+        if isinstance(vix_data, BaseException):
+            missing.append("vol")
+            details["vix_error"] = str(vix_data)
+        else:
+            vix_close = self._extract_close_series(vix_data, "^VIX")
+            vix_len = len(vix_close) if vix_close is not None else 0
+            details["vix_close_len"] = vix_len
+            if vix_len < 1:
+                missing.append("vol")
+
+        if isinstance(breadth_data, BaseException):
+            missing.append("breadth")
+            details["breadth_error"] = str(breadth_data)
+        else:
+            spy_breadth = self._extract_close_series(breadth_data, "SPY")
+            rsp_breadth = self._extract_close_series(breadth_data, "RSP")
+            spy_breadth_len = len(spy_breadth) if spy_breadth is not None else 0
+            rsp_breadth_len = len(rsp_breadth) if rsp_breadth is not None else 0
+            details["breadth_spy_len"] = spy_breadth_len
+            details["breadth_rsp_len"] = rsp_breadth_len
+            if min(spy_breadth_len, rsp_breadth_len) < 20:
+                missing.append("breadth")
+
+        unique_missing = sorted(set(missing))
+        return {
+            "ready": not unique_missing,
+            "missing": unique_missing,
+            "details": details,
+        }
+
     async def _score_trend(self) -> Optional[float]:
         """
         趋势强度评分（0~100）。
@@ -551,14 +632,16 @@ class RegimeClassifier:
         # yf.download may return None on failure, protect our checks
         if spy_data is None or spy_data.empty or len(spy_data) < 50:
             logger.warning(
-                "[RegimeClassifier] Insufficient SPY data for trend score; using 50"
+                "[RegimeClassifier] %s",
+                self._missing_input_notice("Insufficient SPY data for trend score"),
             )
             return 50.0 if self._decision_defaults_allowed() else None
 
         close = self._extract_close_series(spy_data, "SPY")
         if close is None or len(close) < 50:
             logger.warning(
-                "[RegimeClassifier] Insufficient SPY close series for trend score; using 50"
+                "[RegimeClassifier] %s",
+                self._missing_input_notice("Insufficient SPY close series for trend score"),
             )
             return 50.0 if self._decision_defaults_allowed() else None
 
@@ -616,10 +699,18 @@ class RegimeClassifier:
         )
 
         if vix_data is None or vix_data.empty:
+            logger.warning(
+                "[RegimeClassifier] %s",
+                self._missing_input_notice("Insufficient VIX data for volatility score"),
+            )
             return 50.0 if self._decision_defaults_allowed() else None
 
         vix_close = self._extract_close_series(vix_data, "^VIX")
         if vix_close is None:
+            logger.warning(
+                "[RegimeClassifier] %s",
+                self._missing_input_notice("Insufficient VIX close series for volatility score"),
+            )
             return 50.0 if self._decision_defaults_allowed() else None
 
         vix_now = self._series_float(vix_close, -1)
@@ -672,15 +763,27 @@ class RegimeClassifier:
         )
 
         if data is None or data.empty or "Close" not in data.columns:
+            logger.warning(
+                "[RegimeClassifier] %s",
+                self._missing_input_notice("Insufficient SPY/RSP data for breadth score", 55.0),
+            )
             return 55.0 if self._decision_defaults_allowed() else None
 
         spy_close = self._extract_close_series(data, "SPY")
         rsp_close = self._extract_close_series(data, "RSP")
 
         if spy_close is None or rsp_close is None:
+            logger.warning(
+                "[RegimeClassifier] %s",
+                self._missing_input_notice("Insufficient SPY/RSP close series for breadth score", 55.0),
+            )
             return 55.0 if self._decision_defaults_allowed() else None
 
         if len(spy_close) < 20 or len(rsp_close) < 20:
+            logger.warning(
+                "[RegimeClassifier] %s",
+                self._missing_input_notice("Too little SPY/RSP history for breadth score", 55.0),
+            )
             return 55.0 if self._decision_defaults_allowed() else None
 
         # RSP/SPY 比率：>1 表示等权更强（广度健康），<1 表示大盘被巨头拉升（广度弱）
@@ -748,11 +851,19 @@ class RegimeClassifier:
         )
 
         if spy_data is None or spy_data.empty or len(spy_data) < 20:
+            logger.warning(
+                "[RegimeClassifier] %s",
+                self._missing_input_notice("Insufficient SPY data for momentum score"),
+            )
             return 50.0 if self._decision_defaults_allowed() else None
 
         close = self._extract_close_series(spy_data, "SPY")
 
         if close is None or len(close) < 20:
+            logger.warning(
+                "[RegimeClassifier] %s",
+                self._missing_input_notice("Insufficient SPY close series for momentum score"),
+            )
             return 50.0 if self._decision_defaults_allowed() else None
 
         # 20 日动量
@@ -763,6 +874,10 @@ class RegimeClassifier:
         # RSI(14)
         rsi = self._compute_rsi(close, window=14)
         if rsi is None:
+            logger.warning(
+                "[RegimeClassifier] %s",
+                self._missing_input_notice("RSI unavailable for momentum score"),
+            )
             return 50.0 if self._decision_defaults_allowed() else None
 
         score = 50.0

@@ -235,6 +235,11 @@ class TestRegimeClassifierMarketDataHandling:
 
         from app.services.regime_classifier import RegimeClassifier
 
+        monkeypatch.setattr(
+            "app.services.regime_classifier.settings.RUNTIME_ALLOW_DECISION_DEFAULTS",
+            True,
+        )
+
         frame = self._single_ticker_close_frame(
             "SPY", [float(100 + i) for i in range(260)]
         )
@@ -251,6 +256,11 @@ class TestRegimeClassifierMarketDataHandling:
 
         from app.services.regime_classifier import RegimeClassifier
 
+        monkeypatch.setattr(
+            "app.services.regime_classifier.settings.RUNTIME_ALLOW_DECISION_DEFAULTS",
+            True,
+        )
+
         values = [18.0 + (i % 5) for i in range(60)]
         frame = self._single_ticker_close_frame("^VIX", values)
         monkeypatch.setattr(yf, "download", lambda *args, **kwargs: frame)
@@ -266,6 +276,11 @@ class TestRegimeClassifierMarketDataHandling:
 
         from app.services.regime_classifier import RegimeClassifier
 
+        monkeypatch.setattr(
+            "app.services.regime_classifier.settings.RUNTIME_ALLOW_DECISION_DEFAULTS",
+            True,
+        )
+
         frame = self._single_ticker_close_frame(
             "SPY", [float(200 + i * 0.8) for i in range(80)]
         )
@@ -275,3 +290,16 @@ class TestRegimeClassifierMarketDataHandling:
 
         assert isinstance(score, float)
         assert 0.0 <= score <= 100.0
+
+    @pytest.mark.asyncio
+    async def test_probe_real_inputs_ready_reports_missing_inputs(self, monkeypatch):
+        import yfinance as yf
+
+        from app.services.regime_classifier import RegimeClassifier
+
+        monkeypatch.setattr(yf, "download", lambda *args, **kwargs: pd.DataFrame())
+
+        result = await RegimeClassifier().probe_real_inputs_ready()
+
+        assert result["ready"] is False
+        assert set(result["missing"]) == {"breadth", "momentum", "trend", "vol"}

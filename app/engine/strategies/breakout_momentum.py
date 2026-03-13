@@ -75,7 +75,11 @@ class BreakoutMomentum(BaseStrategy):
                 result = await self.session.execute(stmt)
                 atr_data = result.scalars().first()
                 
-                atr_value = float(getattr(atr_data, "atr_14", 0.0) or current_price * 0.02)
+                atr_value = float(getattr(atr_data, "atr_14", 0.0) or 0.0)
+                if atr_value <= 0:
+                    atr_value = self._calculate_atr_from_prices(prices)
+                if atr_value <= 0:
+                    atr_value = current_price * 0.02
                 
                 # 突破判断
                 is_breakout = current_price > n_day_high
@@ -111,6 +115,32 @@ class BreakoutMomentum(BaseStrategy):
                 continue
         
         return signals
+
+    @staticmethod
+    def _calculate_atr_from_prices(prices: List[Dict[str, Any]], period: int = 14) -> float:
+        if len(prices) < 2:
+            return 0.0
+
+        true_ranges: list[float] = []
+        for idx in range(1, len(prices)):
+            current = prices[idx]
+            previous = prices[idx - 1]
+            high = float(current.get("high") or current.get("close") or 0.0)
+            low = float(current.get("low") or current.get("close") or 0.0)
+            prev_close = float(previous.get("close") or 0.0)
+            tr = max(
+                high - low,
+                abs(high - prev_close),
+                abs(low - prev_close),
+            )
+            if tr > 0:
+                true_ranges.append(tr)
+
+        if not true_ranges:
+            return 0.0
+
+        window = true_ranges[-min(period, len(true_ranges)):]
+        return float(sum(window) / len(window)) if window else 0.0
     
     async def _get_default_universe(self) -> List[str]:
         """获取默认的标的池"""

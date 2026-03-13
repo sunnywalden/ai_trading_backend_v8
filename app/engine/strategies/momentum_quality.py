@@ -2,10 +2,13 @@
 动量+质量因子策略
 """
 from datetime import datetime, timedelta
+import logging
 from typing import Any, Dict, List, Optional
 
 from app.engine.strategies.base_strategy import BaseStrategy
 from app.providers.market_data_provider import MarketDataProvider
+
+logger = logging.getLogger(__name__)
 
 
 class MomentumQuality(BaseStrategy):
@@ -44,7 +47,12 @@ class MomentumQuality(BaseStrategy):
                 if momentum_return < min_momentum_threshold:
                     continue
 
-                stats = await market_data.get_key_statistics(symbol)
+                try:
+                    stats = await market_data.get_key_statistics(symbol)
+                except Exception as exc:
+                    logger.debug("MomentumQuality key statistics unavailable for %s: %s", symbol, exc)
+                    stats = {}
+
                 roe = stats.get("roe")
                 debt_to_equity = stats.get("debt_to_equity")
                 free_cash_flow = stats.get("free_cash_flow")
@@ -57,10 +65,22 @@ class MomentumQuality(BaseStrategy):
                     quality_components.append(max(0.0, min(1.0, 1.0 - debt_value / 200.0)))
                 if free_cash_flow is not None:
                     quality_components.append(1.0 if float(free_cash_flow) > 0 else 0.2)
-                quality_score = sum(quality_components) / len(quality_components) if quality_components else 0.55
+                quality_score = (
+                    sum(quality_components) / len(quality_components)
+                    if quality_components
+                    else None
+                )
 
                 momentum_score = max(0.0, min(momentum_return / 0.35, 1.0))
-                composite = momentum_score * momentum_weight + quality_score * quality_weight
+                effective_momentum_weight = momentum_weight
+                effective_quality_weight = quality_weight if quality_score is not None else 0.0
+                total_weight = effective_momentum_weight + effective_quality_weight
+                if total_weight <= 0:
+                    total_weight = 1.0
+                composite = (
+                    momentum_score * effective_momentum_weight
+                    + (quality_score or 0.0) * effective_quality_weight
+                ) / total_weight
                 risk_score = max(20, min(65, 60 - composite * 25))
 
                 candidates.append(
