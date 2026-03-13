@@ -1,15 +1,16 @@
 """
 布林带均值回归策略
 """
+import logging
 from typing import Any, Dict, List, Optional
-import asyncio
 
-from sqlalchemy import select, and_
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
 from app.engine.strategies.base_strategy import BaseStrategy
 from app.models.technical_indicator import TechnicalIndicator
 from app.providers.market_data_provider import MarketDataProvider
+
+logger = logging.getLogger(__name__)
 
 
 class BollingerBandsMeanReversion(BaseStrategy):
@@ -44,12 +45,12 @@ class BollingerBandsMeanReversion(BaseStrategy):
         for symbol in universe:
             try:
                 # 获取最新的技术指标数据
-                stmt = select(TechnicalIndicator).where(
-                    and_(
-                        TechnicalIndicator.symbol == symbol,
-                        TechnicalIndicator.indicator_type == "bollinger_bands"
-                    )
-                ).order_by(TechnicalIndicator.timestamp.desc()).limit(1)
+                stmt = (
+                    select(TechnicalIndicator)
+                    .where(TechnicalIndicator.symbol == symbol, TechnicalIndicator.timeframe == "1D")
+                    .order_by(TechnicalIndicator.timestamp.desc())
+                    .limit(1)
+                )
                 
                 result = await self.session.execute(stmt)
                 bb_data = result.scalars().first()
@@ -63,10 +64,9 @@ class BollingerBandsMeanReversion(BaseStrategy):
                     continue
                 
                 # 解析布林带数据
-                bb_values = bb_data.value or {}
-                upper_band = bb_values.get("upper")
-                middle_band = bb_values.get("middle")
-                lower_band = bb_values.get("lower")
+                upper_band = float(getattr(bb_data, "bb_upper", 0.0) or 0.0)
+                middle_band = float(getattr(bb_data, "bb_middle", 0.0) or 0.0)
+                lower_band = float(getattr(bb_data, "bb_lower", 0.0) or 0.0)
                 
                 if not all([upper_band, middle_band, lower_band]):
                     continue
@@ -120,8 +120,7 @@ class BollingerBandsMeanReversion(BaseStrategy):
                     signals.append(signal)
                     
             except Exception as e:
-                # 记录错误但继续处理其他标的
-                print(f"Error processing {symbol}: {e}")
+                logger.debug("BollingerBandsMeanReversion processing failed for %s: %s", symbol, e)
                 continue
         
         return signals
@@ -132,5 +131,5 @@ class BollingerBandsMeanReversion(BaseStrategy):
         return [
             "AAPL", "MSFT", "GOOGL", "AMZN", "TSLA",
             "META", "NVDA", "JPM", "V", "JNJ",
-            "WMT", "PG", "MA", "HD", "DIS"
+            "WMT", "PG", "MA", "HD", "DIS", "GLD", "SLV",
         ]

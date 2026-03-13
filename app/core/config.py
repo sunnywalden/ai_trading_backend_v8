@@ -278,6 +278,7 @@ class Settings(BaseSettings):
     # 当前自动闭环 / Opportunity Scan 都会复用该上限，
     # 以“最久未运行优先”轮转，避免总是同一个策略被反复执行。
     AUTO_STRATEGY_SCAN_BATCH_SIZE: int = 3
+    AUTO_STRATEGY_SCAN_SYMBOL_LIMIT: int = 120
 
     # ==================== V10.2-M1: 市场体制感知配置 ====================
     # 是否启用市场体制分类（关闭后体制固定为 BULL_TREND，不影响其他模块）

@@ -34,14 +34,13 @@ def setup_logging(level=logging.INFO):
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("openai").setLevel(logging.WARNING)
+    logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
-    # 确保 uvicorn 使用我们的格式
+    # 让 uvicorn 系列日志透传到 root，避免重复挂 handler 导致双写
     for logger_name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
         logging_logger = logging.getLogger(logger_name)
-        if logging_logger.handlers:
-            logging_logger.handlers[0].setFormatter(formatter)
-        else:
-            logging_logger.addHandler(handler)
+        logging_logger.handlers.clear()
+        logging_logger.propagate = True
 
     logging.info("🚀 Logging system initialized with standardized format")
     return root_logger
