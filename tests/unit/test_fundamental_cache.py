@@ -48,6 +48,43 @@ async def test_get_fundamental_data_prefers_redis_cache(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_get_fundamental_data_cache_only_can_fall_back_to_db_cache(monkeypatch):
+    service = FundamentalAnalysisService()
+    db_cached = SimpleNamespace(
+        symbol="MSFT",
+        fiscal_date="2026-03-13",
+        sector="Technology",
+        industry="Software",
+        pe_ratio=18.0,
+        pb_ratio=6.0,
+        peg_ratio=1.3,
+        beta=0.9,
+        roe=21.0,
+        roa=13.0,
+        net_margin=25.0,
+        revenue_growth_yoy=11.0,
+        eps_growth_yoy=9.0,
+        current_ratio=1.7,
+        debt_to_equity=0.3,
+    )
+
+    async def fake_redis_get(symbol):
+        return None
+
+    async def fake_db_get(session, symbol):
+        return db_cached
+
+    monkeypatch.setattr(service, "_get_cached_result_from_redis", fake_redis_get)
+    monkeypatch.setattr(service, "_get_cached_data", fake_db_get)
+
+    result = await service.get_fundamental_data("MSFT", cache_only=True)
+
+    assert result is not None
+    assert result.symbol == "MSFT"
+    assert result.overall_score is not None
+
+
+@pytest.mark.asyncio
 async def test_refresh_fundamental_data_job_includes_active_symbol_pool(monkeypatch):
     called_symbols: list[str] = []
 

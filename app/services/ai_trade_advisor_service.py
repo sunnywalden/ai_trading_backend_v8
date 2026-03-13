@@ -26,6 +26,7 @@ from app.broker.factory import make_option_broker_client
 from app.engine.order_executor import OrderExecutor
 from app.services.ai_analysis_service import AIAnalysisService
 from app.services.ai_client_manager import call_ai_with_fallback
+from app.services.non_realtime_data_policy import NonRealtimeDataPolicyService
 from app.services.trading_plan_service import TradingPlanService
 from app.models.trading_signal import TradingSignal, SignalType, SignalStatus, SignalSource
 from app.models.ai_evaluation_history import AIEvaluationHistory
@@ -594,7 +595,10 @@ class AITradeAdvisorService:
         try:
             from app.services.technical_analysis_service import TechnicalAnalysisService
             svc = TechnicalAnalysisService(self.session)
-            result = await svc.get_technical_analysis(symbol)
+            result = await svc.get_technical_analysis(
+                symbol,
+                data_policy=NonRealtimeDataPolicyService.runtime_advisory(),
+            )
             # result 是 TechnicalAnalysisDTO (Pydantic BaseModel)
             return {
                 "score": result.trend_strength,
@@ -615,7 +619,11 @@ class AITradeAdvisorService:
         try:
             from app.services.fundamental_analysis_service import FundamentalAnalysisService
             svc = FundamentalAnalysisService()
-            result = await svc.get_fundamental_data(symbol)
+            policy = NonRealtimeDataPolicyService.runtime_advisory()
+            result = await svc.get_fundamental_data(
+                symbol,
+                cache_only=policy.fundamental_cache_only,
+            )
             if result is None:
                 return {"score": None, "summary": "无基本面数据"}
             # result 是 types.SimpleNamespace，用 getattr 访问
