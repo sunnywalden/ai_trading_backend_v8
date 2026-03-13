@@ -151,7 +151,7 @@ class BenchmarkService:
         self,
         symbol: str = "SPY",
         days: int = 30
-    ) -> float:
+    ) -> Optional[float]:
         """
         计算市场波动率（年化）
         
@@ -161,7 +161,10 @@ class BenchmarkService:
         returns = await self.get_benchmark_returns(symbol, days)
         
         if not returns or len(returns) < 5:
-            return 0.15  # 默认15%波动率
+            if getattr(settings, "RUNTIME_ALLOW_DECISION_DEFAULTS", False):
+                return 0.15
+            logger.warning("BenchmarkService: insufficient real returns for volatility of %s", symbol)
+            return None
         
         # 计算标准差
         std_daily = statistics.stdev(returns)
