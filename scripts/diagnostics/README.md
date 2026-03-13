@@ -10,3 +10,7 @@
 - 计划调试
 
 本目录下脚本可直接通过 `python scripts/diagnostics/<script>.py` 运行。
+
+## 当前常用脚本
+
+- `diag_signal_origin_pipeline.py`：统计最近窗口内 REAL / SYNTHETIC / BACKFILL 信号分布、Watchtower / Validation / Intent 阻塞原因，以及 pending / executed 来源结构。
