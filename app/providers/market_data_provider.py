@@ -18,10 +18,12 @@ from datetime import datetime, timedelta
 from functools import lru_cache
 import time
 import logging
+import re
 
 from app.core.config import settings
 from app.core.cache import cache
 from app.services.api_monitoring_service import api_monitor, APIProvider
+from app.broker.factory import is_hk_stock, normalize_hk_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +62,12 @@ class MarketDataProvider:
     _class_price_cache: Dict[str, tuple] = {}
     # ── 负面缓存：记录无效或不存在的 symbol 避免重复请求 ──
     _invalid_symbol_cache: Dict[str, float] = {}
+    # ── Tiger 历史行情额度治理（进程级共享） ──
+    _tiger_historical_denied_cache: Dict[str, float] = {}
+    _tiger_historical_occupied_symbols: set[str] = set()
+    _tiger_historical_occupied_updated_at: float = 0.0
+    _tiger_historical_cache_ttl_seconds: int = 1800
+    _tiger_historical_occupied_pattern = re.compile(r"occupied symbols:\s*\[(.*?)\]", re.IGNORECASE | re.DOTALL)
     
     def __init__(self):
         self.cache_duration = 300
@@ -176,17 +184,80 @@ class MarketDataProvider:
     def _to_tiger_symbol(self, symbol: str) -> str:
         """将任意符号转换为 Tiger 格式"""
         s = symbol.strip().upper()
-        if ".HK" in s:
-            # 移除 .HK 后缀并根据需要补零
-            num_part = s.split(".")[0]
-            if num_part.isdigit():
-                return num_part.zfill(5)
-            return num_part
-        if s.isdigit() and len(s) < 5:
-            return s.zfill(5)
+        if is_hk_stock(s):
+            return normalize_hk_symbol(s)
         if s.startswith("^"):
             return f".{s[1:]}"
         return s
+
+    def _canonical_history_symbol(self, symbol: str) -> str:
+        s = str(symbol or "").strip().upper()
+        if not s:
+            return s
+        if is_hk_stock(s):
+            return normalize_hk_symbol(s)
+        return s
+
+    def _is_tiger_historical_permission_limit_error(self, error_message: str | None) -> bool:
+        msg = str(error_message or "").lower()
+        return (
+            "permission denied" in msg
+            and "historical market data" in msg
+            and "occupied symbols" in msg
+        )
+
+    def _parse_tiger_historical_occupied_symbols(self, error_message: str | None) -> set[str]:
+        message = str(error_message or "")
+        match = self._tiger_historical_occupied_pattern.search(message)
+        if not match:
+            return set()
+        raw_symbols = match.group(1)
+        parsed: set[str] = set()
+        for token in raw_symbols.split(","):
+            cleaned = token.strip().strip("'\"")
+            if cleaned:
+                parsed.add(self._canonical_history_symbol(cleaned))
+        return parsed
+
+    def _remember_tiger_historical_denial(self, symbol: str, error_message: str | None) -> None:
+        now = time.time()
+        canonical = self._canonical_history_symbol(symbol)
+        MarketDataProvider._tiger_historical_denied_cache[canonical] = now
+
+        occupied = self._parse_tiger_historical_occupied_symbols(error_message)
+        if occupied:
+            MarketDataProvider._tiger_historical_occupied_symbols = occupied
+            MarketDataProvider._tiger_historical_occupied_updated_at = now
+            if canonical in occupied:
+                MarketDataProvider._tiger_historical_denied_cache.pop(canonical, None)
+
+        if len(MarketDataProvider._tiger_historical_denied_cache) > 500:
+            oldest = min(MarketDataProvider._tiger_historical_denied_cache.items(), key=lambda item: item[1])[0]
+            del MarketDataProvider._tiger_historical_denied_cache[oldest]
+
+    def _remember_tiger_historical_success(self, symbol: str) -> None:
+        canonical = self._canonical_history_symbol(symbol)
+        MarketDataProvider._tiger_historical_denied_cache.pop(canonical, None)
+        MarketDataProvider._tiger_historical_occupied_symbols.add(canonical)
+        MarketDataProvider._tiger_historical_occupied_updated_at = time.time()
+
+    def _should_attempt_tiger_historical(self, symbol: str) -> bool:
+        now = time.time()
+        canonical = self._canonical_history_symbol(symbol)
+
+        denied_at = MarketDataProvider._tiger_historical_denied_cache.get(canonical)
+        if denied_at is not None:
+            if now - denied_at < self._tiger_historical_cache_ttl_seconds:
+                return False
+            del MarketDataProvider._tiger_historical_denied_cache[canonical]
+
+        if (
+            MarketDataProvider._tiger_historical_occupied_symbols
+            and now - MarketDataProvider._tiger_historical_occupied_updated_at < self._tiger_historical_cache_ttl_seconds
+        ):
+            return canonical in MarketDataProvider._tiger_historical_occupied_symbols
+
+        return True
 
     def _is_invalid(self, symbol: str) -> bool:
         """检查 symbol 是否在负面缓存中且未过期 (1小时)"""
@@ -244,6 +315,9 @@ class MarketDataProvider:
             if source == "tiger":
                 # Tiger 仅支持 1d 日线且有客户端
                 if self._tiger_quote_client and interval.lower() in ("1d", "day") and BarPeriod is not None:
+                    if not self._should_attempt_tiger_historical(symbol):
+                        logger.debug("[MarketData] Skip Tiger historical for %s: known outside current occupied symbol budget", symbol)
+                        continue
                     try:
                         await self._wait_for_rate_limit(symbol)
                         df = await self._get_tiger_bars(symbol, period)
@@ -766,6 +840,8 @@ class MarketDataProvider:
                 
         except Exception as e:
             error_msg = str(e)
+            if self._is_tiger_historical_permission_limit_error(error_msg):
+                self._remember_tiger_historical_denial(symbol, error_msg)
         
         # 记录API调用
         response_time = (time.time() - start_time) * 1000
@@ -776,6 +852,9 @@ class MarketDataProvider:
             response_time_ms=response_time,
             error_message=error_msg
         )
+
+        if success:
+            self._remember_tiger_historical_success(symbol)
         
         return result
     
