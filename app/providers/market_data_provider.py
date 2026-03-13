@@ -293,6 +293,65 @@ class MarketDataProvider:
         self._mark_invalid(symbol)
         return 0.0
 
+    async def get_latest_price(self, symbol: str) -> float:
+        """兼容旧策略接口：latest_price 等价于 current_price。"""
+        return await self.get_current_price(symbol)
+
+    async def get_historical_prices(
+        self,
+        symbol: str,
+        start_date: datetime,
+        end_date: datetime,
+    ) -> List[Dict]:
+        """兼容旧策略接口：返回 list[dict] 结构的 OHLCV 历史价格。"""
+        lookback_days = max(1, (end_date - start_date).days)
+        if lookback_days <= 5:
+            period = "5d"
+        elif lookback_days <= 31:
+            period = "1mo"
+        elif lookback_days <= 93:
+            period = "3mo"
+        elif lookback_days <= 186:
+            period = "6mo"
+        elif lookback_days <= 366:
+            period = "1y"
+        elif lookback_days <= 732:
+            period = "2y"
+        elif lookback_days <= 1830:
+            period = "5y"
+        else:
+            period = "max"
+
+        df = await self.get_historical_data(symbol, period=period, interval="1d")
+        if df is None or df.empty:
+            return []
+
+        filtered = df.copy()
+        try:
+            if isinstance(filtered.index, pd.DatetimeIndex) and filtered.index.tz is not None:
+                filtered.index = filtered.index.tz_convert(None)
+        except Exception:
+            pass
+        if isinstance(filtered.index, pd.DatetimeIndex):
+            filtered = filtered[(filtered.index >= pd.Timestamp(start_date)) & (filtered.index <= pd.Timestamp(end_date))]
+        if filtered.empty:
+            filtered = df.tail(min(len(df), lookback_days + 5)).copy()
+
+        records: List[Dict] = []
+        for idx, row in filtered.iterrows():
+            ts = idx.to_pydatetime() if isinstance(idx, pd.Timestamp) else idx
+            records.append(
+                {
+                    "timestamp": ts,
+                    "open": float(row.get("Open") or row.get("open") or 0.0),
+                    "high": float(row.get("High") or row.get("high") or 0.0),
+                    "low": float(row.get("Low") or row.get("low") or 0.0),
+                    "close": float(row.get("Close") or row.get("close") or 0.0),
+                    "volume": float(row.get("Volume") or row.get("volume") or 0.0),
+                }
+            )
+        return records
+
     async def _get_tiger_price_single(self, symbol: str) -> float:
         """获取单个 Tiger 价格调用"""
         if not self._tiger_quote_client:
