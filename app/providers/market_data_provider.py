@@ -19,6 +19,7 @@ from functools import lru_cache
 import time
 import logging
 import re
+from datetime import UTC
 
 from app.core.config import settings
 from app.core.cache import cache
@@ -200,6 +201,93 @@ class MarketDataProvider:
             return normalize_hk_symbol(s)
         return s
 
+    def _bars_cache_key(self, symbol: str, period: str, interval: str) -> tuple[str, str, str]:
+        return (
+            self._canonical_history_symbol(symbol),
+            str(period or "1y").lower(),
+            str(interval or "1d").lower(),
+        )
+
+    def _redis_bars_cache_key(self, cache_key: tuple[str, str, str]) -> str:
+        symbol, period, interval = cache_key
+        return f"historical_bars:{symbol}:{period}:{interval}"
+
+    @staticmethod
+    def _serialize_bars_df(df: pd.DataFrame) -> dict:
+        if df is None or df.empty:
+            return {"records": []}
+
+        working = df.copy()
+        records: list[dict] = []
+        for idx, row in working.iterrows():
+            ts = idx.to_pydatetime() if isinstance(idx, pd.Timestamp) else idx
+            if isinstance(ts, datetime) and ts.tzinfo is not None:
+                ts = ts.astimezone(UTC).replace(tzinfo=None)
+            records.append(
+                {
+                    "timestamp": ts.isoformat() if isinstance(ts, datetime) else str(ts),
+                    "open": float(row.get("Open") or row.get("open") or 0.0),
+                    "high": float(row.get("High") or row.get("high") or 0.0),
+                    "low": float(row.get("Low") or row.get("low") or 0.0),
+                    "close": float(row.get("Close") or row.get("close") or 0.0),
+                    "volume": float(row.get("Volume") or row.get("volume") or 0.0),
+                }
+            )
+        return {"records": records}
+
+    @staticmethod
+    def _deserialize_bars_df(payload: dict | list | None) -> pd.DataFrame | None:
+        if payload is None:
+            return None
+
+        records = payload.get("records") if isinstance(payload, dict) else payload
+        if not isinstance(records, list) or not records:
+            return None
+
+        rows: list[dict] = []
+        index: list[pd.Timestamp] = []
+        for item in records:
+            if not isinstance(item, dict):
+                continue
+            ts_raw = item.get("timestamp")
+            if ts_raw is None:
+                continue
+            try:
+                ts = pd.Timestamp(ts_raw)
+            except Exception:
+                continue
+            index.append(ts)
+            rows.append(
+                {
+                    "Open": float(item.get("open") or 0.0),
+                    "High": float(item.get("high") or 0.0),
+                    "Low": float(item.get("low") or 0.0),
+                    "Close": float(item.get("close") or 0.0),
+                    "Volume": float(item.get("volume") or 0.0),
+                }
+            )
+
+        if not rows:
+            return None
+        return pd.DataFrame(rows, index=index)
+
+    async def _get_cached_bars_redis(self, cache_key: tuple[str, str, str]) -> Optional[pd.DataFrame]:
+        payload = await cache.get(self._redis_bars_cache_key(cache_key))
+        return self._deserialize_bars_df(payload)
+
+    async def _cache_bars_redis(
+        self,
+        cache_key: tuple[str, str, str],
+        data: pd.DataFrame,
+        ttl: Optional[int] = None,
+    ) -> None:
+        expire = int(ttl or settings.HISTORICAL_BARS_CACHE_TTL_SECONDS)
+        await cache.set(
+            self._redis_bars_cache_key(cache_key),
+            self._serialize_bars_df(data),
+            expire=expire,
+        )
+
     def _is_tiger_historical_permission_limit_error(self, error_message: str | None) -> bool:
         msg = str(error_message or "").lower()
         return (
@@ -291,7 +379,10 @@ class MarketDataProvider:
         self,
         symbol: str,
         period: str = "1y",
-        interval: str = "1d"
+        interval: str = "1d",
+        *,
+        force_refresh: bool = False,
+        cache_only: bool = False,
     ) -> pd.DataFrame:
         """获取历史数据 - 考虑优先级策略和负面缓存
         
@@ -304,10 +395,19 @@ class MarketDataProvider:
             return pd.DataFrame()
 
         # 1. 检查缓存
-        cache_key = (symbol, period, interval)
-        cached_data = self._get_cached_bars(cache_key)
-        if cached_data is not None:
-            return cached_data
+        cache_key = self._bars_cache_key(symbol, period, interval)
+        if not force_refresh:
+            cached_data = self._get_cached_bars(cache_key)
+            if cached_data is not None:
+                return cached_data
+
+            redis_cached = await self._get_cached_bars_redis(cache_key)
+            if redis_cached is not None and not redis_cached.empty:
+                self._cache_bars(cache_key, redis_cached)
+                return redis_cached
+
+        if cache_only:
+            return pd.DataFrame()
         
         # 2. 依次尝试数据源
         primary = self.primary_source
@@ -337,6 +437,7 @@ class MarketDataProvider:
                         df = await self._get_tiger_bars(symbol, period)
                         if df is not None and len(df) > 0:
                             self._cache_bars(cache_key, df)
+                            await self._cache_bars_redis(cache_key, df)
                             return df
                     except Exception as e:
                         logger.debug("[MarketData] Tiger API failed for %s: %s", symbol, e)
@@ -344,6 +445,7 @@ class MarketDataProvider:
                 df = await self._get_yahoo_data_with_retry(symbol, period, interval)
                 if df is not None and len(df) > 0:
                     self._cache_bars(cache_key, df, ttl=3600)  # Yahoo 数据通常变动更慢，可多缓存一会
+                    await self._cache_bars_redis(cache_key, df, ttl=max(3600, settings.HISTORICAL_BARS_CACHE_TTL_SECONDS))
                     return df
         
         # 最终失败
@@ -397,6 +499,9 @@ class MarketDataProvider:
         symbol: str,
         start_date: datetime,
         end_date: datetime,
+        *,
+        force_refresh: bool = False,
+        cache_only: bool = False,
     ) -> List[Dict]:
         """兼容旧策略接口：返回 list[dict] 结构的 OHLCV 历史价格。"""
         lookback_days = max(1, (end_date - start_date).days)
@@ -417,7 +522,13 @@ class MarketDataProvider:
         else:
             period = "max"
 
-        df = await self.get_historical_data(symbol, period=period, interval="1d")
+        df = await self.get_historical_data(
+            symbol,
+            period=period,
+            interval="1d",
+            force_refresh=force_refresh,
+            cache_only=cache_only,
+        )
         if df is None or df.empty:
             return []
 
@@ -446,6 +557,46 @@ class MarketDataProvider:
                 }
             )
         return records
+
+    async def prewarm_historical_data(
+        self,
+        symbols: List[str],
+        *,
+        period: str = "6mo",
+        interval: str = "1d",
+    ) -> Dict[str, object]:
+        attempted: list[str] = []
+        refreshed: list[str] = []
+        failures: dict[str, str] = {}
+
+        seen: set[str] = set()
+        for raw_symbol in symbols:
+            symbol = str(raw_symbol or "").strip().upper()
+            if not symbol or symbol in seen:
+                continue
+            seen.add(symbol)
+            attempted.append(symbol)
+            try:
+                df = await self.get_historical_data(
+                    symbol,
+                    period=period,
+                    interval=interval,
+                    force_refresh=True,
+                )
+                if df is None or df.empty:
+                    failures[symbol] = "empty historical data"
+                    continue
+                refreshed.append(symbol)
+            except Exception as exc:
+                failures[symbol] = str(exc)[:160]
+
+        return {
+            "attempted_symbols": attempted,
+            "refreshed_symbols": refreshed,
+            "success_count": len(refreshed),
+            "failure_count": len(failures),
+            "failures": failures,
+        }
 
     async def _get_tiger_price_single(self, symbol: str) -> float:
         """获取单个 Tiger 价格调用"""
