@@ -49,7 +49,7 @@ class MomentumQuality(BaseStrategy):
                 momentum_return = (latest_close - anchor_close) / anchor_close
 
                 try:
-                    stats = await market_data.get_key_statistics(symbol)
+                    stats = await market_data.get_key_statistics(symbol, cache_only=True)
                 except Exception as exc:
                     logger.debug("MomentumQuality key statistics unavailable for %s: %s", symbol, exc)
                     stats = {}

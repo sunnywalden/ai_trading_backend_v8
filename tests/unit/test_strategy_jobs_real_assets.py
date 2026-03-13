@@ -64,7 +64,7 @@ async def test_momentum_quality_generates_real_candidates(monkeypatch):
                 for i in range(160)
             ]
 
-        async def get_key_statistics(self, symbol):
+        async def get_key_statistics(self, symbol, **kwargs):
             return {
                 "roe": 0.24,
                 "debt_to_equity": 35.0,
@@ -104,7 +104,7 @@ async def test_momentum_quality_tolerates_missing_key_statistics(monkeypatch):
                 for i in range(160)
             ]
 
-        async def get_key_statistics(self, symbol):
+        async def get_key_statistics(self, symbol, **kwargs):
             raise RuntimeError("stats unavailable")
 
     monkeypatch.setattr(
@@ -145,7 +145,7 @@ async def test_momentum_quality_ranked_fallback_uses_real_data_when_threshold_no
                 for close in closes
             ]
 
-        async def get_key_statistics(self, symbol):
+        async def get_key_statistics(self, symbol, **kwargs):
             return {}
 
     monkeypatch.setattr(
@@ -180,7 +180,7 @@ async def test_momentum_quality_generates_sell_signals_for_negative_momentum(mon
                 for close in closes
             ]
 
-        async def get_key_statistics(self, symbol):
+        async def get_key_statistics(self, symbol, **kwargs):
             return {"roe": 0.2, "debt_to_equity": 20.0, "free_cash_flow": 1_000_000}
 
     monkeypatch.setattr(

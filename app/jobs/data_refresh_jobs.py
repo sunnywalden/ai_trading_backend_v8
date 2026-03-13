@@ -195,6 +195,45 @@ async def refresh_historical_bars_cache_job():
         }
 
 
+async def refresh_key_statistics_cache_job():
+    """任务: 预热关键统计数据缓存。
+
+    非实时基本面/quality 因子优先由任务托管刷新，运行态仅读缓存，减少 yfinance 现场调用。
+    """
+    try:
+        logger.info("Starting key statistics cache refresh job")
+        start_time = datetime.now()
+
+        from app.providers.market_data_provider import market_data_provider
+
+        async with _get_session() as session:
+            symbols = await _collect_symbols_for_historical_refresh(session)
+
+        result = await market_data_provider.prewarm_key_statistics(symbols)
+        elapsed = (datetime.now() - start_time).total_seconds()
+        logger.info(
+            "Key statistics cache refresh completed: %s success, %s errors, took %.2fs",
+            result.get("success_count", 0),
+            result.get("failure_count", 0),
+            elapsed,
+        )
+        return {
+            "success": True,
+            **result,
+        }
+    except Exception as e:
+        logger.error(f"Key statistics cache refresh job failed: {str(e)}", exc_info=True)
+        return {
+            "success": False,
+            "error": str(e),
+            "attempted_symbols": [],
+            "refreshed_symbols": [],
+            "success_count": 0,
+            "failure_count": 0,
+            "failures": {},
+        }
+
+
 async def refresh_fundamental_data_job():
     """任务2: 刷新基本面数据
 
@@ -512,6 +551,15 @@ def register_all_jobs(_scheduler):
         name="预热历史行情缓存",
         hours=max(1, int(settings.HISTORICAL_BARS_REFRESH_HOURS or 2)),
         next_run_time=datetime.now() + timedelta(minutes=8),
+    )
+
+    add_job(
+        func=refresh_key_statistics_cache_job,
+        trigger="interval",
+        id="refresh_key_statistics_cache",
+        name="预热关键统计缓存",
+        hours=max(1, int(settings.KEY_STATISTICS_REFRESH_HOURS or 12)),
+        next_run_time=datetime.now() + timedelta(minutes=12),
     )
 
     # 任务2: 基本面数据刷新 - 每天凌晨2点

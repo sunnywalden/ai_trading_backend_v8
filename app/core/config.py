@@ -162,6 +162,8 @@ class Settings(BaseSettings):
     CACHE_TTL_FUNDAMENTAL_HOURS: int = 24
     CACHE_TTL_MACRO_HOURS: int = 6
     CACHE_TTL_GEOPOLITICAL_HOURS: int = 4
+    KEY_STATISTICS_CACHE_TTL_SECONDS: int = 86400
+    KEY_STATISTICS_REFRESH_HOURS: int = 12
 
     # 风险预算（用于持仓评估预算占用率）
     DEFAULT_RISK_BUDGET_USD: float = 20000.0
