@@ -65,7 +65,11 @@ class MarketHotspotService:
         
         # 如果没有任何数据源成功，提供一些 Mock 数据作为演示（仅在开发/模拟模式下有用）
         if not unique_hotspots:
-            unique_hotspots = self._get_mock_hotspots()
+            if getattr(settings, "RUNTIME_ALLOW_MOCK_DATA", False):
+                unique_hotspots = self._get_mock_hotspots()
+            else:
+                logger.warning("MarketHotspotService: no real hotspot data available; mock fallback disabled")
+                unique_hotspots = []
 
         # 排序 (按时间降序)
         unique_hotspots.sort(key=lambda x: x.get("event_date", ""), reverse=True)

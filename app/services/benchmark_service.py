@@ -13,6 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.broker.factory import make_option_broker_client
 from app.core.cache import cache
+from app.core.config import settings
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class BenchmarkService:
@@ -59,8 +64,10 @@ class BenchmarkService:
         
         # 从broker获取历史数据
         if not self.broker:
-            # 回退：返回模拟数据（实际生产应抛出异常）
-            return self._generate_mock_returns(days)
+            if getattr(settings, "RUNTIME_ALLOW_MOCK_DATA", False):
+                return self._generate_mock_returns(days)
+            logger.warning("BenchmarkService: broker unavailable and mock fallback disabled for %s", symbol)
+            return []
         
         try:
             # 获取历史K线
@@ -77,8 +84,10 @@ class BenchmarkService:
             
             if not bars or len(bars) < max(int(days * 0.6), 5):
                 # days 是日历天数，交易日约为 days * 0.7；低于 60% 才算不足
-                print(f"警告: {symbol}历史数据不足(获取到{len(bars) if bars else 0}条), 返回模拟数据")
-                return self._generate_mock_returns(days)
+                logger.warning("BenchmarkService: insufficient real bars for %s (count=%s)", symbol, len(bars) if bars else 0)
+                if getattr(settings, "RUNTIME_ALLOW_MOCK_DATA", False):
+                    return self._generate_mock_returns(days)
+                return []
             
             # 计算日收益率
             returns = []
@@ -98,8 +107,10 @@ class BenchmarkService:
             return returns
             
         except Exception as e:
-            print(f"获取{symbol}基准数据失败: {e}")
-            return self._generate_mock_returns(days)
+            logger.warning("BenchmarkService: failed to load real benchmark data for %s: %s", symbol, e)
+            if getattr(settings, "RUNTIME_ALLOW_MOCK_DATA", False):
+                return self._generate_mock_returns(days)
+            return []
     
     def _generate_mock_returns(self, days: int) -> List[float]:
         """
