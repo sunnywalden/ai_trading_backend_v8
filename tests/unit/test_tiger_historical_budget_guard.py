@@ -15,6 +15,7 @@ def _reset_market_data_provider_budget_state() -> None:
     MarketDataProvider._tiger_historical_occupied_symbols = set()
     MarketDataProvider._tiger_historical_occupied_updated_at = 0.0
     MarketDataProvider._tiger_historical_occupied_authoritative = False
+    MarketDataProvider._class_bars_cache = {}
 
 
 def _permission_error_message(requested: str = "00002") -> str:
@@ -59,14 +60,70 @@ async def test_market_data_provider_skips_tiger_for_known_non_occupied_symbol(mo
 
     tiger_mock = AsyncMock(return_value=pd.DataFrame({"Close": [1.0]}))
     yahoo_mock = AsyncMock(return_value=pd.DataFrame())
+    cache_get = AsyncMock(return_value=None)
+    cache_set = AsyncMock(return_value=True)
     monkeypatch.setattr(provider, "_get_tiger_bars", tiger_mock)
     monkeypatch.setattr(provider, "_get_yahoo_data_with_retry", yahoo_mock)
+    monkeypatch.setattr("app.providers.market_data_provider.cache.get", cache_get)
+    monkeypatch.setattr("app.providers.market_data_provider.cache.set", cache_set)
 
     result = await provider.get_historical_data("00001", period="1y", interval="1d")
 
     assert result.empty
     tiger_mock.assert_not_awaited()
     yahoo_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_market_data_provider_uses_redis_cached_bars_before_external(monkeypatch):
+    _reset_market_data_provider_budget_state()
+    provider = MarketDataProvider()
+    provider._tiger_quote_client = cast(Any, object())
+
+    cached_df = pd.DataFrame(
+        [{"Open": 1.0, "High": 1.2, "Low": 0.9, "Close": 1.1, "Volume": 1000.0}],
+        index=[pd.Timestamp("2026-03-12T00:00:00")],
+    )
+    cache_get = AsyncMock(return_value=provider._serialize_bars_df(cached_df))
+    cache_set = AsyncMock(return_value=True)
+    tiger_mock = AsyncMock(return_value=pd.DataFrame())
+
+    monkeypatch.setattr("app.providers.market_data_provider.cache.get", cache_get)
+    monkeypatch.setattr("app.providers.market_data_provider.cache.set", cache_set)
+    monkeypatch.setattr(provider, "_get_tiger_bars", tiger_mock)
+
+    result = await provider.get_historical_data("AAPL", period="6mo", interval="1d")
+
+    assert not result.empty
+    assert float(result.iloc[-1]["Close"]) == pytest.approx(1.1)
+    tiger_mock.assert_not_awaited()
+    cache_get.assert_awaited()
+    cache_set.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_market_data_provider_refresh_writes_redis_bars_cache(monkeypatch):
+    _reset_market_data_provider_budget_state()
+    provider = MarketDataProvider()
+    provider._tiger_quote_client = cast(Any, object())
+
+    fresh_df = pd.DataFrame(
+        [{"Open": 2.0, "High": 2.2, "Low": 1.9, "Close": 2.1, "Volume": 2000.0}],
+        index=[pd.Timestamp("2026-03-12T00:00:00")],
+    )
+    cache_get = AsyncMock(return_value=None)
+    cache_set = AsyncMock(return_value=True)
+    tiger_mock = AsyncMock(return_value=fresh_df)
+
+    monkeypatch.setattr("app.providers.market_data_provider.cache.get", cache_get)
+    monkeypatch.setattr("app.providers.market_data_provider.cache.set", cache_set)
+    monkeypatch.setattr(provider, "_get_tiger_bars", tiger_mock)
+
+    result = await provider.get_historical_data("MSFT", period="6mo", interval="1d", force_refresh=True)
+
+    assert not result.empty
+    tiger_mock.assert_awaited_once()
+    cache_set.assert_awaited()
 
 
 def test_data_hub_permission_budget_allows_only_occupied_symbols():

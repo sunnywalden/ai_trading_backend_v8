@@ -19,7 +19,7 @@ from typing import List
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.broker.factory import make_option_broker_client
+from app.broker.factory import is_hk_stock, make_option_broker_client
 from app.core.config import settings
 from app.models.fsm_transition_log import FsmTransitionLog
 from app.models.symbol_behavior_stats import SymbolBehaviorStats
@@ -112,6 +112,86 @@ async def refresh_technical_indicators_job():
             "symbols_attempted": [],
             "refreshed_symbols": [],
             "latest_seen": None,
+        }
+
+
+async def _collect_symbols_for_historical_refresh(session: AsyncSession) -> list[str]:
+    from app.jobs.strategy_jobs import HK_DEFAULT_SYMBOLS, DEFAULT_SYMBOLS, _prioritize_auto_scan_symbols
+
+    svc = MarketUniverseService(session)
+    active_symbols = await _collect_symbols_for_technical_refresh(session, [])
+
+    try:
+        us_local = await svc.get_local_universe_symbols("US")
+    except Exception:
+        us_local = []
+    try:
+        hk_local = await svc.get_local_universe_symbols("HK")
+    except Exception:
+        hk_local = []
+
+    us_symbols = _prioritize_auto_scan_symbols(us_local or DEFAULT_SYMBOLS, "US")
+    hk_symbols = _prioritize_auto_scan_symbols(hk_local or HK_DEFAULT_SYMBOLS, "HK")
+    us_symbols = us_symbols[: max(1, int(settings.HISTORICAL_BARS_REFRESH_US_SYMBOL_LIMIT or 120))]
+    hk_symbols = hk_symbols[: max(1, int(settings.HISTORICAL_BARS_REFRESH_HK_SYMBOL_LIMIT or 24))]
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for symbol in [*active_symbols, *hk_symbols, *us_symbols]:
+        clean = str(symbol or "").strip().upper()
+        if not clean or clean in seen:
+            continue
+        seen.add(clean)
+        ordered.append(clean)
+    return ordered
+
+
+async def refresh_historical_bars_cache_job():
+    """任务: 预热证券历史行情缓存。
+
+    频率: 每 2 小时（可配置）
+    功能: 优先用 Tiger 批量刷新 US/HK 代表池与活跃标的的日线历史行情，写入 Redis + 进程缓存。
+    """
+    try:
+        logger.info("Starting historical bars cache refresh job")
+        start_time = datetime.now()
+
+        from app.providers.market_data_provider import market_data_provider
+
+        async with _get_session() as session:
+            symbols = await _collect_symbols_for_historical_refresh(session)
+
+        result = await market_data_provider.prewarm_historical_data(symbols, period="6mo", interval="1d")
+        refreshed_symbols = list(result.get("refreshed_symbols") or [])
+        hk_success = sum(1 for symbol in refreshed_symbols if is_hk_stock(symbol))
+        us_success = len(refreshed_symbols) - hk_success
+        elapsed = (datetime.now() - start_time).total_seconds()
+        logger.info(
+            "Historical bars cache refresh completed: %s success, %s errors, hk=%s, us=%s, took %.2fs",
+            result.get("success_count", 0),
+            result.get("failure_count", 0),
+            hk_success,
+            us_success,
+            elapsed,
+        )
+        return {
+            "success": True,
+            **result,
+            "hk_success_count": hk_success,
+            "us_success_count": us_success,
+        }
+    except Exception as e:
+        logger.error(f"Historical bars cache refresh job failed: {str(e)}", exc_info=True)
+        return {
+            "success": False,
+            "error": str(e),
+            "attempted_symbols": [],
+            "refreshed_symbols": [],
+            "success_count": 0,
+            "failure_count": 0,
+            "failures": {},
+            "hk_success_count": 0,
+            "us_success_count": 0,
         }
 
 
@@ -423,6 +503,15 @@ def register_all_jobs(_scheduler):
         name="刷新技术指标",
         hours=1,
         next_run_time=datetime.now() + timedelta(minutes=5),  # 5分钟后首次运行
+    )
+
+    add_job(
+        func=refresh_historical_bars_cache_job,
+        trigger="interval",
+        id="refresh_historical_bars_cache",
+        name="预热历史行情缓存",
+        hours=max(1, int(settings.HISTORICAL_BARS_REFRESH_HOURS or 2)),
+        next_run_time=datetime.now() + timedelta(minutes=8),
     )
 
     # 任务2: 基本面数据刷新 - 每天凌晨2点

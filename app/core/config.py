@@ -238,10 +238,14 @@ class Settings(BaseSettings):
     PAPER_GRADUATION_MAX_SYMBOLS: int = 12  # 毕业评估最多回测的真实交易标的数
 
     # DataHub 数据源优先级
-    DATA_HUB_PRIMARY: str = "yfinance"  # yfinance / tiger
-    DATA_HUB_FALLBACK: str = "tiger"  # 主源失败时使用
+    DATA_HUB_PRIMARY: str = "tiger"  # tiger / yfinance
+    DATA_HUB_FALLBACK: str = "yfinance"  # 主源失败时使用
     DATA_HUB_TIGER_OHLCV_RATE_LIMIT_COOLDOWN_SECONDS: int = 300
     DATA_HUB_TIGER_OHLCV_PERMISSION_COOLDOWN_SECONDS: int = 1800
+    HISTORICAL_BARS_CACHE_TTL_SECONDS: int = 21600
+    HISTORICAL_BARS_REFRESH_HOURS: int = 2
+    HISTORICAL_BARS_REFRESH_US_SYMBOL_LIMIT: int = 120
+    HISTORICAL_BARS_REFRESH_HK_SYMBOL_LIMIT: int = 24
 
     # 期权分析缓存时间（小时）
     OPTIONS_ANALYSIS_CACHE_EXPIRE_HOURS: int = 24
