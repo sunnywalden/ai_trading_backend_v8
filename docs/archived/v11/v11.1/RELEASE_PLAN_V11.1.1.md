@@ -40,25 +40,63 @@ V11.0.1 已经解决了以下问题：
 
 基于本次仓库核查，当前系统已经具备明显的“平台成熟期治理信号”：
 
-#### 代码体量信号（本次核查）
+#### 代码体量信号（本次核查，仅计 .py / .vue 源文件，不含 .pyc 编译缓存）
 
-| 区域 | 当前规模 |
-| ---- | -------- |
-| 后端 `app/services` | 195 个文件 |
-| 后端 `app/routers` | 95 个文件 |
-| 后端 `app/models` | 102 个文件 |
-| 后端 `app/jobs` | 35 个文件 |
-| 前端 `src/views` | 53 个文件 |
-| 前端 `src/components` | 86 个文件 |
-| 前端 `src/api` | 28 个文件 |
-| 前端 `src/stores` | 19 个文件 |
+| 区域 | 当前规模（源文件） |
+| ---- | ---- |
+| 后端 `app/services` | 100 个 .py |
+| 后端 `app/routers` | 47 个 .py |
+| 后端 `app/models` | 51 个 .py |
+| 后端 `app/jobs` | 35 个 .py |
+| 前端 `src/views` | 53 个 .vue |
+| 前端 `src/components` | 86 个 .vue/.ts |
+| 前端 `src/api` | 28 个 .ts |
+| 前端 `src/stores` | 19 个 .ts |
+
+> **注**：若含 `__pycache__/*.pyc` 则数量翻倍（约 195 / 95 / 102），但编译缓存不代表代码复杂度，以上数据为有效代码基线。
 
 #### 结构与体验信号（本次核查）
 
-- `src/router/index.ts` 中存在较多别名重定向与历史路由兼容入口，说明页面治理已经进入“收口期”。
+- `src/router/index.ts` 中存在 **18 条** legacy redirect 别名（不含根路径 `/` 重定向），说明页面治理已进入"收口期"。
 - 前端仍可见 `legacy compat` 逻辑，如 `src/stores/lifecycle.ts`、`src/api/positionLifecycleService.ts`。
 - 后端仍存在 legacy / compat 暴露，如 `app/routers/quant_loop.py` 的 deprecated 自动执行入口、`app/routers/autonomy.py` 中的 `LEGACY_COMPAT` / `LEGACY_NONE` 语义。
-- 当前页面和接口已经不缺“能力”，真正缺的是：**主路径、归属感、一致性、层次感、可维护性**。
+- 当前页面和接口已经不缺"能力"，真正缺的是：**主路径、归属感、一致性、层次感、可维护性**。
+
+#### 前端孤儿视图清单（无活跃路由，待清理）
+
+以下 `.vue` 文件存在于 `src/views/` 但在 `src/router/index.ts` 中无任何活跃路由指向（部分仅残留 legacy redirect 的来源端），属于死代码：
+
+| 文件 | 现状说明 |
+| ---- | -------- |
+| `DashboardPage.vue` | V9 旧仪表盘，当前路由已切换至 `DashboardV2Page.vue` |
+| `AIAdvisorPage.vue` | 老版 AI 建议页，`/ai-advisor` 已 redirect 至 `/autonomy` |
+| `AiAdvicePage.vue` | AI 建议另一个版本，无任何路由引用 |
+| `ExecutionCenter.vue` | 旧执行中心，`/execution-center` 已 redirect 至 `/autonomy` |
+| `ExecutionListPage.vue` | 执行列表孤立版本，无活跃路由 |
+| `AlgoExecutionPage.vue` | 无路由，功能已被 `/execution-policy` 覆盖 |
+| `StressTestPage.vue` | `/stress-test` redirect 至 `/backtest`，本文件冗余 |
+| `BehaviorScorePage.vue` | 无路由，行为评分功能已归并 |
+| `MarketHotspotsPage.vue` | `/hotspots` redirect 至 `/opportunities`，本文件冗余 |
+| `ApiMonitoringPage.vue` | `/api-monitoring` redirect 至 `/system-monitor?tab=api` |
+| `ServiceHealthPage.vue` | `/service-health` redirect 至 `/system-monitor?tab=health` |
+| `SystemHealthPage.vue` | 无路由，系统健康已在 `SystemMonitorPage` 覆盖 |
+| `ExternalApiMonitoringPage.vue` | 无路由，冗余监控视图 |
+
+> **结论**：在真正做"功能收敛"之前，先**删除上述 13 个孤儿文件**，前端视图数可从 53 降至 **40**，显著低于 V11.1.1 的 ≤ 40 目标。后续"功能页合并"才是真正的体验收敛工作，而不是靠删除孤儿文件凑数。
+
+#### 后端 Legacy 路由登记现状
+
+以下后端路由文件在 `app/main.py` 中仍处于**活跃注册**状态，但对应的前端页面已废弃或重定向：
+
+| 路由文件 | API prefix | 现状 |
+| -------- | ---------- | ---- |
+| `ai_advisor.py` | `/api/v1/ai-advisor/...` | 对应前端 `/ai-advisor` → 已 redirect 到 `/autonomy` |
+| `execution_center.py` | `/api/v1/execution-center/...` | 对应前端 `/execution-center` → 已 redirect 到 `/autonomy` |
+| `hotspots.py` | `/api/v1/hotspots/...` | 对应前端 `/hotspots` → 已 redirect 到 `/opportunities` |
+| `dashboard.py` | `/api/v1/dashboard/...` (V9) | 与 `dashboard_v2.py` 并存，V9 版本已无前端对应 |
+| `stress_test.py` | `/api/v1/stress-test/...` | 对应前端 `/stress-test` → 已 redirect 到 `/backtest` |
+
+> V11.1.1 必须给出以上 5 个 legacy 后端路由的 sunset 或迁移计划，而不是让它们永久注册在 `main.py` 中。
 
 ### 0.4 V11.1.1 不可妥协的边界
 
@@ -95,13 +133,17 @@ V11.1.1 的顶层目标不是“新增更多功能页”，而是：
 
 ### 1.3 成功标准
 
-V11.1.1 的成功不以“又加了多少页”来衡量，而以以下指标衡量：
+V11.1.1 的成功不以"又加了多少页"来衡量，而以以下可量化指标衡量：
 
-- 页面收敛后，用户处理核心问题的平均点击路径显著缩短；
-- 关键工作台的“结果 + 解释 + 来源 + 建议动作”口径统一；
-- 前端活跃业务视图数明显下降，但能力不减少；
-- 后端新增能力不再以“再加一个 router/service 文件”作为默认落地方式；
-- Legacy compat 层开始可计划地下线，而不是永久累积。
+| 维度 | 基线 | 目标 | 量化验收方式 |
+| ---- | ---- | ---- | ------------ |
+| 前端视图文件数 | 53 .vue | **≤ 40** | `src/views/` 文件计数 |
+| legacy redirect alias 数 | 18 条 | **≤ 10** | `src/router/index.ts` redirect 计数 |
+| 后端活跃 legacy 路由 | 5 个待处置 | **≤ 2** | `app/main.py` include_router 清单 |
+| 关键工作台的 explainability strip 覆盖 | 0（无统一标准） | **A/C/D 域主页面全覆盖** | 手工验收截图 |
+| 核心问题是否有唯一主入口 | 多入口/分散 | **Page Ownership Matrix 定稿** | 文档评审 |
+| backend read model 覆盖 | 0 | **≥ 3 个核心工作台** | 接口文档 |
+| 重点页面性能（非 AI 接口 P95） | 未建立基线 | **< 400ms** | 实测或压测 |
 
 ---
 
@@ -182,7 +224,55 @@ V11.1.1 的成功不以“又加了多少页”来衡量，而以以下指标衡
 - `task-management` 不再作为长期独立导航存在，应逐步并入 `/system-monitor` 的任务/作业视图；
 - `copilot` 从“聊天页”升级为跨工作台入口。
 
-### 2.2 交易经理视角：需要的是统一决策面，而不是更多图表
+### 2.2 完整页面 → 工作台归属映射（清理孤儿后的 40 个活跃页面）
+
+> 以下映射基于清理 13 个孤儿视图后的实际活跃路由（38 条活跃路由 + 2 条系统路由），与当前前端 4 组导航结构对齐，同时说明 V11.1.1 工作台 Domain 归属。
+
+| 页面路由 | 当前导航分组 | V11.1.1 工作台 | V11.1.1 动作 |
+| -------- | ------------ | -------------- | ------------ |
+| `/dashboard` | 指挥室 | A — Command Center | 保留，作全局摘要主入口 |
+| `/war-room` | 交易中枢 | A — Command Center | 保留，统一 shell 与 Dashboard |
+| `/autonomy` | AI 洞察&系统 | A — Command Center | 保留，治理/自知/控制主入口 |
+| `/order-book` | 交易中枢 | C — Execution & Lifecycle | 保留，交易动作唯一主入口 |
+| `/execution-policy` | 交易中枢 | C — Execution & Lifecycle | 保留，成本/策略回放主入口 |
+| `/trade-lifecycle` | 交易中枢 | C — Execution & Lifecycle | 保留，链路过程主入口 |
+| `/positions` | 交易中枢 | C — Execution & Lifecycle | 与 `/position-evaluation` 收敛为双视角 |
+| `/position-evaluation` | 交易中枢 | C — Execution & Lifecycle | 与 `/positions` 收敛 |
+| `/observability/execution` | 交易中枢 | C — Execution & Lifecycle | 保留为执行深度子页面 |
+| `/observability/signal` | 交易中枢 | C — Execution & Lifecycle | 保留为信号深度子页面 |
+| `/observability/risk` | 交易中枢 | C — Execution & Lifecycle | 保留为风险深度子页面 |
+| `/signal-watchtower` | 交易中枢 | C — Execution & Lifecycle | 保留（V10.4.2 核心功能） |
+| `/attribution` | 交易中枢 | C — Execution & Lifecycle | 保留，执行后归因 |
+| `/paper` | 交易中枢 | C — Execution & Lifecycle | 保留，研究→生产通道 |
+| `/quant-loop` | 交易中枢 | D — Governance & Ops | 后端已 deprecated 主路径，前端保留可观测视图，对应 legacy sunset |
+| `/alpha-lab` | 研究&分析 | B — Research & Allocation | 保留，研究核心工作台 |
+| `/portfolio` | 研究&分析 | B — Research & Allocation | 保留，动态组合构建主入口 |
+| `/opportunities` | 研究&分析 | B — Research & Allocation | 保留，机会扫描主入口 |
+| `/macro` | 研究&分析 | B — Research & Allocation | 保留 |
+| `/regime` | AI 洞察&系统 | B — Research & Allocation | 迁移归属 B（体制感知是研究输入） |
+| `/strategies` | 研究&分析 | B — Research & Allocation | 保留 |
+| `/strategies/:id` | 研究&分析 | B — Research & Allocation | 保留（子路由） |
+| `/backtest` | 研究&分析 | B — Research & Allocation | 保留 |
+| `/etf-pool` | 研究&分析 | B — Research & Allocation | 保留 |
+| `/options` | 研究&分析 | B — Research & Allocation | 保留 |
+| `/governance/pipeline` | AI 洞察&系统 | D — Governance & Ops | 保留，策略晋级主入口 |
+| `/evolution` | AI 洞察&系统 | D — Governance & Ops | 保留，AI 进化 |
+| `/system-monitor` | AI 洞察&系统 | D — Governance & Ops | 保留，与 `/task-management` 收敛 |
+| `/task-management` | AI 洞察&系统 | D — Governance & Ops | 收口到 `/system-monitor` 多 Tab |
+| `/copilot` | AI 洞察&系统 | D — Governance & Ops | 升级为跨工作台入口 |
+| `/live-safety` | AI 洞察&系统 | D — Governance & Ops | 保留（AI 安全监控） |
+| `/ai-hub/agents` | AI 洞察&系统 | D — Governance & Ops | 保留（治理/观测深度子页） |
+| `/ai-hub/calibration` | AI 洞察&系统 | D — Governance & Ops | 保留 |
+| `/ai-hub/weights` | AI 洞察&系统 | D — Governance & Ops | 保留（因子自适应） |
+| `/ai-hub/post-mortem` | AI 洞察&系统 | D — Governance & Ops | 保留 |
+| `/events` | 交易中枢 | B — Research & Allocation | 迁移归属 B（事件日历是研究/风险输入） |
+| `/alerts` | AI 洞察&系统 | D — Governance & Ops | 保留 |
+| `/journal` | AI 洞察&系统 | C — Execution & Lifecycle | 迁移归属 C（交易日志是执行后审计），后续可考虑并入 `/order-book` 历史 Tab |
+| `/login` | 系统 | — 系统路由 — | 不变 |
+
+> **说明**：上表说明工作台 Domain 是**逻辑归属与开发迭代优先级**，不代表前端导航组必须重组为 4 组新名称。V11.1.1 可在保持当前 4 组导航结构的前提下进行工作台收敛，导航重组是可选的下一阶段工作。
+
+### 2.3 交易经理视角：需要的是统一决策面，而不是更多图表
 
 交易经理最关心的是：
 
@@ -197,7 +287,7 @@ V11.1.1 对应要求：
 - 所有重大结论必须标明：**来源类型 / 数据质量 / 最后更新时间 / 推荐动作**；
 - 所有治理结论必须能下钻到证据链，而不是只给状态颜色。
 
-### 2.3 交易员视角：需要的是快、准、稳、少打断
+### 2.4 交易员视角：需要的是快、准、稳、少打断
 
 交易员最关心的是：
 
@@ -238,13 +328,38 @@ V11.1.1 对应要求：
 
 #### 2. Convergence Candidates（优先收敛对象）
 
-V11.1.1 优先治理以下高价值重叠：
+V11.1.1 的收敛工作分两个层次，依次执行，不能混淆：
+
+##### 层次一：孤儿文件删除（无风险，先行）
+
+直接删除以下 13 个无活跃路由的死代码文件；删除后视图数从 53 → 40，redirect alias 可从 18 → **≤ 10**：
+
+前端视图删除清单：
+
+- `DashboardPage.vue`、`AIAdvisorPage.vue`、`AiAdvicePage.vue`
+- `ExecutionCenter.vue`、`ExecutionListPage.vue`、`AlgoExecutionPage.vue`
+- `StressTestPage.vue`、`BehaviorScorePage.vue`、`MarketHotspotsPage.vue`
+- `ApiMonitoringPage.vue`、`ServiceHealthPage.vue`、`SystemHealthPage.vue`、`ExternalApiMonitoringPage.vue`
+
+配套移除的 redirect 路由（随删除文件一起清理，可降至 ≤ 10 条）：
+
+- `/hotspots`、`/behavior`、`/ai-advisor`、`/execution-center`、`/stress-test`、`/execution-algo`、`/plans`、`/dashboard-v1`
+
+保留的合理 redirect（共 ≤ 10 条）：
+
+- `/api-monitoring`、`/service-health`、`/monitoring`、`/system` → 系统类简写
+- `/observability/execution-microscope`、`/observability/signal-intelligence`、`/observability/risk-cluster` → 文档 URL 对齐
+- `/ai-hub/factor-weights`、`/ai-hub/post-mortems`、`/advice` → 命名演化兼容
+
+##### 层次二：功能页合并（有 UX 风险，需设计方案后再执行）
+
+以下是真正意义上的"功能收口"，每一对都必须先出设计稿再实施：
 
 - `system-monitor` + `task-management` → 单页多 Tab
-- `positions` + `position-evaluation` → 单工作台双视角
-- `dashboard` + `war-room` → 统一 shell、统一过滤、统一摘要卡
+- `positions` + `position-evaluation` → 单工作台双视角（汇总视角 + 评估视角）
+- `dashboard` + `war-room` → 统一 shell、统一过滤、统一摘要卡（两个路由可保留，共享壳层）
 - `order-book` + `execution-policy` + `trade-lifecycle` → 统一对象 ID、统一联动面包屑
-- `autonomy` + 已经被 redirect 的历史入口（如 `ai-advisor` / `plans` / `execution-center`）→ 正式完成语义收口
+- `journal` → 并入 `/order-book` 历史审计 Tab（交易日志是执行后数据的另一个视角）
 
 #### 3. Explainability Strip（解释条）
 
@@ -273,11 +388,12 @@ V11.1.1 优先治理以下高价值重叠：
 
 ### M1 验收标准
 
-- [ ] 前端活跃业务视图从当前 53 个基线明显收敛，目标 **≤ 40**
-- [ ] redirect-only 历史别名路由显著减少，目标 **≤ 10**
-- [ ] 核心问题均有唯一主入口，避免一类问题分散在多个平行页面
-- [ ] 关键工作台全部具备统一的 explainability strip
-- [ ] `system-monitor` 与 `task-management` 完成结构收口，不再长期并行为两个独立心智模型
+- [ ] 13 个孤儿视图文件已从 `src/views/` 删除，视图总数从 53 → **≤ 40**
+- [ ] redirect-only 历史别名路由从 18 条减少至 **≤ 10**，且每条保留的 redirect 都有明确保留理由
+- [ ] 核心问题均有唯一主入口（见 §3 M1 Page Ownership Matrix），不存在多个平行主入口
+- [ ] 关键工作台（至少 A/C/D 域主页面）全部具备统一的 explainability strip
+- [ ] `system-monitor` 与 `task-management` 完成结构收口为单页多 Tab，不再并行为两个独立导航入口
+- [ ] 5 个 legacy 后端路由（`ai_advisor.py`、`execution_center.py`、`hotspots.py`、`dashboard.py` V9、`stress_test.py`）均已从 `app/main.py` 移除注册或转为按 flag 按需挂载
 
 ---
 
@@ -352,6 +468,23 @@ V11.1.1 必须给出明确 sunset 清单：
 - 同域数据请求聚合与去重
 - WebSocket / SSE 生命周期统一管理
 
+#### 6. Mobile-First Compliance
+
+本系统明确要求 mobile-first 多断点支持，V11.1.1 的 workbench shell 设计必须满足：
+
+- 统一壳层（标题区、过滤器、summary cards、detail drawer）在 375px 竖屏下可用，无横向溢出
+- 新增或重构的工作台组件必须在移动断点下提供可用的降级布局，不能只验收桌面态
+- 不得引入仅适用于宽屏的布局假设（如固定宽度多列 grid、hover-only 动作入口）
+- V11.0.1 已交付的移动触达能力（Dashboard/Alert/Copilot 竖屏）在收敛后必须保持完好
+
+#### 7. V11.0.1 特性保护
+
+V11.0.1 在 `/autonomy` 中刚落地的系统自知画像（MetaState、FrictionState、FalseHoldAlerts、ImprovementCandidates）是 V11.1.1 工作台收敛的**基础展示层**：
+
+- 合并或重构 `/autonomy` 时，上述 4 个新增面板的信息密度不得降低；
+- 其后端接口（`/api/v1/autonomy/meta-state` 等）不在本版本 sunset 范围内；
+- 如 `/autonomy` 被纳入统一 shell，shell 设计须能容纳这些面板的展开/收起交互。
+
 ### M2 验收标准
 
 - [ ] 所有核心视图实现 thin-view 模式，复杂交互下沉到领域组件或共享工作台组件
@@ -370,7 +503,7 @@ V11.1.1 必须给出明确 sunset 清单：
 
 ### M3 核心能力
 
-#### 1. Bounded Contexts Inside `app/services`
+#### 1. Bounded Contexts Inside `app/services` & `app/engine`
 
 后端继续保留 `app/services` 作为主目录，但不再无限平铺；V11.1.1 按上下文治理为子域：
 
@@ -381,6 +514,12 @@ V11.1.1 必须给出明确 sunset 清单：
 - `governance`
 - `observability`
 - `platform`（scheduler / config / health / integrations）
+
+**`app/engine/` 的定位须明确**：当前 `app/engine/` 目录包含核心编排组件（`autonomous_engine.py`、`signal_engine.py`、`signal_quality_funnel.py`、`order_executor.py`、`quant_trading_loop.py` 等），是整个系统的决策与执行核心。V11.1.1 需要明确其与 `app/services` 的分层关系：
+
+- `app/engine/` = **编排层**（Orchestration Layer）：跨域协调、主决策循环、质量漏斗
+- `app/services/` = **领域服务层**（Domain Services）：单域业务规则与 I/O
+- 边界规则：`engine` 可调用 `services`，`services` 不应反向依赖 `engine`；新增编排能力进 `engine`，新增业务规则进对应 `services/<context>/`
 
 这不是引入新框架，而是在当前结构内建立清晰边界。
 
@@ -416,8 +555,22 @@ V11.1.1 必须给出明确 sunset 清单：
 V11.1.1 要继续收紧“唯一主链路”原则：
 
 - 自动交易主编排继续以 `AutonomousEngine.run_decision_cycle()` 为唯一主链；
-- legacy `quant_loop` 旁路需要进入 sunset 计划；
+- legacy `quant_loop` 旁路（`POST /execute-signals` deprecated 端点）前后端双侧同步进入 sunset：
+  - 后端：从 `app/main.py` 注册移除，或保留但强制 flag-gate 为 disabled；
+  - 前端：`/quant-loop` 页面降为只读观测视图（不再提供手动触发执行的操作）；
 - 新功能不得再新增第二套决策/执行入口。
+
+#### 5. Legacy Backend Router Sunset
+
+以下 5 个 legacy 路由文件须在本版本给出明确处置方案（至少标注 sunset deadline，本版本内完成其中 ≥ 3 个的移除）：
+
+| 文件 | 处置方案 |
+| ---- | -------- |
+| `ai_advisor.py` | 迁移剩余有效端点至 `autonomy.py`，然后从 `main.py` 移除注册 |
+| `execution_center.py` | 检查是否有存活调用方；如无，直接从 `main.py` 移除注册 |
+| `hotspots.py` | 确认前端已全部切换至 `/opportunities`，从 `main.py` 移除注册 |
+| `dashboard.py` (V9) | 保留注册但标记为 `deprecated=True`，后续版本删除 |
+| `stress_test.py` | 子功能迁移至 `/backtest` 后端，从 `main.py` 移除注册 |
 
 #### 5. Scheduler & Job Governance
 
@@ -509,26 +662,33 @@ V11.1.1 需要补齐四层校验：
 
 让 V11.1.1 成为一次可灰度、可回退、可验证的治理版本，而不是一次高风险“大修”。
 
+### Stage 0 — Orphan Cleanup（前置清理，可立即执行，无需设计评审）
+
+- 删除 13 个孤儿视图文件（见 §0.3 孤儿清单）
+- 清理与之关联的 8 条 redirect alias（见 M1 §2 层次一清单）
+- 确认 5 个 legacy 后端路由的迁移或移除计划（至少形成文字决策记录）
+- **完成条件**：前端视图数 ≤ 40，redirect alias ≤ 10，`npm run build` 通过，无 import 残留
+
 ### Stage A — Inventory & Decision Records
 
-- 页面归属矩阵定稿
-- legacy alias / compat 清单定稿
-- bounded context 划分定稿
+- 页面归属矩阵定稿（以 §2.2 映射表为初稿，审查并更新）
+- legacy alias / compat 清单定稿（Stage 0 执行后更新汇总）
+- bounded context 划分定稿（包含 `app/engine/` vs `app/services/` 边界）
 - 关键工作台 read model 清单定稿
-- ADR（Architecture Decision Record）开始落库
+- ADR（Architecture Decision Record）开始落库到 `docs/architecture/decisions/`
 
 ### Stage B — Frontend Workbench Convergence
 
-- 收敛高价值重叠页面
-- 引入 shared workbench shell
+- 收敛高价值重叠页面（优先 system-monitor+task-management、positions+position-evaluation）
+- 引入 shared workbench shell（桌面 + 移动双断点验收）
 - 完成重点页面的统一状态机和 explainability strip
-- 清理部分 legacy 路由与 UI 层 compat
+- 清理残余 legacy 路由与 UI 层 compat 判断
 
 ### Stage C — Backend Query & Domain Refactor
 
 - 引入核心工作台 read models
-- 收敛 router/application/domain/adapters 分层
-- 清理 legacy orchestration 旁路
+- 收敛 router/application/domain/adapters 分层（`app/routers` 薄化）
+- 完成 Stage 0 中未完成的 legacy 后端路由迁移
 - 统一日志、错误、契约出口
 
 ### Stage D — Sunset & Hardening
