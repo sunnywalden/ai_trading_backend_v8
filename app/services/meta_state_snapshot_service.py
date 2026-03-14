@@ -23,20 +23,25 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from uuid import uuid4
+
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
 _SNAPSHOT_REDIS_KEY = "meta_state:latest"
 _SNAPSHOT_TTL = 3600  # 1 hour
+_SNAPSHOT_DB_RETENTION_DAYS = 90
 
 
 @dataclass
 class MetaStateSnapshot:
     """系统元状态快照。"""
 
+    account_id: str = ""
     snapshot_id: str = field(default_factory=lambda: str(uuid4()))
     generated_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
@@ -48,6 +53,7 @@ class MetaStateSnapshot:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "account_id": self.account_id,
             "snapshot_id": self.snapshot_id,
             "generated_at": self.generated_at,
             "throttled_signals": self.throttled_signals,
@@ -81,6 +87,7 @@ class MetaStateSnapshotService:
         positions: dict[str, Any],
         equity: float,
         regime: Optional[str] = None,
+        db: AsyncSession | None = None,
     ) -> MetaStateSnapshot:
         """
         构建当前系统元状态快照并写入 Redis。
@@ -97,12 +104,13 @@ class MetaStateSnapshotService:
         model = self._compute_model_state(throttled, false_holds)
 
         snap = MetaStateSnapshot(
+            account_id=account_id,
             throttled_signals=throttled,
             false_hold_alerts=false_holds,
             capital_state=capital,
             model_state=model,
         )
-        await self._persist_snapshot(snap)
+        await self._persist_snapshot(snap, db=db)
         logger.info(
             "[MetaState] snapshot built id=%s throttled=%d false_holds=%d",
             snap.snapshot_id,
@@ -111,26 +119,50 @@ class MetaStateSnapshotService:
         )
         return snap
 
-    async def get_latest_snapshot(self) -> Optional[MetaStateSnapshot]:
-        """从 Redis 获取最新快照（若无则返回 None）。"""
-        if self._redis is None:
-            return None
+    async def get_latest_snapshot(
+        self,
+        *,
+        db: AsyncSession | None = None,
+        account_id: str | None = None,
+    ) -> Optional[MetaStateSnapshot]:
+        """优先从 Redis 获取最新快照；若 miss 则回退到 DB。"""
         try:
-            raw = await self._redis.get(_SNAPSHOT_REDIS_KEY)
-            if raw is None:
-                return None
-            data = json.loads(raw)
-            snap = MetaStateSnapshot(
-                snapshot_id=data.get("snapshot_id", ""),
-                generated_at=data.get("generated_at", ""),
-                throttled_signals=data.get("throttled_signals", []),
-                false_hold_alerts=data.get("false_hold_alerts", []),
-                capital_state=data.get("capital_state", {}),
-                model_state=data.get("model_state", {}),
-            )
-            return snap
+            if self._redis is not None:
+                raw = await self._redis.get(_SNAPSHOT_REDIS_KEY)
+                if raw is not None:
+                    data = json.loads(raw)
+                    return self._snapshot_from_payload(data)
         except Exception as exc:
             logger.warning("[MetaState] get_latest_snapshot failed: %s", exc)
+
+        if db is None or not account_id:
+            return None
+
+        try:
+            from app.models.meta_state_snapshot import \
+                MetaStateSnapshot as MetaStateSnapshotRecord
+
+            stmt = (
+                select(MetaStateSnapshotRecord)
+                .where(MetaStateSnapshotRecord.account_id == account_id)
+                .order_by(MetaStateSnapshotRecord.generated_at.desc())
+                .limit(1)
+            )
+            row = (await db.execute(stmt)).scalars().first()
+            if row is None:
+                return None
+            payload = row.snapshot_json or {}
+            if not isinstance(payload, dict):
+                payload = {}
+            if "account_id" not in payload:
+                payload["account_id"] = account_id
+            if "snapshot_id" not in payload:
+                payload["snapshot_id"] = row.snapshot_id
+            if "generated_at" not in payload and row.generated_at is not None:
+                payload["generated_at"] = row.generated_at.isoformat()
+            return self._snapshot_from_payload(payload)
+        except Exception as exc:
+            logger.warning("[MetaState] DB latest snapshot fallback failed: %s", exc)
             return None
 
     # ──────────────────────────────────────────────────────────────────
@@ -140,9 +172,8 @@ class MetaStateSnapshotService:
     async def _gather_throttled_signals(self) -> list[dict]:
         """从 ConvictionFrictionTracker 收集所有摩擦信号。"""
         try:
-            from app.services.conviction_friction_tracker import (
-                conviction_friction_tracker,
-            )
+            from app.services.conviction_friction_tracker import \
+                conviction_friction_tracker
 
             states = await conviction_friction_tracker.get_all_throttled_signals(
                 min_rejection_count=1
@@ -217,18 +248,74 @@ class MetaStateSnapshotService:
             "total_blocked_signals": len(throttled) + len(false_holds),
         }
 
-    async def _persist_snapshot(self, snap: MetaStateSnapshot) -> None:
-        """写入 Redis（TTL 1h）。"""
-        if self._redis is None:
-            return
+    @staticmethod
+    def _snapshot_from_payload(data: dict[str, Any]) -> MetaStateSnapshot:
+        return MetaStateSnapshot(
+            account_id=str(data.get("account_id", "") or ""),
+            snapshot_id=data.get("snapshot_id", ""),
+            generated_at=data.get("generated_at", ""),
+            throttled_signals=data.get("throttled_signals", []),
+            false_hold_alerts=data.get("false_hold_alerts", []),
+            capital_state=data.get("capital_state", {}),
+            model_state=data.get("model_state", {}),
+        )
+
+    async def _persist_snapshot(
+        self,
+        snap: MetaStateSnapshot,
+        *,
+        db: AsyncSession | None = None,
+    ) -> None:
+        """写入 Redis（TTL 1h）并可选持久化到 DB（保留 90 天）。"""
         try:
-            await self._redis.set(
-                _SNAPSHOT_REDIS_KEY,
-                json.dumps(snap.to_dict()),
-                ex=_SNAPSHOT_TTL,
-            )
+            if self._redis is not None:
+                await self._redis.set(
+                    _SNAPSHOT_REDIS_KEY,
+                    json.dumps(snap.to_dict()),
+                    ex=_SNAPSHOT_TTL,
+                )
         except Exception as exc:
             logger.warning("[MetaState] _persist_snapshot failed: %s", exc)
+
+        if db is None:
+            return
+
+        try:
+            from app.models.meta_state_snapshot import \
+                MetaStateSnapshot as MetaStateSnapshotRecord
+
+            record = MetaStateSnapshotRecord(
+                snapshot_id=snap.snapshot_id,
+                account_id=snap.account_id,
+                throttled_signals_count=len(snap.throttled_signals),
+                false_hold_count=len(snap.false_hold_alerts),
+                total_blocked_signals=int(
+                    (snap.model_state or {}).get("total_blocked_signals", 0) or 0
+                ),
+                idle_cash_ratio=(snap.capital_state or {}).get("idle_cash_ratio"),
+                gross_exposure_pct=(snap.capital_state or {}).get(
+                    "gross_exposure_pct"
+                ),
+                snapshot_json=snap.to_dict(),
+                notes="V11.0.1 meta-state snapshot",
+            )
+            db.add(record)
+
+            cutoff = datetime.now() - timedelta(
+                days=_SNAPSHOT_DB_RETENTION_DAYS
+            )
+            await db.execute(
+                delete(MetaStateSnapshotRecord).where(
+                    MetaStateSnapshotRecord.generated_at < cutoff
+                )
+            )
+            await db.commit()
+        except Exception as exc:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            logger.warning("[MetaState] DB persist failed: %s", exc)
 
 
 # 单例（在 app startup 注入 Redis）

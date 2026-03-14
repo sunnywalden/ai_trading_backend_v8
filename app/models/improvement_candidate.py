@@ -23,6 +23,11 @@ class ImprovementCandidate(Base):
     account_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
 
     # 改进目标描述
+    candidate_type: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        default="parameter_tuning",
+    )
     target_module: Mapped[str] = mapped_column(String(128), nullable=False)
     target_param: Mapped[str] = mapped_column(String(128), nullable=False)
     current_value: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -38,6 +43,9 @@ class ImprovementCandidate(Base):
     # pending / applied / rejected / expired
 
     evidence_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expected_impact: Mapped[str | None] = mapped_column(Text, nullable=True)
+    validation_plan: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
@@ -57,6 +65,7 @@ class ImprovementCandidate(Base):
     def __repr__(self) -> str:
         return (
             f"<ImprovementCandidate id={self.id} "
-            f"module={self.target_module} param={self.target_param} "
+            f"type={self.candidate_type} module={self.target_module} "
+            f"param={self.target_param} "
             f"conf={self.confidence:.2f}>"
         )

@@ -3,20 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import (
-    JSON,
-    Boolean,
-    Column,
-    DateTime,
-    Float,
-    ForeignKey,
-    Index,
-    Integer,
-    Numeric,
-    String,
-    Text,
-    UniqueConstraint,
-)
+from sqlalchemy import (JSON, Boolean, Column, DateTime, Float, ForeignKey,
+                        Index, Integer, Numeric, String, Text,
+                        UniqueConstraint)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
@@ -48,6 +37,8 @@ class Strategy(Base):
         nullable=False,
         default=100,
     )
+    governance_stage: Mapped[Optional[str]] = mapped_column(String(32))
+    governance_note: Mapped[Optional[str]] = mapped_column(Text)
     last_run_status: Mapped[Optional[str]] = mapped_column(String(16))
     last_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(

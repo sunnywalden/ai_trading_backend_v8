@@ -137,11 +137,29 @@ def test_build_rollout_state_reflects_v1054_flags():
     ), patch(
         "app.services.execution_policy_service.settings.GOVERNANCE_HARD_GATE_ENABLED",
         False,
+    ), patch(
+        "app.services.execution_policy_service.settings.CAPITAL_VELOCITY_V1101_ENABLED",
+        True,
     ):
         rollout = ExecutionPolicyService._build_rollout_state()
 
     assert rollout["stage"] == "SEMI"
     assert rollout["policy_source"] == "NATIVE_EXECUTION_POLICY"
+    assert rollout["flags"]["capital_velocity_v1101_enabled"] is True
+
+
+def test_hard_control_state_exposes_v11_feature_flags():
+    with patch(
+        (
+            "app.services.execution_policy_service.settings."
+            "IMPROVEMENT_ENGINE_V1101_ENABLED"
+        ),
+        True,
+    ):
+        state = ExecutionPolicyService._hard_control_state()
+
+    assert "feature_flags" in state
+    assert state["feature_flags"]["improvement_engine_v1101_enabled"] is True
 
 
 def test_build_live_execution_controls_keeps_requested_algo_when_disabled():

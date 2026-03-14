@@ -127,6 +127,21 @@ class V1051ResearchService:
                 settings.AUTONOMOUS_CONTROL_PLANE_V1054_ENABLED
             ),
             "native_audit_v1054_enabled": bool(settings.NATIVE_AUDIT_V1054_ENABLED),
+            "capital_velocity_v1101_enabled": bool(
+                settings.CAPITAL_VELOCITY_V1101_ENABLED
+            ),
+            "self_perception_v1101_enabled": bool(
+                settings.SELF_PERCEPTION_V1101_ENABLED
+            ),
+            "improvement_engine_v1101_enabled": bool(
+                settings.IMPROVEMENT_ENGINE_V1101_ENABLED
+            ),
+            "evolution_governance_v1101_enabled": bool(
+                settings.EVOLUTION_GOVERNANCE_V1101_ENABLED
+            ),
+            "style_alignment_v1101_enabled": bool(
+                settings.STYLE_ALIGNMENT_V1101_ENABLED
+            ),
         }
         if (
             flags["signal_pipeline_v1054_enabled"]
@@ -489,6 +504,10 @@ class V1051ResearchService:
         sample_size: int,
     ) -> str:
         status = (last_status or "").upper()
+        if not active and sample_size >= 20 and hit_rate < 0.35:
+            return "RETIRED"
+        if not active and sample_size > 0:
+            return "LIMITED"
         if active and status == "SUCCESS" and sample_size >= 30 and hit_rate >= 0.58:
             return "PRODUCTION"
         if status == "SUCCESS" and sample_size >= 20 and hit_rate >= 0.55:
@@ -919,6 +938,11 @@ class V1051ResearchService:
                 hit_rate,
                 sample_size,
             )
+            persisted_stage = str(
+                getattr(strategy, "governance_stage", None) or ""
+            ).upper()
+            if persisted_stage:
+                stage = persisted_stage
             evidence_chain = self._build_governance_evidence(
                 active=strategy.is_active,
                 last_status=strategy.last_run_status,
@@ -946,6 +970,7 @@ class V1051ResearchService:
                     ),
                     "run_count": len(runs),
                     "stage": stage,
+                    "governance_note": getattr(strategy, "governance_note", None),
                     "evidence_chain": evidence_chain,
                     "promotion_blockers": blockers,
                     "rollback_suggestion": self._build_rollback_suggestion(
@@ -967,6 +992,8 @@ class V1051ResearchService:
             "SHADOW_LIVE": 3,
             "PAPER": 2,
             "DISCOVERY": 1,
+            "LIMITED": 1,
+            "RETIRED": 0,
         }
         pipeline.sort(
             key=lambda item: (stage_rank.get(item["stage"], 0), item["run_count"]),
@@ -1019,6 +1046,8 @@ class V1051ResearchService:
             "rollout": self._build_rollout_state(),
             "funnel": {
                 "discovery": len(pipeline),
+                "limited": sum(1 for item in pipeline if item["stage"] == "LIMITED"),
+                "retired": sum(1 for item in pipeline if item["stage"] == "RETIRED"),
                 "paper": sum(
                     1
                     for item in pipeline
