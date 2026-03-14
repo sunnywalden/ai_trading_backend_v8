@@ -1,11 +1,11 @@
-"""V10.4.2: SignalQualityFunnel — 五层信号质量漏斗
+"""V11.0.1: SignalQualityFunnel — 五层信号质量漏斗 + M1.5 阈值软化
 
 五层过滤体系，实现"窄入高出"的信号精英化：
   Layer 0: 宇宙过滤     — 流动性/市值筛选
   Layer 1: 体制门控     — 市场体制 × 信号方向准入规则
   Layer 2: 组合预检     — 持仓数上限 / 日配额 / 相关性限制
   Layer 3: 共振验证     — 多维共振 + 反共振一票否决
-  Layer 4: 置信度校准门 — Conviction Score ≥ 阈值
+  Layer 4: 置信度校准门 — Conviction Score ≥ 阈值（V11: 支持摩擦感知软化）
 
 每个信号无论通过还是被拒，均写入 SignalQualityAuditLog 审计日志。
 被 Layer 3/4 拒绝的信号，在 ghost_trade_enabled 时创建 GhostTrade 虚拟跟踪。
@@ -20,6 +20,7 @@ from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models.signal_quality_audit_log import FunnelResult, RejectionReason
 from app.services.signal_conviction_scorer import (
     ConvictionComponents,
@@ -222,18 +223,97 @@ class SignalQualityFunnel:
         conviction = quality_profile.conviction
         decision.conviction = conviction
 
+        # V11.0.1 M2.3: REDUCE/EXIT（is_closing）快速通道
+        # 来自 RISK_MGMT 的平仓信号不应被置信度阈值阻断；
+        # 也适用于 false_hold_protection=True 标记的信号
+        fast_path_bypass = is_closing and (
+            str(signal.signal_type or "").upper()
+            in {"REDUCE", "EXIT", "STOP_LOSS_EXIT", "FORCE_EXIT"}
+        )
+        if fast_path_bypass:
+            decision.passed = True
+            decision.rejection_detail = "Layer4 bypassed (is_closing fast-path)"
+            await self._write_audit(decision, signal, cfg, db)
+            logger.debug(
+                "[SignalFunnel] Layer4 fast-path bypass %s %s type=%s",
+                signal.symbol,
+                signal.direction,
+                signal.signal_type,
+            )
+            return decision
+
         threshold = regime_cfg.get(
             "SIGNAL_CONFIDENCE_THRESHOLD", cfg.SIGNAL_CONFIDENCE_THRESHOLD
         )
 
-        reject = self._layer4_conviction(conviction, cfg, threshold)
+        # V11.0.1 M1.5.2: 阈值摩擦感知软化
+        # 条件：主开关开启 + 非平仓信号 + 满足 composite/resonance 门控
+        effective_threshold = threshold
+        soft_threshold_applied = False
+        if not is_closing and getattr(
+            settings, "CAPITAL_VELOCITY_V1101_ENABLED", False
+        ):
+            effective_threshold, soft_threshold_applied = (
+                await self._compute_soft_threshold(
+                    signal=signal,
+                    conviction=conviction,
+                    base_threshold=threshold,
+                    regime=signal.regime,
+                    cfg=cfg,
+                )
+            )
+
+        reject = self._layer4_conviction(conviction, cfg, effective_threshold)
         if reject:
+            # V11: 记录摩擦状态（仅 LOW_CONVICTION 触发，其他拒绝原因不计入摩擦）
+            if (
+                not is_closing
+                and getattr(settings, "CAPITAL_VELOCITY_V1101_ENABLED", False)
+                and reject[0] == RejectionReason.LOW_CONVICTION
+            ):
+                from app.services.conviction_friction_tracker import (
+                    conviction_friction_tracker,
+                )
+
+                await conviction_friction_tracker.record_rejection(
+                    symbol=signal.symbol,
+                    direction=signal.direction,
+                    regime=signal.regime,
+                    conviction=conviction.conviction_score,
+                    threshold=threshold,
+                    composite_score=signal.composite_score * 100,
+                    resonance_bonus=conviction.resonance_bonus,
+                )
             decision.rejected_at_layer = 4
             decision.rejection_reason = reject[0]
             decision.rejection_detail = reject[1]
             await self._write_audit(decision, signal, cfg, db)
             await self._create_ghost_trade(decision, signal, cfg, db)
             return decision
+
+        # 通过 Layer 4：重置摩擦计数
+        if not is_closing and getattr(
+            settings, "CAPITAL_VELOCITY_V1101_ENABLED", False
+        ):
+            from app.services.conviction_friction_tracker import (
+                conviction_friction_tracker,
+            )
+
+            await conviction_friction_tracker.record_pass(
+                symbol=signal.symbol,
+                direction=signal.direction,
+                regime=signal.regime,
+            )
+            if soft_threshold_applied:
+                logger.info(
+                    "[SignalFunnel] ✅ Layer4 SOFT_THRESHOLD_APPLIED %s %s "
+                    "conviction=%.1f effective_threshold=%d (base=%d)",
+                    signal.symbol,
+                    signal.direction,
+                    conviction.conviction_score,
+                    effective_threshold,
+                    threshold,
+                )
 
         # ── 通过所有层 ──────────────────────────────────────────────────────
         decision.passed = True
@@ -531,6 +611,118 @@ class SignalQualityFunnel:
             )
 
         return None
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # V11.0.1 M1.5: 置信度阈值摩擦感知软化
+    # ──────────────────────────────────────────────────────────────────────────
+    async def _compute_soft_threshold(
+        self,
+        *,
+        signal: "SignalFunnelInput",
+        conviction: "ConvictionComponents",
+        base_threshold: int,
+        regime: str,
+        cfg: "SignalQualityConfig",
+    ) -> tuple[int, bool]:
+        """
+        计算摩擦感知软化后的有效阈值。
+
+        Returns:
+            (effective_threshold, soft_threshold_applied)
+            - effective_threshold: 实际使用的置信度阈值（可能低于 base_threshold）
+            - soft_threshold_applied: 是否触发了软化
+        """
+        try:
+            from app.services.conviction_friction_tracker import (
+                conviction_friction_tracker,
+            )
+
+            min_rounds = getattr(settings, "CONVICTION_FRICTION_MIN_ROUNDS", 3)
+            composite_floor = int(getattr(cfg, "CONVICTION_SOFT_COMPOSITE_FLOOR", 96))
+            resonance_floor = int(getattr(cfg, "CONVICTION_SOFT_RESONANCE_FLOOR", 80))
+            max_per_cycle = getattr(settings, "CONVICTION_SOFT_RELIEF_MAX_PER_CYCLE", 1)
+            soft_floor_bull = getattr(settings, "CONVICTION_SOFT_FLOOR_BULL", 88)
+            soft_floor_default = getattr(settings, "CONVICTION_SOFT_FLOOR_DEFAULT", 90)
+            relief_max = getattr(settings, "CONVICTION_SOFT_RELIEF_MAX", 3)
+
+            friction_delta = getattr(settings, "CONVICTION_FRICTION_DELTA", 3)
+            near_miss_floor = base_threshold - friction_delta
+            conv_score = conviction.conviction_score
+
+            # 仅当 conviction 在近命中区间内时，才查询摩擦状态
+            if conv_score < near_miss_floor:
+                return base_threshold, False
+
+            state = await conviction_friction_tracker.get_friction_state(
+                signal.symbol, signal.direction, regime
+            )
+            if state is None or state.rejection_count < min_rounds:
+                return base_threshold, False
+
+            # 独立维度门控（直接用原始分值）
+            composite_ok = (signal.composite_score * 100) >= composite_floor
+            resonance_ok = conviction.resonance_bonus >= resonance_floor
+            if not (composite_ok and resonance_ok):
+                logger.debug(
+                    "[SoftThreshold] %s %s gate fail composite=%.1f/%d "
+                    "resonance=%.1f/%d",
+                    signal.symbol,
+                    signal.direction,
+                    signal.composite_score * 100,
+                    composite_floor,
+                    conviction.resonance_bonus,
+                    resonance_floor,
+                )
+                return base_threshold, False
+
+            # 周期配额检查
+            can_use = await conviction_friction_tracker.can_use_soft_relief(
+                symbol=signal.symbol,
+                direction=signal.direction,
+                regime=regime,
+                max_per_cycle=max_per_cycle,
+            )
+            if not can_use:
+                logger.debug(
+                    "[SoftThreshold] %s %s quota exhausted in cycle",
+                    signal.symbol,
+                    signal.direction,
+                )
+                return base_threshold, False
+
+            # 计算软化幅度
+            gap = base_threshold - conv_score
+            relief = min(gap, relief_max)
+            absolute_floor = (
+                soft_floor_bull
+                if regime.upper() == "BULL_TREND"
+                else soft_floor_default
+            )
+            effective = max(int(base_threshold - relief), absolute_floor)
+            if effective >= base_threshold:
+                return base_threshold, False
+
+            # 记录软化配额使用
+            await conviction_friction_tracker.record_soft_relief_used(
+                symbol=signal.symbol,
+                direction=signal.direction,
+                regime=regime,
+            )
+            logger.info(
+                "[SoftThreshold] applied %s %s regime=%s "
+                "threshold=%d→%d conviction=%.1f rounds=%d",
+                signal.symbol,
+                signal.direction,
+                regime,
+                base_threshold,
+                effective,
+                conv_score,
+                state.rejection_count,
+            )
+            return effective, True
+        except Exception as exc:
+            logger.warning("[SoftThreshold] computation failed: %s", exc)
+            return base_threshold, False
 
     # ──────────────────────────────────────────────────────────────────────────
     # Layer 4: 置信度校准门

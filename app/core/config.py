@@ -335,6 +335,36 @@ class Settings(BaseSettings):
     AUTONOMOUS_CONTROL_PLANE_V1054_ENABLED: bool = False
     NATIVE_AUDIT_V1054_ENABLED: bool = False
 
+    # ==================== V11.0.1: Capital Velocity & Autonomous Evolution OS ====================
+    # 主开关：控制所有 V11 Capital Velocity 特性（含 M1.5 阈值软化、GEA 闲置感知、CVS 计分）
+    CAPITAL_VELOCITY_V1101_ENABLED: bool = False
+    # 主开关：控制所有 V11 自感知特性（MetaStateSnapshot、自感知告警）
+    SELF_PERCEPTION_V1101_ENABLED: bool = False
+    # 主开关：控制改进建议自动生成与 Improvement Lab
+    IMPROVEMENT_ENGINE_V1101_ENABLED: bool = False
+    # 主开关：控制策略进化状态机与 StrategyGenome
+    EVOLUTION_GOVERNANCE_V1101_ENABLED: bool = False
+    # 主开关：控制个人交易风格约束层
+    STYLE_ALIGNMENT_V1101_ENABLED: bool = False
+
+    # M1.5.1 Conviction Friction Relief — 近命中区间配置
+    CONVICTION_FRICTION_DELTA: int = 3  # 近命中区间：阈值 - Δ 以内算"近命中"
+    CONVICTION_FRICTION_MIN_ROUNDS: int = 3  # 连续被拒达到此次数才认定为"摩擦状态"
+    CONVICTION_SOFT_FLOOR_BULL: int = 88  # BULL_TREND 体制下阈值软化绝对下界
+    CONVICTION_SOFT_FLOOR_DEFAULT: int = 90  # 其他体制下阈值软化绝对下界
+    CONVICTION_SOFT_RELIEF_MAX: int = 3  # 单次软化最大幅度（分）
+    CONVICTION_SOFT_RELIEF_MAX_PER_CYCLE: int = 1  # 每决策周期最多软化通过信号数
+
+    # M1.5.3 GEA Idle-Capital-Aware Check — 闲置资本感知开仓修正
+    IDLE_CAPITAL_ALERT_THRESHOLD: float = 0.25  # 现金/总资产超过此比例才激活闲置逻辑
+    IDLE_CAPITAL_GEA_HEADROOM_FACTOR: float = (
+        0.8  # 本次开仓 pct ≤ idle_ratio × 因子才允许修正
+    )
+    IDLE_CAPITAL_GEA_MAX_BORROW: float = 0.30  # GEA 临时最多上调的净值比例上界
+
+    # M2.3 False-Hold Alert — 虚假持有检测
+    FALSE_HOLD_DETECTION_ROUNDS: int = 3  # REDUCE/EXIT 连续被拒达到此次数触发告警
+
     model_config = SettingsConfigDict(
         env_file=str(ENV_FILE) if ENV_FILE else ".env",
         env_file_encoding="utf-8",

@@ -182,6 +182,22 @@ class SignalQualityConfig(BaseSettings):
         description="同一持仓在被替换后的冷却期（分钟），冷却期内不参与竞争",
     )
 
+    # ── V11.0.1: Conviction Threshold Softening 门控参数 ──────────────────────────
+    CONVICTION_SOFT_COMPOSITE_FLOOR: int = Field(
+        default=96,
+        description=(
+            "阈值软化时 composite_score 的最低要求（独立维度，非 tier）；"
+            "必须 ≥ 此值才允许软化，防止前置维度整体偏弱的信号通过"
+        ),
+    )
+    CONVICTION_SOFT_RESONANCE_FLOOR: int = Field(
+        default=80,
+        description=(
+            "阈值软化时 resonance_bonus 的最低要求（独立维度，非 tier）；"
+            "与 CONVICTION_SOFT_COMPOSITE_FLOOR 同时满足才启用软化"
+        ),
+    )
+
     # ── 紧急覆盖 ───────────────────────────────────────────────────────────────
     QUALITY_GATE_BYPASS_KEY: str = Field(
         default="",
