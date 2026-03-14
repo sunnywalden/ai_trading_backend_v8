@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, Index, Integer, String, Text, func
+from sqlalchemy import JSON, DateTime, Index, Integer, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.db import Base
@@ -25,7 +25,9 @@ class MetaStateSnapshot(Base):
     )
     account_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     generated_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, server_default=func.now()
+        DateTime,
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
     )
 
     # 各维度摘要数量
@@ -42,7 +44,9 @@ class MetaStateSnapshot(Base):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, server_default=func.now()
+        DateTime,
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
     )
 
     __table_args__ = (

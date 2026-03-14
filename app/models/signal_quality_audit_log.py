@@ -19,7 +19,7 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -138,12 +138,12 @@ class SignalQualityAuditLog(Base):
     evaluated_at: Mapped[datetime] = mapped_column(
         DateTime,
         nullable=False,
-        server_default=func.now(),
+        server_default=text("CURRENT_TIMESTAMP"),
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
         nullable=False,
-        server_default=func.now(),
+        server_default=text("CURRENT_TIMESTAMP"),
     )
 
     __table_args__ = (
