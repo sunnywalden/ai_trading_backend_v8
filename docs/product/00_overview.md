@@ -3,8 +3,9 @@
 # 产品需求文档 (PRD)
 
 > **AI量化交易闭环系统** - 个人美港股智能交易平台  
-> 版本：V10.5.4（规划中）| 当前已上线版本：V10.5.2 | 更新日期：2026-03-11  
-> 变更摘要（V10.5.4 规划）：**Signal Pipeline Integrity & Control-Plane Hardening**——下一版本先收敛信号控制平面，再继续推进收益控制回路：建立 `REAL / SYNTHETIC / BACKFILL` 真源区分、统一 canonical signal payload 与原生状态迁移、明确 AutonomousEngine 为唯一自动执行主链，并让 Watchtower / Governance / Rollout 以原生审计和渐进放量纪律运作。  
+> 版本：V11.0.1（已上线） | 更新日期：2026-03-14  
+> 变更摘要（V11.0.1 已上线）：**Capital Velocity & Autonomous Evolution OS**——在 V10.5.4 控制平面基线之上，围绕 **Capital Velocity**（近命中信号摩擦跟踪、闲置资本感知、资本轮转效率提升）、**Self-Perception**（MetaState Snapshot、False-Hold Alert、模型阻断画像）、**Improvement Engine**（自动生成参数/模块级改进候选）与 **Evolution Governance**（flag-gated 进化治理与风格约束预留）四条主线推进，重点解释“为什么资金闲置、为什么信号被卡住、哪里值得改进”。  
+> 变更摘要（V10.5.4 基线）：**Signal Pipeline Integrity & Control-Plane Hardening**——V10.5.4 已作为 V11.0.1 的前序控制平面基线，提供 `signal_origin_mode`、canonical signal payload、原生状态迁移与渐进放量纪律。  
 > 变更摘要（V10.5.2 交付）：**组合席位竞争引擎（Capacity-Aware Admission & Replacement Engine）**——把持仓上限从刚性拒绝规则升级为动态席位分配机制：新增 Unified Candidate Pool（当前持仓 + 新信号统一候选池）+ 统一准入评分 admission_score = alpha_quality - replacement_friction - risk_penalty + regime_fit，满仓时按分数淘汰末位 N 个对象（持仓到EXIT、信号到REJECTED_BY_CAPACITY_REPLACEMENT）；引入替换保护带（MIN_REPLACEMENT_EDGE_BPS / MAX_REPLACEMENTS_PER_CYCLE / MIN_HOLD_MINUTES / REPLACEMENT_COOLDOWN_MINUTES）防止过度翻仓；Incumbent Decay Model 让持仓持续参与席位竞争；新增 capacity_decision_audit_log 全量审计；支持 CAPACITY_REPLACEMENT_DRY_RUN 先观测再放量；前端 /portfolio、/autonomy、/order-book 增加席位竞争结果可视化。  
 > 变更摘要（V10.5.1 交付）：**从“功能完整”走向“机构级交易操作系统”**——规划聚焦五大主线：Alpha Truth Stack / Portfolio Construction 2.0 / Execution Policy Engine / Live Safety & Model Degradation Guard / Research-to-Live Governance。**本版本补丁交付**：**事后决策剪析自动化（Post-Mortem Automation）**——新增 `post_mortem_jobs.py`，EventBus 订阅 `Topics.POSITION_CLOSED` 实时触发 + 每日 02:00 UTC 岜底 Cron 扫描近 90 天未剪析平仓仓位，幂等排队 `deepseek-reasoner` 生成结构化复盘（`trade_id="position-{id}"`）；**事件日历数据新鲜度修复**——`data_freshness_guard_service.py` 改查 `EventCalendarEntry.updated_at`（原 `created_at`），`event_calendar_service.py` upsert 时刷新 `updated_at`，消除 `event_calendar` 83h 陈旧 WARN；**`confirmed=False` 体制分类修复**——`regime_classifier.py` `confirmed=False` 分支同步更新 `classification_date`。  
 > 变更摘要（V10.4.3）：**风险降低优先执行（Risk-Reducing Priority Execution）**——新增减仓/平仓快速通道：`REDUCE/EXIT` 信号绕过开仓型质量漏斗、熔断期间允许风险降低类订单、减仓/平仓不占用 `MAX_DAILY_TRADES` / `MAX_DAILY_SIGNALS` 配额；`PositionMonitor` 止损/止盈信号写入 `force_exit=true`，`AutonomousEngine` 识别后跳过冷却与 Redis 并发锁直接执行；`SignalPositionFilter` 在减仓数量超持仓时自动升级为全平；`OrderExecutor` 以实际持仓数量为准执行 EXIT/REDUCE，并为港股退出保留 odd-lot 平仓能力；`AutonomyPage` 新增“减仓/平仓优先通道”状态卡与快速通道/强制出场徽章。**追加需求**：`/system` 系统监控页需补齐三类可观测能力——交易生命周期状态监测、系统主要数据流转详细状态、主要模块及细粒度服务状态。  
@@ -16,10 +17,20 @@
 > 变更摘要（V10.2-M2~M8）：**事件驱动风控**——EventCalendarService 盈利/FOMC/CPI/NFP 日历同步 + EarningsFenceService 盈利围栏（盈利前1天50%仓位上限）；**动态仓位生命周期**——PositionStateMachine 三引擎（ScaleIn/ScaleOut/TrailingStop）；**信号融合**——SignalFusionEngine 六维加权评分（tech 25%/fundamental 20%/macro 15%/vol 15%/opt 15%/sentiment 10%）+ 体制倍数；**交易归因**——TradeAttributionEngine 三层分析（Alpha源/执行质量/仓位管理）+ AttributionPage 可视化；**AI 进化**——InsightService 自动周报（deepseek-reasoner Sunday 22:00 ET）+ ABTestEngine（scipy t-test p<0.05）+ EvolutionPage；**Copilot Partner**——DeepResearchEngine 多步深度研究 + ProactiveIntelligenceService 主动推送  
 > 变更摘要（V10.2-M1）：**市场体制感知引擎** ——RegimeClassifier 五维评分体系（趋势强度/波动率制度/量价关系/宏观环境/广度指标）、6类体制自动识别（BULL_TREND / BEAR_TREND / HIGH_VOL / MEAN_REVERT / RANGE_BOUND / CRISIS）、3日确认防噪机制、EventBus 异步事件总线（REGIME_CHANGED 事件驱动策略权重自适应切换、VaR 门限动态调整）、StrategyWeightAllocator 体制感知仓位分配、AI 自主交易闭环升级至 **17 阶段**  
 > 变更摘要（V10.1）：**兑现承诺 + 打磨质量 + 扩展边界**——Tiger 真实下单接入（覆盖美股/港股/期权）、FULL 模式完整自主交易闭环、Copilot 操作指令执行落地、Dashboard 所有 TODO 指标真实化、AI 组合级决策升级（结构化 JSON 输出 + 批量组合决策）、ETF 标的池正式支持、港股支持（Tiger API 统一，无需 Futu）、Paper→Live 毕业自动化、Dashboard WebSocket 实时推送；**本版本明确不含 Telegram 通知，FULL 模式具备完全自主交易能力**
-
+>
 > 历史版本：V10.0（2026-02-24）变更摘要见下方历史记录节  
-> 当前已上线版本：**V10.5.2**（已发布）| 详细规划：[V10.5.2 Release Plan](../archived/v10/v10.5/RELEASE_PLAN_V10.5.2.md)  
-> 下一版本规划：**V10.5.4** | 详细规划：[V10.5.4 Release Plan](../archived/v10/v10.5/RELEASE_PLAN_V10.5.4.md)
+> 当前已上线版本：**V11.0.1**（已发布） | 实现设计：[V11.0.1 Implementation Design](../architecture/v11_0_1_implementation_design.md)  
+> 历史规划归档：[V11.0.1 Release Plan](../archived/v11/v11.0/RELEASE_PLAN_V11.0.1.md) | [V10.5.4 Release Plan](../archived/v10/v10.5/RELEASE_PLAN_V10.5.4.md)
+
+---
+
+## V11.0.1 验收标准（已发布 ✅）
+
+- [x] 文档口径统一为 `V11.0.1（已上线）`
+- [x] 后端配置暴露 5 个 V11.0.1 feature flags
+- [x] `/api/v1/autonomy/meta-state`、`/friction-state`、`/false-hold-alerts`、`/improvement-candidates` 已写入 API 口径
+- [x] 前端 `/autonomy` 与后端 `MetaState` 契约对齐
+- [x] V10.5.4 明确降级为 V11.0.1 的控制平面前序基线，而非当前版本
 
 ---
 
@@ -43,7 +54,7 @@
 
 ---
 
-## V10.5.4 验收标准（规划中）
+## V10.5.4 基线能力（已纳入 V11.0.1）
 
 - [ ] 自动信号 100% 带 `signal_origin_mode`
 - [ ] 新信号 100% 写 canonical payload，并由 Watchtower / Quality Funnel / AutonomousEngine 优先读取

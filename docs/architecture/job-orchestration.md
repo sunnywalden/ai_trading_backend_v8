@@ -94,6 +94,17 @@ flowchart LR
 - `run_broker_order_reconcile` - 券商对账
 - `run_post_trade_pipeline_job` - S12-S16 推进
 
+### 4.2 V11.0.1 反馈层相关任务
+
+V11.0.1 当前虽未引入新的独立公开调度入口命名文档，但其反馈层依赖以下周期性行为：
+
+- 决策周期内：`ConvictionFrictionTracker` 由信号主链持续更新摩擦状态
+- 决策周期末：`MetaStateSnapshotService` 构建或返回最新元状态快照
+- 元状态生成后：`ImprovementCandidateService` 根据快照生成或刷新待处理候选
+- 前端侧：`/autonomy` 页面通过读取 `meta-state` 与 `improvement-candidates` 实现观察，不直接驱动调度编排
+
+设计上，这些任务仍挂在既有自治主链与后处理链路之上，而不是新开一套并行 scheduler 体系。
+
 ## 5. 任务分类矩阵
 
 ### 5.1 交易主链任务

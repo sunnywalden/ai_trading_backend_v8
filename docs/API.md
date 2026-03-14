@@ -7,7 +7,7 @@
 >
 > 注意：本文档已包含“API 监控（Rate Limit）”部分，原文件 `docs/API_Monitoring.md` 已合并（并标记为已合并/弃用）。
 >
-> **V10.5.4 开发对齐说明（2026-03-11）**：本轮规划重点不是新增大量独立接口，而是统一信号控制平面的语义与来源：`signal_origin_mode`、canonical signal payload、原生状态迁移、原生审计优先、以及 `AutonomousEngine.run_decision_cycle()` 作为唯一自动执行编排入口。API 在 V10.5.4 阶段需优先保证字段口径、来源标记与 rollout/feature flag 语义一致。
+> **V11.0.1 文档对齐说明（2026-03-14）**：当前 API 已在 V10.5.4 控制平面基线之上补入 V11.0.1 的 Capital Intelligence 能力。已上线重点不是新增独立交易入口，而是补充系统自感知、摩擦追踪、 False-Hold 告警与 Improvement Lab 候选接口。本文档以当前 FastAPI 实现为准，未落地接口不得写成已上线。
 
 Base URL 以你的启动参数为准（示例：`http://localhost:8088`）。
 
@@ -36,6 +36,7 @@ Base URL 以你的启动参数为准（示例：`http://localhost:8088`）。
 - **Execution Policy & Microscope（/api/v1/execution-policy）— V10.5.1 M3**
 - **Live Safety & Model Degradation（/api/v1/live-safety）— V10.5.1 M4**
 - **席位竞争仲裁（/api/v1/capacity）— V10.5.2**
+- **Capital Intelligence & Self-Perception（/api/v1/autonomy）— V11.0.1**
 
 ---
 
@@ -718,8 +719,60 @@ CACHE_TTL_GEOPOLITICAL_HOURS=24
 
 ---
 
+## Capital Intelligence & Self-Perception（/api/v1/autonomy）— V11.0.1
+
+### GET /api/v1/autonomy/meta-state
+
+- 用途：获取最新系统元状态快照（系统自知画像）
+- 响应关键字段：
+  - `snapshot_id`
+  - `generated_at`
+  - `throttled_signals[]`
+  - `false_hold_alerts[]`
+  - `capital_state{ equity, positions_count?, gross_notional?, gross_exposure_pct?, idle_cash_ratio }`
+  - `model_state{ active_friction_tickers, soft_relief_eligible_count, false_hold_count, total_blocked_signals }`
+  - `improvement_candidates[]`
+  - `_cached`
+- 说明：当前实现位于 `app/routers/autonomy.py`；若 1 小时内已有快照则优先返回缓存结果
+
+### GET /api/v1/autonomy/friction-state
+
+- 用途：获取当前所有摩擦积累信号
+- 响应关键字段：
+  - `throttled_signals[]`
+  - `count`
+  - `feature_enabled`
+- 说明：仅返回当前被置信度阈值连续拒绝、仍处于摩擦积累态的开仓信号
+
+### GET /api/v1/autonomy/false-hold-alerts
+
+- 用途：获取所有 False-Hold 告警
+- 响应关键字段：
+  - `alerts[]`
+  - `count`
+  - `feature_enabled`
+- 说明：返回被持续压制、连续多轮 REDUCE 建议未执行的标的列表
+
+### GET /api/v1/autonomy/improvement-candidates
+
+- 用途：查看系统自动生成的改进候选
+- Query：`status?: string`, `limit?: int`（默认 20）
+- 响应关键字段：
+  - `items[]`
+  - `count`
+  - `feature_enabled`
+- 说明：当前返回结构以 `ImprovementCandidateService.list_candidates()` 为准
+
+### V11.0.1 文档边界说明
+
+- 当前不要把 `meta-state-refresh` 写成已上线接口；公开 FastAPI 路由中目前没有该端点
+- 当前文档统一以 `app/routers/autonomy.py` 中的真实路由为准
+
+---
+
 ## 更新历史
 
+- **2026-03-14**: V11.0.1 已上线；补充 `/api/v1/autonomy/meta-state`、`/friction-state`、`/false-hold-alerts`、`/improvement-candidates` 四个已上线端点文档，并将 V10.5.4 明确为控制平面基线。
 - **2026-03-10**: V10.5.2 上线；新增 /api/v1/capacity 席位竞争仲裁路由组（6 个端点：config GET/PATCH、preview、logs、logs/{id}、stats）。
 - **2026-03-08**: V10.5.1 上线；新增 Alpha Truth Stack, Portfolio 2.0, Execution Policy, Live Safety 共 14 个核心端点；同步 v10.5.1 架构更新。
 - **2026-02-28**: V10.2-M2~M8 上线；新增事件日历、动态仓位、信号融合、交易归因、AI 洞察进化、Copilot Deep Research 共 18 个端点；文档补全
@@ -747,6 +800,7 @@ CACHE_TTL_GEOPOLITICAL_HOURS=24
 
 - [Configuration.md](Configuration.md) - 系统配置说明
 - [Operations/Scheduler.md](Operations/Scheduler.md) - 调度器与运维
+- [architecture/v11_0_1_implementation_design.md](architecture/v11_0_1_implementation_design.md) - V11.0.1 当前实现设计
 
 ---
 

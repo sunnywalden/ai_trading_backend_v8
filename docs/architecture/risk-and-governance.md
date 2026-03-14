@@ -153,6 +153,19 @@ flowchart LR
 
 这些开关的本质不是功能展示，而是风险隔离和回滚抓手。
 
+### 5.4 V11.0.1 Feature Flags 与自感知治理
+
+V11.0.1 的五个新增 flags 分别对应不同反馈层能力：
+
+- `CAPITAL_VELOCITY_V1101_ENABLED`：控制 friction tracking、soft-relief 相关资本效率增强
+- `SELF_PERCEPTION_V1101_ENABLED`：控制 MetaState Snapshot 与 False-Hold 自感知能力
+- `IMPROVEMENT_ENGINE_V1101_ENABLED`：控制 Improvement Lab 候选生成
+- `EVOLUTION_GOVERNANCE_V1101_ENABLED`：控制后续进化治理入口
+- `STYLE_ALIGNMENT_V1101_ENABLED`：控制个性风格约束层预留
+
+这些开关的意义仍然是**风险隔离与治理放量**，不是“为了让更多信号成交”。  
+V11.0.1 必须继续遵守：反馈层可增强解释与资本周转，但不放宽既有 RiskGate 上限。
+
 ## 6. 审计与可解释性
 
 系统要求每一次拒绝、跳过、执行都能尽量回答：
