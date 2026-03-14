@@ -649,3 +649,31 @@ conviction = composite×0.4 + resonance_bonus×0.25 + regime_alignment×0.15 + h
 - `/autonomy` 新增 CapacityArbiter 状态卡（本轮候选数、触发次数、替换成功/拒绝计数、dry-run 徽章）
 - `/order-book` 新增 `REJECTED_BY_CAPACITY_REPLACEMENT` 拒绝原因详情抽屉
 - `/capacity-arbiter` 新路由：Preview 模拟面板 + Audit Log 历史 + Config 治理参数面板
+
+---
+
+## 4.AD V11.0.1 新增功能详述——Capital Intelligence & Autonomous Evolution OS
+
+> 核心主题：在不放宽既有风控上限的前提下，让系统知道哪里被卡住、为什么被卡住、如何更快释放资本并生成改进动作。
+
+### 4.AD.1 Capital Velocity
+
+- `ConvictionFrictionTracker` 跟踪近命中开仓信号的摩擦积累状态
+- `SignalQualityFunnel` 在 feature flag 开启时可依据摩擦状态进行 soft-relief 判定
+- `GrossExposureAllocator` 引入闲置资本感知，避免“有现金却长期 no-headroom”导致的静默阻断
+
+### 4.AD.2 Self-Perception
+
+- `MetaStateSnapshotService` 聚合系统元状态快照
+- `False-Hold Alerts` 暴露“应减未减、持续压制”的持仓问题
+- `/autonomy` 页面可直接展示摩擦积累、False-Hold 与系统阻断总览
+
+### 4.AD.3 Improvement Lab
+
+- `ImprovementCandidateService` 自动生成参数/模块级改进候选
+- 候选以结构化字段返回：类型、目标模块、目标参数、建议值、证据摘要、验证计划、状态
+
+### 4.AD.4 Governance
+
+- 所有 V11.0.1 增量能力均受独立 feature flag 控制
+- 当前对外文档只声明已实现的 `/api/v1/autonomy/*` 端点，不扩写未落地接口

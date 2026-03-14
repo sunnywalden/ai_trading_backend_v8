@@ -72,7 +72,26 @@ sequenceDiagram
     end
 ```
 
-### 关键结论
+## 2.1 V11.0.1 反馈回路
+
+V11.0.1 在原有主时序之外，新增一条“执行后反馈到控制平面”的元状态回路：
+
+- 开仓信号在 `SignalQualityFunnel` 被连续拒绝时，写入 `ConvictionFrictionTracker`
+- 持仓层连续生成 `REDUCE` 建议却未执行时，累积为 False-Hold Alert
+- 每个周期结束后，`MetaStateSnapshotService` 聚合：
+    - `throttled_signals`
+    - `false_hold_alerts`
+    - `capital_state`
+    - `model_state`
+- `ImprovementCandidateService` 基于元状态生成结构化改进候选
+- 前端 `/autonomy` 统一消费上述反馈结果
+
+关键提示：
+
+- V11.0.1 不新增并行交易入口，而是补充“主链运行后的自感知反馈层”
+- 反馈层解释“为什么没有成交 / 为什么没有释放资本”，而不是直接绕过既有风控
+
+### 主执行链路关键结论
 
 - 自动执行不是“查到 VALIDATED 就下单”，中间至少要经过容量、品质、风险、幂等、冷却、并发锁多层校验。
 - 风险降低类信号是特例，会走快速通道，但依然保留 execution_intent 和审计语义。
@@ -114,7 +133,7 @@ sequenceDiagram
     PLM-->>DB: update position status CLOSED or PARTIALLY_CLOSED
 ```
 
-### 关键结论
+### 退出链路关键结论
 
 - `PositionMonitor` 负责发现风险退出条件，不直接下单。
 - `AutonomousEngine` 依然是执行入口，只是对 closing intent 应用不同的控制策略。

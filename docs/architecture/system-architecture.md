@@ -107,6 +107,17 @@ flowchart TB
     State --> Redis
 ```
 
+## 3.1 V11.0.1 增量反馈层
+
+V11.0.1 在既有控制平面之上新增一层“资本效率与系统自感知反馈层”，不改变 `AutonomousEngine` 作为唯一自动执行主链的定位，而是补充以下能力：
+
+- `ConvictionFrictionTracker`：观察 near-miss 信号在 Layer 4 前后的阻断积累
+- `MetaStateSnapshotService`：聚合系统快照，输出前端 `/autonomy` 所需的自知画像
+- `ImprovementCandidateService`：根据元状态自动生成改进候选
+- `CapitalVelocityService`：把“资金闲置”和“席位效率”转成可解释的控制面信号
+
+这层能力的作用不是放宽 RiskGate，而是让系统知道“哪里堵住了资本周转”，并把反馈结构化暴露给观察与治理界面。
+
 ## 4. 分层职责
 
 ### 4.1 API 层

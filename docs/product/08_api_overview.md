@@ -217,6 +217,20 @@ GET  /api/v1/capacity/logs/{log_id}               — 单条仲裁日志详情�
 GET  /api/v1/capacity/stats                       — 仲裁指标摘要（触发次数、替换成功率、保护带命中率）
 ```
 
+### 8.21 Capital Intelligence & Self-Perception（V11.0.1 已上线）
+
+```text
+GET  /api/v1/autonomy/meta-state                — 最新系统元状态快照（MetaState）
+GET  /api/v1/autonomy/friction-state            — 当前摩擦积累信号列表
+GET  /api/v1/autonomy/false-hold-alerts         — False-Hold 告警列表
+GET  /api/v1/autonomy/improvement-candidates    — Improvement Lab 候选列表
+```
+
+**文档约束**：
+
+- 以上端点均以 `app/routers/autonomy.py` 当前实现为准
+- 不把未公开的 refresh / mutation 类接口写成已上线
+
 ---
 
 ## 附录
@@ -265,7 +279,8 @@ GET  /api/v1/capacity/stats                       — 仲裁指标摘要（触�
 
 ### B. 参考文档
 
-- API.md - 接口文档（V10.5.2 已含所有端点，含 capacity-arbiter）
-- BACKEND_DESIGN.md - 后端架构设计（V10.5.2）
-- FRONTEND_DESIGN.md - 前端 UI/UX 设计（V10.5.2）
-- docs/archived/v10/v10.5/RELEASE_PLAN_V10.5.2.md - V10.5.2 完整发布说明
+- API.md - 接口文档（已对齐 V11.0.1 autonomy 端点）
+- BACKEND_DESIGN.md - 后端架构设计（已对齐 V11.0.1）
+- FRONTEND_DESIGN.md - 前端 UI/UX 设计（已对齐 V11.0.1 Autonomy 视图）
+- docs/architecture/v11_0_1_implementation_design.md - V11.0.1 当前实现设计
+- docs/archived/v11/v11.0/RELEASE_PLAN_V11.0.1.md - V11.0.1 历史规划归档

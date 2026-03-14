@@ -1,9 +1,11 @@
 # 后端架构设计文档
 
 > **AI量化交易闭环系统** - Backend Design  
-> 版本：V10.5.4（规划中） | 更新日期：2026-03-11
+> 版本：V11.0.1（已上线） | 更新日期：2026-03-14
 >
-> **V10.5.4 变更摘要（Signal Pipeline Integrity & Control-Plane Hardening）**：本版本先收敛信号控制平面，再继续推进 Profit Engine。后端围绕四条主线推进：**Signal Discovery Integrity**（`signal_origin_mode=REAL/SYNTHETIC/BACKFILL` 真源区分）、**Canonical Signal Payload & State Machine**（统一 payload、原生状态迁移、恢复语义）、**Autonomous Control Plane Hardening**（明确 `AutonomousEngine.run_decision_cycle()` 为唯一自动执行主链，统一 positions / regime / audit 真源，补齐 displacement pending 闭环）、**Native Audit & Governance Discipline**（Watchtower 原生审计优先、完整开发流程、`Observe → Shadow → Semi → Full` 分阶段 rollout）。
+> **V11.0.1 变更摘要（Capital Velocity & Autonomous Evolution OS）**：本版本在 V10.5.4 控制平面基线之上，新增 Capital Velocity、自感知、改进候选与进化治理预留四条主线：`ConvictionFrictionTracker` 跟踪近命中信号摩擦并支持 soft-relief 判定；`MetaStateSnapshotService` 聚合系统元状态快照；`ImprovementCandidateService` 自动生成结构化改进候选；`CapitalVelocityService` 为席位与资本利用率提供效率视角。所有能力继续受 feature flag、审计真源与 rollout discipline 约束。
+>
+> **V10.5.4 基线摘要（Signal Pipeline Integrity & Control-Plane Hardening）**：统一 `signal_origin_mode`、canonical payload、原生状态迁移、`AutonomousEngine.run_decision_cycle()` 单主链、native audit 优先与 Observe → Shadow → Semi → Full 渐进放量纪律。
 >
 > **V10.5.2 变更摘要（组合席位竞争引擎）**：**Capacity-Aware Admission & Replacement Engine**——SignalQualityFunnel Layer 2 从满仓即拒绝升级为统一席位竞争：新增 CapacityArbiterService（统一候选池 + admission_score 排序 + overflow 淘汰算法）；AutonomousEngine 在 RiskGate 前引入 unified capacity decision；PositionRebalanceMonitor 升级为席位竞争数据供应方与兜底守卫；PositionScoringService 补齐统一准入评分接口；新增 capacity_decision_audit_log 数据表，记录候选评分、淘汰原因、保护带结果；支持治理开关 CAPACITY_REPLACEMENT_ENABLED / DRY_RUN / MAX_PER_CYCLE / MIN_EDGE；新增 /api/v1/capacity-arbiter/ 路由组（preview、audit-log、config）；V10.5.1 补丁随本版合并发布：post_mortem_jobs.py EventBus + Cron 自动化 + 事件日历 freshness 修复 + confirmed=False 体制修复。
 >
@@ -66,6 +68,33 @@
 - `AUTONOMOUS_CONTROL_PLANE_V1054_ENABLED=true` 且 `NATIVE_AUDIT_V1054_ENABLED=true`：**SEMI**，原生控制面与审计路径开始灰度接管。
 - 再叠加 `GOVERNANCE_HARD_GATE_ENABLED=true`：**FULL**，进入原生治理闭环。
 - 运维顺序建议固定为：**迁移 → 回补 → 修复 → 验收 → 灰度开关**。避免先开开关、后补历史，导致页面口径与真实控制面错位。
+
+#### 1.2.4 V11.0.1 Capital Intelligence 增量层
+
+V11.0.1 不替代 V10.5.4 控制平面，而是在其之上增加“知道哪里被卡住、为什么卡住、如何更快释放资本与生成改进动作”的反馈层。
+
+新增关键服务与模型：
+
+- `ConvictionFrictionTracker`：记录近命中但持续被阈值阻断的开仓信号摩擦状态
+- `MetaStateSnapshotService`：聚合 `throttled_signals`、`false_hold_alerts`、`capital_state`、`model_state`
+- `ImprovementCandidateService`：根据元状态生成结构化改进候选
+- `CapitalVelocityService`：为持仓/候选提供资本效率视角
+- `MetaStateSnapshot` / `ImprovementCandidate`：持久化 V11.0.1 反馈层状态
+
+对应当前 API：
+
+- `GET /api/v1/autonomy/meta-state`
+- `GET /api/v1/autonomy/friction-state`
+- `GET /api/v1/autonomy/false-hold-alerts`
+- `GET /api/v1/autonomy/improvement-candidates`
+
+对应 V11.0.1 feature flags：
+
+- `CAPITAL_VELOCITY_V1101_ENABLED`
+- `SELF_PERCEPTION_V1101_ENABLED`
+- `IMPROVEMENT_ENGINE_V1101_ENABLED`
+- `EVOLUTION_GOVERNANCE_V1101_ENABLED`
+- `STYLE_ALIGNMENT_V1101_ENABLED`
 
 ### 1.3 项目结构
 

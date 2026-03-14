@@ -91,7 +91,7 @@
 - **M5 Observability & Governance**：\capacity_decision_audit_log\ 全量审计 + \CAPACITY_REPLACEMENT_DRY_RUN\ 治理开关
 - **前端重点**：\/portfolio\、\/autonomy\、\/order-book\ 增加席位竞争结果、保护带说明与替换归因可视化
 
-### Phase 15: Signal Pipeline Integrity & Control-Plane Hardening 🚀 V10.5.4 当前规划
+### Phase 15: Signal Pipeline Integrity & Control-Plane Hardening ✅ V10.5.4 基线完成
 > 详细规划见：[docs/archived/v10/v10.5/RELEASE_PLAN_V10.5.4.md](../archived/v10/v10.5/RELEASE_PLAN_V10.5.4.md)
 
 - **M1 Signal Discovery Integrity**：建立 `REAL / SYNTHETIC / BACKFILL` 真源区分，停止模拟信号污染真实自动执行链路
@@ -101,9 +101,18 @@
 - **前端重点**：升级 `/alpha-lab`、`/portfolio`、`/execution-policy`、`/governance/pipeline`、`/autonomy` 五个工作台，统一显示“结果值 + 解释字段 + 数据质量 + 来源类型”
 - **与 V10.5.3 的关系**：V10.5.3 的 Profit Engine 方向保留，但其高级收益控制能力需要先建立在统一信号控制平面之上；V10.5.4 是这套底座收敛版本
 
-### Phase 16: V11 计划 🔜
-- 期权执行开启（`STOCK,ETF,OPTION` 全模式）
+### Phase 16: Capital Velocity & Autonomous Evolution OS ✅ V11.0.1 已上线
+> 实现设计见：[docs/architecture/v11_0_1_implementation_design.md](../architecture/v11_0_1_implementation_design.md)
+
+- **M1 Capital Velocity**：近命中摩擦跟踪、soft relief、闲置资本感知
+- **M2 Self-Perception**：MetaState Snapshot、False-Hold Alerts、自知画像聚合
+- **M3 Improvement Engine**：结构化改进候选自动生成
+- **M4 Evolution Governance**：为后续进化治理与风格约束提供 flag-gated 基座
+- **前端重点**：Autonomy 工作台统一显示 MetaState / rollout flags / improvement 候选
+
+### Phase 17: 下一阶段规划 🔜
+
 - 多账户 / 多用户支持
-- LLM Fine-tuning 个人交易风格适配
-- 实时 L2 订单簿深度分析
-- 移动端原生 App（iOS/Android）
+- 更完整的 Evolution Governance 落地
+- 风格对齐约束层增强
+- 更细粒度的 capital velocity / seat value 可解释链
