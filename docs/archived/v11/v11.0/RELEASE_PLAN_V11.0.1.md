@@ -1,9 +1,10 @@
 # V11.0.1 Release Plan — Success-Rate First Capital Velocity & Autonomous Evolution OS
 
 > AI量化交易闭环系统 — V11.0.1 规划说明  
-> 文档版本：Draft v1.0 | 更新日期：2026-03-13  
-> 当前状态：规划提案  
+> 文档版本：Draft v1.1 | 初稿日期：2026-03-13 | 最后审查：2026-03-14  
+> 当前状态：规划提案（已对当前实现做对齐校核，见各节"已有基础"与第 7 节数据迁移要求）  
 > 当前规划基线：V10.5.4 Signal Pipeline Integrity & Control-Plane Hardening  
+> 代码核查版本：`v1051_research_service.py`、`capacity_arbiter.py`、`insight_service.py`（含 ABTestEngine）、`weekly_report_service.py`  
 > 核心命题：**在不牺牲成功率、不放宽风险上限的前提下，提高资金轮转效率，最大化净收益，并让系统具备自我感知、自我提升、自我进化能力，升级为新一代顶尖个人量化交易系统。**
 
 ---
@@ -16,7 +17,84 @@ V11.0.1 是一次 **Success-Rate First Capital Velocity & Autonomous Evolution O
 
 > 让平台不只是“能交易、会风控、可观测”，而是能围绕**成功率优先的资金轮转**做实时资本编排，并基于自身表现、环境变化和执行反馈，持续完成**自我感知 → 自我诊断 → 自我优化 → 自我进化**。
 
-### 0.2 为什么是 V11.0.1
+### 0.2 V10.5.4 实测诊断：大量资金闲置的具体成因
+
+> 以下诊断结合 V10.5.4 模拟盘实际运行截图与 `/api/v1/signal-pipeline` 接口真实响应数据（2026-03-14），是 V11.0.1 设计的核心驱动依据。
+
+#### 诊断现象
+
+| 现象 | 实测数据 | 严重程度 |
+|------|---------|---------|
+| 现金闲置 | 总资产 $905K，预估现金 $298K（占比 ~33%），最大购买力 $247万未使用 | 🔴 高 |
+| 近命中信号反复被拒 | ORCL ENTRY `conviction_score=92`，阈值 93（BULL_TREND），每小时触发一次均被 Layer 4 拒绝；同时 `gross_exposure_allocator.reason="no-headroom", target_qty=0`（**双重阻断**） | 🔴 高 |
+| 亏损仓位无法减仓 | ACDC AI评分 50/100（建议 REDUCE），REDUCE 信号被 PositionRebalanceMonitor 生成后仍遭拒绝，持仓亏损 -9.36% | 🔴 高 |
+| 资金配置效率失衡 | 5 个仓位合计市值 $606K，未实现亏损 $8136，持仓分布不均（AMD 单仓 $313K，占比 >50%） | 🟡 中 |
+
+#### API 接口字段还原（ORCL 信号 `3be3b87f-4d05-4381-befb-76ac32d59a55`）
+
+下表从 `/api/v1/signal-pipeline?limit=30` 响应中提取关键字段，供 V11 实现者精确对照：
+
+| 字段 | 值 | 含义 |
+|------|-----|------|
+| `signal_quality_score` | `92` | Layer 4 置信度分值 |
+| `signal_quality_tier` | `"MEDIUM"` | 低于 HIGH 门槛（95），tier 在 conviction 之后计算 |
+| `funnel_rejected_at_layer` | `4` | 被第 4 层（置信度校准门）拒绝 |
+| `funnel_rejection_reason` | `"LOW_CONVICTION"` | 拒绝原因枚举 |
+| `rejection_stage` | `"QUALITY_FUNNEL"` | 拒绝阶段 |
+| `rejection_detail` | `"Conviction Score 92.0 < 阈值 93 (composite=98.0, resonance_bonus=90, regime_alignment=100)"` | composite / resonance / regime 三项均优秀，唯 conviction 差 1 分 |
+| `gross_exposure_allocator.capped` | `true` | GEA 也触发上限裁剪 |
+| `gross_exposure_allocator.reason` | `"no-headroom"` | **第二阻断点**：敞口上限已满，`target_qty` 被置 0 |
+| `gross_exposure_allocator.target_qty` | `0` | 即使 Layer 4 通过，执行层仍无可分配仓位 |
+| `signal_quality_quota_exempt` | `false` | MEDIUM 级信号不享日配额豁免 |
+| `quantity` | `0.2442` | 请求仓位 24.42% 净值（~$221K） |
+
+#### 根因分析
+
+**根因 1：置信度阈值摩擦（Conviction Threshold Friction）**
+
+- 代码路径：`signal_quality_config.py` 的 `_REGIME_OVERRIDES["BULL_TREND"]["conviction_threshold"] = 93`
+- ORCL `conviction_score = 92`，`composite_score = 98`，`resonance_bonus = 90`，`regime_alignment = 100`——其他全优，唯 conviction 差 1 分
+- Layer 4 硬拒绝，系统无近命中感知；每轮消耗信号算力、API 配额、DB 写入，资金零部署
+
+**根因 2：信号质量 Tier 死锁（Tier Classification Lock）**
+
+- `signal_quality_tier = "MEDIUM"` 是因为 `conviction_score 92 < HIGH_QUALITY_SIGNAL_SCORE = 95`
+- Tier 是 conviction 的**下游计算结果**：`conviction 不足 → tier ≤ MEDIUM → 不满足 tier 豁免条件`
+- 任何"用 tier 判断是否启用阈值软化"的机制均存在**逻辑死锁**：软化需要 tier≥HIGH，但 tier≥HIGH 需要 conviction 已达标，而 conviction 未达标正是需要软化的原因
+- 正确门控应使用 **conviction 上游的独立维度**（`composite_score` / `resonance_bonus`），见 M1.5 修正
+
+**根因 3：GrossExposureAllocator 双重阻断（GEA No-Headroom with Idle Cash）**
+
+- 代码路径：`gross_exposure_allocator.py` 第 271 行 `if remaining_cap_pct <= 0 or max_additional_symbol_pct <= 0:` → `reason="no-headroom", target_qty=0`
+- 执行链路：`_ai_decide()` 调用 `gross_exposure_allocator.allocate_entry()` → GEA 结果存入 `decision["gross_exposure_allocator"]` → 存入 watchtower metadata（CONTROL_PLANE 阶段）
+- 即使 Layer 4 软化通过，执行层 `qty = target_qty = 0` → AutonomousEngine 判定为 `HOLD/no-op` → 信号 SKIPPED
+- ORCL 是**两个独立阻断点同时触发**，仅修复 Layer 4 不够，GEA 层也必须处理
+- 核心矛盾：持仓市值 $606K / 净值 $905K = 66.7% 总敞口，但账户有 $298K 现金，GEA `no-headroom` 说明运行时计算敞口已触及配置上限——闲置现金未被 GEA 识别为"可用空间"
+
+**根因 4：亏损持仓虚假持有（False Hold in Deteriorating Position）**
+
+- 代码路径：`position_rebalance_monitor.py` `_SCORE_REDUCE_THRESHOLD = 54`，ACDC 评分 50 ≤ 54，已生成 REDUCE 信号
+- REDUCE 信号在信号质量漏斗/执行层被二次阻断，但 `rejection_stage` 原因未穿透到持仓层告警
+- 结果：-9.36% 亏损持仓长期占位，消耗风险预算，锁定可轮转资本
+
+**根因 5：系统无"闲置成本"概念（No Idle Capital Cost Awareness）**
+
+- GEA 敞口判断、Layer 4 阈值、CVS 排序：闲置资金的机会成本权重均为零
+- 系统不会因为"目前资金大量闲置"主动降低准入门槛或调整 GEA headroom
+
+#### 对 V11.0.1 的设计约束
+
+以下问题必须在 V11.0.1 的 M1 / M2 设计中得到可量化解答：
+
+1. **「连续 N 次近命中阈值」** → 需要 Conviction Friction Tracker（见 M1.5.1）
+2. **「$298K 现金闲置却 GEA no-headroom」** → 需要 GEA Idle-Capital-Aware Check（见 M1.5.3）
+3. **「tier 不能作为软化门控」** → 改用 `composite_score` + `resonance_bonus` 独立维度（见 M1.5.2 修正）
+4. **「REDUCE 信号被下游阻断原因未穿透」** → 需要 False-Hold Alert + REDUCE/EXIT bypass（见 M2.3）
+5. **「全系统闲置资本代价为零权重」** → 需要 Idle Capital Pressure 进入 CVS（见 M1.1）
+
+---
+
+### 0.3 为什么是 V11.0.1
 
 如果说：
 
@@ -80,7 +158,9 @@ V11.0.1 是一次 **Success-Rate First Capital Velocity & Autonomous Evolution O
 ### M1 目标
 
 把“资金轮转”从一个结果指标，升级为一个被系统主动优化的核心控制对象。
-
+> **已有基础（不需从零建）**  
+> `capacity_arbiter.py` 已实现 V10.5.2 席位竞争仲裁（`CapacityArbiterService`），含准入分排序、保护带、冷却期、单周期最大替换数；`execution_policy_service.py` 已有 `seat_value` 评估逻辑；`trade_attribution_engine.py` 已追踪成交成本。  
+> **新增 / 扩展**：在 `CapacityCandidate` 基础上引入 `capital_velocity_score` 字段；为持仓增加 `alpha_half_life_minutes` 属性；Turnover Guardrails 以现有 `MIN_REPLACEMENT_EDGE` 等参数为基础扩展。
 ### M1 核心能力
 
 #### 1. Capital Velocity Score（CVS）
@@ -131,7 +211,72 @@ $$
 - replacement discipline（替换纪律）
 
 系统禁止通过“更频繁但质量更差”的方式伪造高轮转。
+#### 5. Conviction Threshold Friction Relief（置信度阈值摩擦缓释）
 
+> **V10.5.4 实测驱动**：ORCL ENTRY 置信度 92 连续多小时被 BULL_TREND 阈值 93 拒绝，$298K 现金持续闲置。
+
+解决当前系统"近命中信号反复被拒 + 资金闲置无感知"双盲问题：
+
+**5.1 Conviction Friction Tracker（置信度摩擦追踪器）**
+
+- 记录每个 symbol/方向 近 N 个周期内的置信度分布（conviction rolling window）
+- 判定是否处于"阈值摩擦状态"：连续 ≥ M 次，置信度在 `[threshold - Δ, threshold)` 区间（建议 Δ=3, M=3）
+- 摩擦状态记入 `meta_state_snapshot`，在信号管道视图与 War Room 中可见
+
+**5.2 Idle-Capital-Aware Threshold Softening（闲置资本感知型阈值软化）**
+
+> ⚠️ **设计修正（来自接口实测数据）**：`signal_quality_tier` 是 `conviction_score` 的**下游计算结果**，不能作为软化触发的前置条件，否则存在**逻辑死锁**（需要软化才能升 tier，升 tier 才能软化）。  
+> 实测：ORCL `tier = "MEDIUM"`，是因为 `conviction_score 92 < HIGH_QUALITY_SIGNAL_SCORE 95`；而 `composite_score = 98`、`resonance_bonus = 90` 均是 conviction 的**上游独立维度**，不受 conviction 值影响。  
+> **正确门控：使用 `composite_score` + `resonance_bonus` 而非 `signal_quality_tier`。**
+
+同时满足以下四个条件时，允许对 Layer 4 置信度阈值应用有界松弛（`CONVICTION_THRESHOLD_SOFT_FLOOR`）：
+
+| 条件 | 说明 | 建议默认值 | ORCL 实测值 |
+|------|------|----------|------------|
+| 当前 `idle_cash_ratio` | 现金 / 总资产 > 门槛 | `> 25%` | ~33% ✅ |
+| 近命中持续周期 | conviction 在阈值 `-Δ` 以内连续被拒次数 ≥ N | `Δ=3, N=3` | 持续多轮 ✅ |
+| `composite_score`（**独立维度**，非 tier） | 多维融合分，与 conviction_score 计算路径独立 | `≥ 96` | `98.0` ✅ |
+| `resonance_bonus`（**独立维度**，非 tier） | 共振加成，与 conviction_score 计算路径独立 | `≥ 80` | `90` ✅ |
+
+满足条件时，有效阈值 = `max(CONVICTION_THRESHOLD_SOFT_FLOOR, threshold - soft_relief)`，其中：
+- `CONVICTION_THRESHOLD_SOFT_FLOOR`：绝对下界，不可再低（建议 88 for BULL_TREND）
+- `soft_relief`：松弛幅度上限（建议 ≤ 3 分）
+- 松弛行为必须写入审计日志，并在信号 Pipeline 视图标注 `[SOFT_THRESHOLD]` 标签
+
+**安全围栏**：
+- 仅对 ENTRY / ADD 信号适用，REDUCE / EXIT 不参与此机制
+- `CAPITAL_VELOCITY_V1101_ENABLED = False` 时此机制完全关闭
+- 单周期内被松弛通过的信号数量不超过 `max_soft_relief_per_cycle`（建议 = 1）
+- **不使用 `signal_quality_tier` 作为条件**（tier 为 conviction 下游，循环依赖）
+
+**5.3 GrossExposureAllocator Idle-Capital-Aware Check（GEA 闲置资本感知修正）**
+
+> **新增（来自接口实测数据）**：ORCL 信号同时被 Layer 4 AND GEA `no-headroom` 两重阻断。即使 Layer 4 软化通过，`target_qty = 0` 仍会导致信号在 AutonomousEngine 被判 SKIPPED（`qty=0 → no-op`）。必须同步解决 GEA 层。
+>
+> 代码路径：`gross_exposure_allocator.py` 第 271 行：`if remaining_cap_pct <= 0 or max_additional_symbol_pct <= 0: return ... reason="no-headroom", target_qty=0`
+
+当以下条件**同时成立**时，GEA 应进入"闲置资本感知模式"，重新核算 `remaining_cap_pct`：
+- `gross_exposure_allocator.reason = "no-headroom"`（触发当前路径）
+- `idle_cash_ratio > IDLE_CAPITAL_ALERT_THRESHOLD`（显著现金闲置，非真正满仓）
+- 请求仓位 `base_position_pct ≤ idle_cash_ratio × IDLE_CAPITAL_GEA_HEADROOM_FACTOR`（本次开仓可由现金直接覆盖）
+
+行为：
+- 满足以上条件时，将 `effective_max_gross_pct` 临时上调至 `current_gross_pct + min(idle_cash_ratio, 0.30)`（最多借用 30% 净值空间），重跑分配逻辑
+- 仅影响 `target_qty` 计算，不修改全局风险上限，不绕过 RiskGate 其他检查
+- 结果写入 `gross_exposure_allocator.idle_capital_adjusted = true`，原始 `no-headroom` 原因保留在 `original_reason` 字段
+- `CAPITAL_VELOCITY_V1101_ENABLED = False` 时此逻辑完全关闭，GEA 行为保持 V10 不变
+
+**5.4 Idle Capital Pressure 进入 CVS 计算**
+
+在 CVS 公式中增加 `+ IdleCapitalBonus` 项：
+
+$$
+CVS = WinProb \times ExpectedNetAlpha \times FillConfidence \times TimeEfficiency - RiskPenalty - FrictionPenalty - CrowdingPenalty + IdleCapitalBonus
+$$
+
+- `IdleCapitalBonus = idle_cash_ratio \times capital_idle_opportunity_cost_weight`，仅当 `idle_cash_ratio > IDLE_CAPITAL_ALERT_THRESHOLD` 时激活
+- 含义：当现金大量闲置时，入场动作本身具备额外的"让资金工作"价值
+- 在 CVS 解释字段中须单独列出 `idle_capital_bonus` 贡献，让决策可追溯
 ### M1 交付结果
 
 - 平台能够回答“为什么这笔资金现在应该继续留在这里 / 应该转去别处”。
@@ -144,6 +289,15 @@ $$
 ### M2 目标
 
 让平台具备对自身状态、市场状态、策略状态、执行状态、资本利用状态的持续感知能力，并把这种感知直接输入决策回路。
+
+> **已有基础（不需从零建）**  
+> - `autonomy_health_monitor.py`：自主健康检查  
+> - `model_degradation_monitor_service.py`：模型置信退化检测  
+> - `signal_intelligence_service.py`：信号观测  
+> - `execution_microscope_service.py`：执行成本与成交质量  
+> - `situational_awareness_service.py`：态势感知快照（`SituationalAwarenessSnapshot`）  
+>
+> **新增 / 扩展**：在 `situational_awareness_service.py` 基础上扩展为 `MetaStateSnapshot`（含 Capital / Model 状态，需新建 DB 表，见第 7 节）；Self-Awareness Alerts 作为新告警类别接入 `smart_alert_service.py`；Counterfactual 标签已部分在 `decision_post_mortem_service.py` 实现（`counterfactual_buy/hold/sell`），可扩展为入场 / 退出滑动标签。
 
 ### M2 核心能力
 
@@ -178,7 +332,23 @@ $$
 - 执行成本失真预警
 - 拥挤共振失效预警
 - 参数过拟合风险预警
+**False-Hold Alert（虚假持有告警）**
 
+> **V10.5.4 实测驱动**：ACDC 仓位 AI 评分 50/100（低于 `_SCORE_REDUCE_THRESHOLD = 54`），`PositionRebalanceMonitor` 已生成 REDUCE 信号，但信号被质量漏斗或执行层二次阻断，`rejection_stage`/`rejection_reason` 未穿透到持仓层，导致 -9.36% 亏损持仓持续占位，锁定可轮转资本。
+
+触发条件：某持仓对应的 REDUCE / EXIT 信号连续 ≥ K 个周期（建议 K=3）被质量漏斗或执行层拒绝，且拒绝原因非 `MARKET_CLOSED` / `COOLDOWN`。
+
+告警内容（写入 `meta_state_snapshot.false_hold_alerts`）：
+- `symbol`、`position_id`、`current_score`（如 ACDC=50）
+- REDUCE/EXIT 信号 ID、`rejection_stage`、`rejection_reason`、已被拒次数
+- 当前浮亏金额与浮亏百分比
+- 建议动作：人工确认减仓 / 触发 REDUCE 信号 fast-path bypass
+- `/autonomy` 页面展示，不静默消耗
+
+**REDUCE/EXIT Fast-Path Bypass（受保护通道）**：
+- 当且仅当持仓满足 False-Hold 触发条件，且 AI 综合评分 ≤ `_SCORE_REDUCE_THRESHOLD` 时，REDUCE/EXIT 信号可跳过 Layer 4 置信度校准门（但仍须通过 Layer 1/2/3 及 RiskGate）
+- bypass 行为通过 `signal_bypass_reason = "FALSE_HOLD_PROTECTION"` 字段记录在信号审计日志中
+- `CAPITAL_VELOCITY_V1101_ENABLED = False` 时此 bypass 完全关闭，不影响现有漏斗逻辑
 #### 4. Counterfactual Self-Reflection
 
 每次关键决策都生成轻量反事实标签：
@@ -200,6 +370,14 @@ $$
 ### M3 目标
 
 让系统不仅知道哪里做得不好，还能自动形成带优先级的改进动作，并在 shadow / paper 环境验证后逐步进入主链。
+
+> **已有基础（不需从零建）**  
+> - `insight_service.py`：`InsightService`（洞察 CRUD）、`WeeklyInsightGenerator`（周度 AI 洞察）、`ABTestEngine`（A/B 实验，含 `create_experiment / evaluate_experiment / list_experiments`）  
+> - `decision_post_mortem_service.py`：事后剖析，含三路 counterfactual  
+> - `weekly_report_service.py`：`WeeklyReportService`，生成周复盘文本  
+> - `trade_attribution_engine.py`：成交成本与收益归因  
+>
+> **新增 / 扩展**：`WeeklyInsightGenerator` 扩展为结构化三段（保留 / 停止 / 尝试）Weekly Learning Pack 输出；Improvement Backlog 新增 `ImprovementCandidate` 数据模型持久化候选列表（见第 7 节数据模型）。
 
 ### M3 核心能力
 
@@ -268,6 +446,13 @@ $$
 
 让策略、参数、权重、执行模板、轮转纪律可以在证据链和风控边界内受治理地自动进化。
 
+> **已有基础（不需从零建）**  
+> - `v1051_research_service.py`：完整治理管道快照（`get_governance_pipeline_snapshot`）、晋级 / 回滚建议（`_build_rollback_suggestion`）、证据链构建（`_build_governance_evidence`）；当前运行状态集：`DISCOVERY / PAPER / SHADOW_LIVE / CHALLENGER / PRODUCTION`  
+> - `paper_trading_service.py`：模拟盘毕业评估与晋级建议  
+> - `governance.py` 路由：`GET /api/v1/governance/pipeline`  
+>
+> **新增 / 扩展**：`StrategyGenome` 数据模型（见第 7 节）；`LIMITED` / `RETIRED` 新状态枚举（见下方映射表）；自动晋级 / 回滚触发器。
+
 ### M4 核心能力
 
 #### 1. Strategy Genome & Evolution Ledger
@@ -288,11 +473,26 @@ $$
 策略、参数、执行模板进入统一演化状态机：
 
 - `DISCOVERY`
-- `SHADOW`
+- `PAPER`（纸面测试 / 回测阶段）
+- `SHADOW_LIVE`（影子实盘）
 - `CHALLENGER`
-- `ADOPTED`
-- `LIMITED`
-- `RETIRED`
+- `PRODUCTION`（主链运行，即原方案中的 `ADOPTED`）
+- `LIMITED`  ← **V11 新增**，受限上线（仅适用特定策略 / 市场 / 账户）
+- `RETIRED`  ← **V11 新增**，已退役，不再参与任何排序与分配
+
+> **与当前代码状态机的对齐说明**
+>
+> | V11 规划名称 | 代码实际名称 | 对齐策略 |
+> |---|---|---|
+> | `SHADOW` | `SHADOW_LIVE` | 文档统一改用 `SHADOW_LIVE`，**不做重命名**，避免全量历史数据迁移 |
+> | `ADOPTED` | `PRODUCTION` | 文档统一改用 `PRODUCTION`，语义等价 |
+> | `LIMITED` | *(不存在)* | **新增**枚举值，需 Alembic migration |
+> | `RETIRED` | *(不存在)* | **新增**枚举值，需 Alembic migration |
+> | `PAPER` | `PAPER` | 无变化 |
+> | `DISCOVERY` | `DISCOVERY` | 无变化 |
+>
+> 回滚路径保持当前逻辑不变：  
+> `PRODUCTION → CHALLENGER → SHADOW_LIVE → PAPER → DISCOVERY`
 
 任何升级或降级必须由以下证据触发：
 
@@ -389,12 +589,13 @@ $$
 
 V11.0.1 的前端原则不是继续加页面，而是围绕“讲评台”升级现有核心工作台：
 
-1. **`/alpha-lab`** → Alpha Truth + Success-Adjusted Opportunity Console
-2. **`/portfolio`** → Capital Velocity & Seat Rotation Console
-3. **`/execution-policy`** → Fill Confidence & Cost Discipline Console
-4. **`/governance/pipeline`** → Improvement / Evolution Governance Board
-5. **`/autonomy` / Watchtower** → Self-Perception & System Reflex Console
-6. **`/war-room`** → 从实时指挥视图升级为“资本轮转 + 系统自感知”总控台
+1. **`/alpha-lab`** (`AlphaLabPage.vue`) → Alpha Truth + Success-Adjusted Opportunity Console
+2. **`/portfolio`** (`PortfolioPage.vue`) → Capital Velocity & Seat Rotation Console
+3. **`/execution-policy`** (`ExecutionPolicyPage.vue`) → Fill Confidence & Cost Discipline Console
+4. **`/governance/pipeline`** (`GovernancePipelinePage.vue`) → Improvement / Evolution Governance Board；新增 Improvement Lab 子标签页
+5. **`/autonomy`** (`AutonomyPage.vue`) → Self-Perception & System Reflex Console（M2 自感知看板的主落点）
+   - **注意**：`/signal-watchtower` (`SignalWatchtowerPage.vue`) 是 V10.4.2 已存在的独立路由（信号哨所），与 `/autonomy` 是两个独立入口，不合并。M2 自感知结论在 `/autonomy` 升级视图内展示；信号预算 / 信号异常仍在 `/signal-watchtower`。
+6. **`/war-room`** (`WarRoomPage.vue`) → 从实时指挥视图升级为"资本轮转 + 系统自感知"总控台
 
 统一设计要求：
 
@@ -422,6 +623,9 @@ V11.0.1 的前端原则不是继续加页面，而是围绕“讲评台”升级
 - `execution_policy_service.py`
 - `autonomous_engine.py`
 - `trade_attribution_engine.py`
+- `signal_quality_funnel.py`（M1.5.2 Layer 4 阈值软化入口）
+- `signal_quality_config.py`（M1.5.2 `CONVICTION_THRESHOLD_SOFT_FLOOR` 与新配置项注册）
+- `gross_exposure_allocator.py`（M1.5.3 闲置资本感知模式，`idle_capital_adjusted` 字段）
 
 新增能力：
 
@@ -429,6 +633,8 @@ V11.0.1 的前端原则不是继续加页面，而是围绕“讲评台”升级
 - capital occupancy half-life
 - success-adjusted turnover metrics
 - unit-time net return attribution
+- conviction friction tracking（`meta_state_snapshot.throttled_signals`）
+- GEA idle-capital-aware headroom recalculation
 
 ### 4.2 Self-Perception
 
@@ -451,16 +657,18 @@ V11.0.1 的前端原则不是继续加页面，而是围绕“讲评台”升级
 重点升级：
 
 - `decision_post_mortem_service.py`
-- `insight_service.py`
-- `ab_test_engine.py`
+- `insight_service.py`（已含 `WeeklyInsightGenerator`、`ABTestEngine`，直接扩展）
+- `weekly_report_service.py`（周报框架已存在，升级为结构化 Learning Pack 输出）
 - `governance / pipeline` 相关 service
+
+> ⚠️ **注意**：`ab_test_engine.py` 作为独立文件**不存在**于当前代码库。A/B 实验能力实现在 `insight_service.py` 的 `ABTestEngine` 类中（含 `create_experiment / evaluate_experiment / list_experiments`）。V11 实施应扩展该类，**而非新建同名文件**。
 
 新增能力：
 
-- bottleneck attribution engine
-- rule/parameter/sizing/execution candidates
-- improvement backlog auto-generation
-- weekly learning pack
+- bottleneck attribution engine（扩展 `trade_attribution_engine.py`）
+- rule/parameter/sizing/execution candidates（新增 `ImprovementCandidate` 数据模型，见第 7 节）
+- improvement backlog auto-generation（扩展 `WeeklyInsightGenerator`）
+- weekly learning pack（升级 `WeeklyReportService`，输出结构化三段：保留 / 停止 / 尝试）
 
 ### 4.4 Self-Evolution
 
@@ -487,6 +695,13 @@ V11.0.1 的前端原则不是继续加页面，而是围绕“讲评台”升级
 - `EVOLUTION_GOVERNANCE_V1101_ENABLED`：控制 strategy genome、演化状态机、晋级/回滚自动建议是否启用
 - `STYLE_ALIGNMENT_V1101_ENABLED`：控制个性化交易风格约束是否参与排序、晋级和仓位模板生成
 
+> **与现有控制平面的集成要求**
+>
+> 以上 5 个 flag 均须：
+> 1. 在 `app/core/config.py` 的 `Settings` 类中注册（默认值 `False`，安全缺省），并在 `.env.example` 中增加对应注释
+> 2. 在 `GET /api/v1/autonomy/status` 响应的 `flags` 字段中暴露（参照现有 `SIGNAL_PIPELINE_V1054_ENABLED` 模式，见 `app/routers/autonomy.py`），以便 Observe / Shadow 阶段在控制台可核验
+> 3. 在 `GET /api/v1/execution-policy/overview` 控制状态中同步体现
+
 ---
 
 ## 6. 统一验收标准
@@ -497,12 +712,15 @@ V11.0.1 的前端原则不是继续加页面，而是围绕“讲评台”升级
 - [ ] 系统可解释“为什么这笔资本继续持有 / 应释放 / 应轮转”
 - [ ] 所有轮转建议同时显示成功率影响、净收益影响与摩擦成本影响
 - [ ] 资金轮转效率提升不以成功率显著下降为代价
-
+- [ ] **V10.5.4 诊断验证**：`conviction_score ≥ (threshold - Δ)` 且 `composite_score ≥ 96` 且 `resonance_bonus ≥ 80` 且 `idle_cash_ratio > 25%` 且连续被拒 ≥ 3 次时，信号 Pipeline 视图中该信号条目出现 `[SOFT_THRESHOLD]` 标签，有效阈值可被观测到降低
+- [ ] **V10.5.4 诊断验证**：当 `gross_exposure_allocator.reason = "no-headroom"` 且 `idle_cash_ratio > IDLE_CAPITAL_ALERT_THRESHOLD` 时，GEA 不再直接置 `target_qty=0`，而是重算并写 `idle_capital_adjusted=true`，确保信号不因 qty=0 被静默 SKIPPED
 ### 6.2 Self-Perception
 
 - [ ] 每个决策周期可生成系统级 `meta-state snapshot`
 - [ ] 系统可自动识别低效占位、成功率退化、执行成本失真、拥挤失效等问题
 - [ ] 自感知结论已进入 Portfolio / Risk / Execution / Governance 的真实控制逻辑
+- [ ] **V10.5.4 诊断验证**：ACDC 类的「REDUCE 信号反复被下游阻断」场景能自动触发 False-Hold Self-Awareness Alert，包含 `rejection_stage`、`rejection_reason`、已被拒次数、当前浮亏，在 `/autonomy` 页面可见
+- [ ] **V10.5.4 诊断验证**：Conviction Friction Tracker 在近命中状态下，`meta_state_snapshot` 中包含 `throttled_signals` 列表，展示信号 ID、已被拒次数、当前 friction_gap（阈值 - conviction）、`composite_score`、`resonance_bonus`
 
 ### 6.3 Self-Improvement
 
@@ -515,6 +733,8 @@ V11.0.1 的前端原则不是继续加页面，而是围绕“讲评台”升级
 - [ ] 策略、参数、执行模板具备统一演化状态机与证据链
 - [ ] 晋级、降级、退役建议可解释且支持回滚
 - [ ] 所有自进化动作具备 feature flag、phase rollout 与审计记录
+- [ ] `LIMITED` / `RETIRED` 新状态已通过 Alembic migration 写入 DB，历史策略记录无状态漂移
+- [ ] 前端治理管道快照中每个 strategy 均显示新状态并展示对应说明
 
 ### 6.5 Workbench 体验
 
@@ -526,10 +746,26 @@ V11.0.1 的前端原则不是继续加页面，而是围绕“讲评台”升级
 
 ## 7. 发布策略建议
 
+### 前置：数据模型与迁移要求
+
+以下变更须在进入任何 Stage **之前**完成，以防止历史数据与新实现语义不一致。
+
+| 模型 / 变更 | 类型 | 说明 |
+|---|---|---|
+| `strategy.governance_stage` 枚举 | **扩展** | 增加 `LIMITED`、`RETIRED` 两个枚举值；Alembic migration；现有行无需修改 |
+| `ImprovementCandidate` 新表 | **新建** | 持久化改进候选（type / evidence / expected_impact / status / reviewed_at）；M3 Improvement Lab 依赖此表 |
+| `StrategyGenome` 新表 | **新建** | 持久化每个策略的参数快照与进化历史；与 `strategy.id` 1:N 关联 |
+| `MetaStateSnapshot` 新表 | **新建** | 每个决策周期生成一条系统级元状态快照；需设 TTL 清理策略（建议保留 90 天） |
+| `ai_insight` / `weekly_report` | **无结构变更** | `WeeklyReportService` 输出格式扩展为结构化三段 JSON，向后兼容旧文本字段 |
+
+> 所有 migration 脚本须放在 `scripts/migrations/` 下，支持 dry-run 和回滚，在 Stage A 启动前完成。
+
 ### Stage A — Observe
 
+- 完成数据模型迁移（见上方"前置"）
 - 只计算 capital velocity、自感知、自提升候选与演化建议
 - 不改变 live 执行行为
+- 所有 V11 feature flags 注册至 `config.py` 并在 `/api/v1/autonomy/status` 可见，均设为 `false`
 - 核心目标：验证指标与解释是否可信
 
 ### Stage B — Shadow Optimization
