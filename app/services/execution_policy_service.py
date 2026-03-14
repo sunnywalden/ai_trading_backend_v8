@@ -31,7 +31,15 @@ class ExecutionPolicyService:
             keys.append(account_id.split("@", 1)[0])
         if account_id.lower().startswith("user_"):
             keys.append(account_id[5:])
-        return [key for idx, key in enumerate(keys) if key and key not in keys[:idx]]
+        unique_keys: list[str] = []
+        for key in keys:
+            if key and key not in unique_keys:
+                unique_keys.append(key)
+        return unique_keys
+
+    @staticmethod
+    def _isoformat_or_none(value: Any) -> str | None:
+        return value.isoformat() if value else None
 
     @staticmethod
     def _hard_control_state() -> dict[str, Any]:
@@ -765,7 +773,10 @@ class ExecutionPolicyService:
 
         profiles_by_symbol: dict[str, list[ExecutionPolicyProfile]] = {}
         for profile in profiles:
-            profiles_by_symbol.setdefault(str(profile.symbol), []).append(profile)
+            profiles_by_symbol.setdefault(
+                str(profile.symbol),
+                [],
+            ).append(profile)
         return profiles_by_symbol
 
     def _match_persistent_profile_for_intent(
@@ -883,12 +894,12 @@ class ExecutionPolicyService:
         timeline = [
             {
                 "phase": "ARRIVAL",
-                "timestamp": created_at.isoformat() if created_at else None,
+                "timestamp": cls._isoformat_or_none(created_at),
                 "label": "策略信号进入执行层",
             },
             {
                 "phase": "POLICY_ASSIGNED",
-                "timestamp": created_at.isoformat() if created_at else None,
+                "timestamp": cls._isoformat_or_none(created_at),
                 "label": (
                     f"{policy['algo_type']} / {policy['urgency']} " "policy assigned"
                 ),
@@ -912,7 +923,7 @@ class ExecutionPolicyService:
             timeline.append(
                 {
                     "phase": "ORDER_SUBMITTED",
-                    "timestamp": (created_at.isoformat() if created_at else None),
+                    "timestamp": cls._isoformat_or_none(created_at),
                     "label": "Parent order submitted",
                 }
             )
@@ -1047,6 +1058,42 @@ class ExecutionPolicyService:
             False,
         )
 
+    @staticmethod
+    def _feedback_source(
+        log: Any | None,
+        matched_profile: ExecutionPolicyProfile | None,
+    ) -> str:
+        if log is not None:
+            return "recent_logs"
+        if matched_profile is not None:
+            return "persistent_profile"
+        return "none"
+
+    def _build_policy_row(
+        self,
+        intent: Any,
+        log: Any | None,
+        policy: dict[str, Any],
+        pretrade: dict[str, Any],
+        matched_profile: ExecutionPolicyProfile | None,
+    ) -> dict[str, Any]:
+        return {
+            "intent_id": intent.id,
+            "intent_key": intent.intent_id,
+            "order_id": intent.order_id,
+            "symbol": intent.symbol,
+            "action": intent.action,
+            "status": intent.status,
+            "qty": self._safe_float(intent.qty),
+            "created_at": self._isoformat_or_none(intent.created_at),
+            "policy": policy,
+            "pretrade_cost": pretrade,
+            "grade": getattr(log, "grade", None),
+            "policy_source": "NATIVE_EXECUTION_POLICY",
+            "feedback_source": self._feedback_source(log, matched_profile),
+            "persistent_profile": self._serialize_persistent_profile(matched_profile),
+        }
+
     def _accumulate_policy_rows(
         self,
         intents: list,
@@ -1079,34 +1126,13 @@ class ExecutionPolicyService:
             if matched_profile is not None:
                 matched_profiles.append(matched_profile)
             rows.append(
-                {
-                    "intent_id": intent.id,
-                    "intent_key": intent.intent_id,
-                    "order_id": intent.order_id,
-                    "symbol": intent.symbol,
-                    "action": intent.action,
-                    "status": intent.status,
-                    "qty": self._safe_float(intent.qty),
-                    "created_at": (
-                        intent.created_at.isoformat() if intent.created_at else None
-                    ),
-                    "policy": policy,
-                    "pretrade_cost": pretrade,
-                    "grade": getattr(log, "grade", None),
-                    "policy_source": "NATIVE_EXECUTION_POLICY",
-                    "feedback_source": (
-                        "recent_logs"
-                        if log is not None
-                        else (
-                            "persistent_profile"
-                            if matched_profile is not None
-                            else "none"
-                        )
-                    ),
-                    "persistent_profile": self._serialize_persistent_profile(
-                        matched_profile
-                    ),
-                }
+                self._build_policy_row(
+                    intent,
+                    log,
+                    policy,
+                    pretrade,
+                    matched_profile,
+                )
             )
         return {
             "rows": rows,
@@ -1282,12 +1308,8 @@ class ExecutionPolicyService:
                 "qty": self._safe_float(intent.qty),
                 "order_id": intent.order_id,
                 "reason": intent.reason,
-                "created_at": (
-                    intent.created_at.isoformat() if intent.created_at else None
-                ),
-                "updated_at": (
-                    intent.updated_at.isoformat() if intent.updated_at else None
-                ),
+                "created_at": self._isoformat_or_none(intent.created_at),
+                "updated_at": self._isoformat_or_none(intent.updated_at),
             },
             "policy": policy,
             "pretrade_cost": pretrade,

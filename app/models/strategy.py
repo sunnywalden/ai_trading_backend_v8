@@ -20,6 +20,8 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.db import Base
 
+STRATEGY_RUNS_ID_FK = "strategy_runs.id"
+
 
 class Strategy(Base):
     __tablename__ = "strategies"
@@ -28,8 +30,16 @@ class Strategy(Base):
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     style: Mapped[Optional[str]] = mapped_column(String(64))
     description: Mapped[Optional[str]] = mapped_column(Text)
-    is_builtin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    is_builtin: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+    is_active: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+    )
     owner_id: Mapped[Optional[str]] = mapped_column(String(64))
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     default_params: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON)
@@ -99,12 +109,19 @@ class StrategyRun(Base):
     min_score: Mapped[Optional[int]] = mapped_column(Integer)
     max_results: Mapped[Optional[int]] = mapped_column(Integer)
     priority: Mapped[Optional[int]] = mapped_column(Integer)
-    status: Mapped[str] = mapped_column(String(16), nullable=False, default="QUEUED")
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="QUEUED",
+    )
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error_message: Mapped[Optional[str]] = mapped_column(Text)
     started_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
-    celery_task_id: Mapped[Optional[str]] = mapped_column(String(64), index=True)
+    celery_task_id: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        index=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
         server_default=text("CURRENT_TIMESTAMP"),
@@ -124,7 +141,10 @@ class StrategyRun(Base):
         "StrategyNotification", back_populates="run", lazy="selectin"
     )
     history: Mapped[Optional["HistoricalStrategyRun"]] = relationship(
-        "HistoricalStrategyRun", back_populates="run", uselist=False, lazy="selectin"
+        "HistoricalStrategyRun",
+        back_populates="run",
+        uselist=False,
+        lazy="selectin",
     )
 
     __table_args__ = (Index("ix_strategy_runs_status", "status"),)
@@ -134,9 +154,14 @@ class HistoricalStrategyRun(Base):
     __tablename__ = "historical_strategy_runs"
 
     strategy_run_id: Mapped[str] = mapped_column(
-        String(36), ForeignKey("strategy_runs.id", ondelete="CASCADE"), primary_key=True
+        String(36),
+        ForeignKey(STRATEGY_RUNS_ID_FK, ondelete="CASCADE"),
+        primary_key=True,
     )
-    run: Mapped["StrategyRun"] = relationship("StrategyRun", back_populates="history")
+    run: Mapped["StrategyRun"] = relationship(
+        "StrategyRun",
+        back_populates="history",
+    )
     hits: Mapped[Optional[int]] = mapped_column(Integer)
     scanned_total: Mapped[Optional[int]] = mapped_column(Integer)
     hit_rate: Mapped[Optional[float]] = mapped_column(Float)
@@ -156,10 +181,14 @@ class HistoricalStrategyRun(Base):
 class StrategyRunAsset(Base):
     __tablename__ = "strategy_run_assets"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
     strategy_run_id: Mapped[str] = mapped_column(
         String(36),
-        ForeignKey("strategy_runs.id", ondelete="CASCADE"),
+        ForeignKey(STRATEGY_RUNS_ID_FK, ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
@@ -179,20 +208,31 @@ class StrategyRunAsset(Base):
         nullable=False,
     )
 
-    run: Mapped["StrategyRun"] = relationship("StrategyRun", back_populates="assets")
+    run: Mapped["StrategyRun"] = relationship(
+        "StrategyRun",
+        back_populates="assets",
+    )
 
     __table_args__ = (
-        Index("ix_strategy_run_assets_run_symbol", "strategy_run_id", "symbol"),
+        Index(
+            "ix_strategy_run_assets_run_symbol",
+            "strategy_run_id",
+            "symbol",
+        ),
     )
 
 
 class StrategyRunLog(Base):
     __tablename__ = "strategy_run_logs"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
     strategy_run_id: Mapped[str] = mapped_column(
         String(36),
-        ForeignKey("strategy_runs.id", ondelete="CASCADE"),
+        ForeignKey(STRATEGY_RUNS_ID_FK, ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
@@ -205,7 +245,10 @@ class StrategyRunLog(Base):
         nullable=False,
     )
 
-    run: Mapped["StrategyRun"] = relationship("StrategyRun", back_populates="logs")
+    run: Mapped["StrategyRun"] = relationship(
+        "StrategyRun",
+        back_populates="logs",
+    )
 
     __table_args__ = (
         Index("ix_strategy_run_logs_run_phase", "strategy_run_id", "phase"),
@@ -215,10 +258,14 @@ class StrategyRunLog(Base):
 class StrategyNotification(Base):
     __tablename__ = "strategy_notifications"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
     strategy_run_id: Mapped[str] = mapped_column(
         String(36),
-        ForeignKey("strategy_runs.id", ondelete="CASCADE"),
+        ForeignKey(STRATEGY_RUNS_ID_FK, ondelete="CASCADE"),
         nullable=False,
         index=True,
     )
@@ -236,5 +283,9 @@ class StrategyNotification(Base):
     )
 
     __table_args__ = (
-        Index("ix_strategy_notifications_run_channel", "strategy_run_id", "channel"),
+        Index(
+            "ix_strategy_notifications_run_channel",
+            "strategy_run_id",
+            "channel",
+        ),
     )

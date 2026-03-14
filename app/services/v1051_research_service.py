@@ -25,6 +25,14 @@ class V1051ResearchService:
         return value if isinstance(value, dict) else {}
 
     @staticmethod
+    def _avg(values: list[float], digits: int = 4) -> float:
+        return round(sum(values) / len(values), digits) if values else 0.0
+
+    @staticmethod
+    def _isoformat_or_none(value: Any) -> str | None:
+        return value.isoformat() if value else None
+
+    @staticmethod
     def _normalize_origin_mode(value: Any) -> str:
         text = str(value or "").strip().upper()
         if text in {"REAL", "SYNTHETIC", "BACKFILL"}:
@@ -247,7 +255,7 @@ class V1051ResearchService:
         buckets: dict[str, list[Any]] = defaultdict(list)
         for signal in signals:
             buckets[extractor(signal)].append(signal)
-        ranked = []
+        ranked: list[dict[str, Any]] = []
         for bucket_name, bucket_signals in buckets.items():
             actual_returns = [
                 cls._safe_float(signal.actual_return)
@@ -265,7 +273,10 @@ class V1051ResearchService:
                     ),
                 }
             )
-        ranked.sort(key=lambda item: item["count"], reverse=True)
+        ranked.sort(
+            key=lambda item: cls._safe_float(item["count"]),
+            reverse=True,
+        )
         return ranked
 
     @staticmethod
@@ -275,7 +286,11 @@ class V1051ResearchService:
             keys.append(account_id.split("@", 1)[0])
         if account_id.lower().startswith("user_"):
             keys.append(account_id[5:])
-        return [key for idx, key in enumerate(keys) if key and key not in keys[:idx]]
+        unique_keys: list[str] = []
+        for key in keys:
+            if key and key not in unique_keys:
+                unique_keys.append(key)
+        return unique_keys
 
     @staticmethod
     def _coerce_winner(signal: Any) -> bool | None:
@@ -382,12 +397,8 @@ class V1051ResearchService:
             "avg_execution_slippage": avg_execution_slippage,
             "avg_expected_return": gross_return,
             "avg_actual_return": net_return,
-            "avg_pnl_pct": (
-                round(sum(pnl_pcts) / len(pnl_pcts), 4) if pnl_pcts else 0.0
-            ),
-            "avg_confidence": (
-                round(sum(confidences) / len(confidences), 4) if confidences else 0.0
-            ),
+            "avg_pnl_pct": (cls._avg(pnl_pcts) if pnl_pcts else 0.0),
+            "avg_confidence": (cls._avg(confidences) if confidences else 0.0),
             "origin_breakdown": cls._summarize_origin_breakdown(signals),
             "regime_breakdown": cls._summarize_bucket_breakdown(
                 signals,
@@ -409,7 +420,8 @@ class V1051ResearchService:
         ]
         rejection_buckets: dict[str, list[Any]] = defaultdict(list)
         for trade in ghost_trades:
-            rejection_buckets[trade.rejection_reason or "UNKNOWN"].append(trade)
+            reason = trade.rejection_reason or "UNKNOWN"
+            rejection_buckets[reason].append(trade)
 
         positive_pnls = [
             max(cls._safe_float(trade.ghost_pnl_pct), 0.0)
@@ -421,12 +433,8 @@ class V1051ResearchService:
             for trade in closed_ghosts
             if cls._safe_float(trade.ghost_pnl_pct) < 0
         ]
-        missed_alpha_pct = (
-            round(sum(positive_pnls) / len(positive_pnls), 4) if positive_pnls else 0.0
-        )
-        avoided_loss_pct = (
-            round(sum(negative_pnls) / len(negative_pnls), 4) if negative_pnls else 0.0
-        )
+        missed_alpha_pct = cls._avg(positive_pnls) if positive_pnls else 0.0
+        avoided_loss_pct = cls._avg(negative_pnls) if negative_pnls else 0.0
         return {
             "total": len(ghost_trades),
             "closed": len(closed_ghosts),
@@ -475,7 +483,7 @@ class V1051ResearchService:
                     }
                     for reason, bucket in rejection_buckets.items()
                 ),
-                key=lambda item: item["count"],
+                key=lambda item: cls._safe_float(item["count"]),
                 reverse=True,
             )[:8],
         }
@@ -601,11 +609,14 @@ class V1051ResearchService:
             (
                 {
                     "symbol": symbol,
-                    "weight": round(cls._safe_float(target_weights.get(symbol)), 4),
+                    "weight": round(
+                        cls._safe_float(target_weights.get(symbol)),
+                        4,
+                    ),
                 }
                 for symbol in target_weights
             ),
-            key=lambda item: item["weight"],
+            key=lambda item: cls._safe_float(item["weight"]),
             reverse=True,
         )
         positive_weights = [
@@ -677,43 +688,26 @@ class V1051ResearchService:
                 }
                 for symbol, values in symbol_costs.items()
             ),
-            key=lambda item: item["avg_total_is_bps"],
+            key=lambda item: cls._safe_float(item["avg_total_is_bps"]),
             reverse=True,
         )[:5]
 
         return {
             "sample_size": len(logs),
-            "avg_total_is_bps": (
-                round(sum(total_is) / len(total_is), 2) if total_is else 0.0
-            ),
-            "avg_fill_rate": (
-                round(sum(fill_rates) / len(fill_rates), 4) if fill_rates else 0.0
-            ),
-            "avg_time_to_fill_ms": (
-                round(sum(fill_times) / len(fill_times), 1) if fill_times else 0.0
-            ),
-            "avg_quality_score": (
-                round(sum(quality_scores) / len(quality_scores), 2)
-                if quality_scores
-                else 0.0
-            ),
+            "avg_total_is_bps": cls._avg(total_is, digits=2),
+            "avg_fill_rate": cls._avg(fill_rates),
+            "avg_time_to_fill_ms": cls._avg(fill_times, digits=1),
+            "avg_quality_score": cls._avg(quality_scores, digits=2),
             "worst_symbols": worst_symbols,
         }
 
-    async def get_alpha_lab_snapshot(
+    async def _load_alpha_lab_signals(
         self,
         db: AsyncSession,
-        account_id: str,
-        lookback_days: int = 90,
-    ) -> dict[str, Any]:
-        from app.models.ghost_trade import GhostTrade
-        from app.models.market_regime import MarketRegime
-        from app.models.strategy import Strategy
+        keys: list[str],
+        since: datetime,
+    ) -> list[Any]:
         from app.models.trading_signal import TradingSignal
-
-        keys = self._candidate_keys(account_id)
-        now = datetime.now()
-        since = now - timedelta(days=max(lookback_days, 7))
 
         signal_stmt = (
             select(TradingSignal)
@@ -727,32 +721,44 @@ class V1051ResearchService:
             .order_by(desc(TradingSignal.generated_at))
             .limit(800)
         )
-        signals = list((await db.execute(signal_stmt)).scalars().all())
+        return list((await db.execute(signal_stmt)).scalars().all())
+
+    async def _load_signal_strategies(
+        self,
+        db: AsyncSession,
+        signals: list[Any],
+    ) -> dict[str, Any]:
+        from app.models.strategy import Strategy
 
         strategy_ids = [signal.strategy_id for signal in signals if signal.strategy_id]
-        strategies_by_id: dict[str, Any] = {}
-        if strategy_ids:
-            strategy_stmt = select(Strategy).where(
-                Strategy.id.in_(sorted(set(strategy_ids)))
-            )
-            strategies = (await db.execute(strategy_stmt)).scalars().all()
-            strategies_by_id = {strategy.id: strategy for strategy in strategies}
+        if not strategy_ids:
+            return {}
+        strategy_stmt = select(Strategy).where(
+            Strategy.id.in_(sorted(set(strategy_ids)))
+        )
+        strategies = (await db.execute(strategy_stmt)).scalars().all()
+        return {strategy.id: strategy for strategy in strategies}
 
-        overall = self._summarize_signal_bucket(signals)
-
-        by_strategy: dict[str, list[Any]] = defaultdict(list)
+    @staticmethod
+    def _group_signals_by_strategy(signals: list[Any]) -> dict[str, list[Any]]:
+        grouped: dict[str, list[Any]] = defaultdict(list)
         for signal in signals:
-            strategy_key = signal.strategy_id or "UNASSIGNED"
-            by_strategy[strategy_key].append(signal)
+            grouped[str(signal.strategy_id or "UNASSIGNED")].append(signal)
+        return grouped
 
-        strategy_scorecards = []
+    def _build_strategy_scorecards(
+        self,
+        by_strategy: dict[str, list[Any]],
+        strategies_by_id: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        strategy_scorecards: list[dict[str, Any]] = []
         for strategy_id, bucket in by_strategy.items():
             summary = self._summarize_signal_bucket(bucket)
             strategy = strategies_by_id.get(strategy_id)
             strategy_scorecards.append(
                 {
                     "strategy_id": strategy_id,
-                    "strategy_name": strategy.name if strategy else strategy_id,
+                    "strategy_name": (strategy.name if strategy else strategy_id),
                     "style": getattr(strategy, "style", None),
                     "generated": summary["generated"],
                     "evaluated": summary["evaluated"],
@@ -778,10 +784,18 @@ class V1051ResearchService:
             key=lambda item: (item["evaluated"], item["win_rate"]),
             reverse=True,
         )
+        return strategy_scorecards
 
+    def _build_decay_monitor(
+        self,
+        by_strategy: dict[str, list[Any]],
+        strategies_by_id: dict[str, Any],
+        *,
+        now: datetime,
+    ) -> list[dict[str, Any]]:
         recent_window = now - timedelta(days=30)
         previous_window = recent_window - timedelta(days=30)
-        decay_monitor = []
+        decay_monitor: list[dict[str, Any]] = []
         for strategy_id, bucket in by_strategy.items():
             recent_bucket = [
                 signal
@@ -802,7 +816,7 @@ class V1051ResearchService:
             decay_monitor.append(
                 {
                     "strategy_id": strategy_id,
-                    "strategy_name": strategy.name if strategy else strategy_id,
+                    "strategy_name": (strategy.name if strategy else strategy_id),
                     "recent_win_rate": recent_summary["win_rate"],
                     "previous_win_rate": previous_summary["win_rate"],
                     "win_rate_delta": round(
@@ -825,6 +839,13 @@ class V1051ResearchService:
                 }
             )
         decay_monitor.sort(key=lambda item: item["win_rate_delta"])
+        return decay_monitor
+
+    async def _load_regime_tape(
+        self,
+        db: AsyncSession,
+    ) -> tuple[dict[str, Any] | None, list[Any]]:
+        from app.models.market_regime import MarketRegime
 
         regime_stmt = (
             select(MarketRegime)
@@ -833,96 +854,97 @@ class V1051ResearchService:
         )
         regimes = list((await db.execute(regime_stmt)).scalars().all())
         current_regime = regimes[0].to_dict() if regimes else None
+        return current_regime, regimes
+
+    async def _load_shadow_book_summary(
+        self,
+        db: AsyncSession,
+    ) -> dict[str, Any]:
+        from app.models.ghost_trade import GhostTrade
 
         ghost_stmt = select(GhostTrade).order_by(desc(GhostTrade.created_at)).limit(300)
         ghost_trades = list((await db.execute(ghost_stmt)).scalars().all())
-        shadow_book = self._summarize_shadow_book(ghost_trades)
+        return self._summarize_shadow_book(ghost_trades)
 
-        recent_signals = [
-            {
-                "signal_id": signal.signal_id,
-                "symbol": signal.symbol,
-                "direction": signal.direction,
-                "status": str(signal.status).split(".")[-1],
-                "strategy_name": (
-                    strategies_by_id[signal.strategy_id].name
-                    if signal.strategy_id in strategies_by_id
-                    else None
-                ),
-                "confidence": self._safe_float(signal.confidence),
-                "expected_return": self._safe_float(signal.expected_return),
-                "actual_return": (
-                    self._safe_float(signal.actual_return)
-                    if signal.actual_return is not None
-                    else None
-                ),
-                "origin_mode": self._extract_origin_mode(signal),
-                "signal_payload_version": self._safe_dict(
-                    self._safe_dict(signal.extra_metadata).get("signal_payload")
-                ).get("version"),
-                "signal_transition_count": len(
-                    self._safe_dict(signal.extra_metadata).get("signal_transitions")
-                    or []
-                ),
-                "data_quality": self._infer_data_quality(
-                    [signal],
-                    (
-                        1
-                        if signal.actual_return is not None
-                        or signal.pnl is not None
-                        or signal.pnl_pct is not None
-                        else 0
-                    ),
-                ),
-                "generated_at": (
-                    signal.generated_at.isoformat() if signal.generated_at else None
-                ),
-            }
-            for signal in signals[:20]
-        ]
-
+    def _serialize_recent_signal(
+        self,
+        signal: Any,
+        strategies_by_id: dict[str, Any],
+    ) -> dict[str, Any]:
+        strategy = strategies_by_id.get(signal.strategy_id)
+        signal_meta = self._safe_dict(signal.extra_metadata)
+        evaluated_count = int(
+            signal.actual_return is not None
+            or signal.pnl is not None
+            or signal.pnl_pct is not None
+        )
         return {
-            "lookback_days": lookback_days,
-            "summary": overall,
-            "origin_breakdown": overall["origin_breakdown"],
-            "signal_integrity": self._build_signal_integrity_summary(signals),
-            "rollout": self._build_rollout_state(),
-            "current_regime": current_regime,
-            "regime_tape": [regime.to_dict() for regime in regimes],
-            "strategy_scorecards": strategy_scorecards[:10],
-            "decay_monitor": decay_monitor[:10],
-            "shadow_book": shadow_book,
-            "recent_signals": recent_signals,
+            "signal_id": signal.signal_id,
+            "symbol": signal.symbol,
+            "direction": signal.direction,
+            "status": str(signal.status).split(".")[-1],
+            "strategy_name": strategy.name if strategy else None,
+            "confidence": self._safe_float(signal.confidence),
+            "expected_return": self._safe_float(signal.expected_return),
+            "actual_return": (
+                self._safe_float(signal.actual_return)
+                if signal.actual_return is not None
+                else None
+            ),
+            "origin_mode": self._extract_origin_mode(signal),
+            "signal_payload_version": self._safe_dict(
+                signal_meta.get("signal_payload")
+            ).get("version"),
+            "signal_transition_count": len(signal_meta.get("signal_transitions") or []),
+            "data_quality": self._infer_data_quality(
+                [signal],
+                evaluated_count,
+            ),
+            "generated_at": self._isoformat_or_none(signal.generated_at),
         }
 
-    async def get_governance_pipeline_snapshot(
+    async def _load_recent_strategies(
         self,
         db: AsyncSession,
-        _account_id: str,
-        limit: int = 20,
-    ) -> dict[str, Any]:
-        from app.models.ai_insight import ABExperiment, AIInsight
-        from app.models.strategy import Strategy, StrategyRun
+        limit: int,
+    ) -> list[Any]:
+        from app.models.strategy import Strategy
 
         strategy_stmt = (
             select(Strategy).order_by(desc(Strategy.updated_at)).limit(max(limit, 20))
         )
-        strategies = list((await db.execute(strategy_stmt)).scalars().all())
+        return list((await db.execute(strategy_stmt)).scalars().all())
+
+    async def _load_runs_by_strategy(
+        self,
+        db: AsyncSession,
+        strategies: list[Any],
+        limit: int,
+    ) -> dict[str, list[Any]]:
+        from app.models.strategy import StrategyRun
+
         strategy_ids = [strategy.id for strategy in strategies]
-
         runs_by_strategy: dict[str, list[Any]] = defaultdict(list)
-        if strategy_ids:
-            run_stmt = (
-                select(StrategyRun)
-                .where(StrategyRun.strategy_id.in_(strategy_ids))
-                .order_by(desc(StrategyRun.created_at))
-                .limit(max(limit * 8, 50))
-            )
-            runs = list((await db.execute(run_stmt)).scalars().all())
-            for run in runs:
-                runs_by_strategy[str(run.strategy_id)].append(run)
+        if not strategy_ids:
+            return runs_by_strategy
 
-        pipeline = []
+        run_stmt = (
+            select(StrategyRun)
+            .where(StrategyRun.strategy_id.in_(strategy_ids))
+            .order_by(desc(StrategyRun.created_at))
+            .limit(max(limit * 8, 50))
+        )
+        runs = list((await db.execute(run_stmt)).scalars().all())
+        for run in runs:
+            runs_by_strategy[str(run.strategy_id)].append(run)
+        return runs_by_strategy
+
+    def _build_governance_pipeline(
+        self,
+        strategies: list[Any],
+        runs_by_strategy: dict[str, list[Any]],
+    ) -> list[dict[str, Any]]:
+        pipeline: list[dict[str, Any]] = []
         for strategy in strategies:
             runs = runs_by_strategy.get(strategy.id, [])
             latest_run = runs[0] if runs else None
@@ -963,14 +985,14 @@ class V1051ResearchService:
                     "version": strategy.version,
                     "is_active": strategy.is_active,
                     "last_run_status": strategy.last_run_status,
-                    "last_run_at": (
-                        strategy.last_run_at.isoformat()
-                        if strategy.last_run_at
-                        else None
-                    ),
+                    "last_run_at": self._isoformat_or_none(strategy.last_run_at),
                     "run_count": len(runs),
                     "stage": stage,
-                    "governance_note": getattr(strategy, "governance_note", None),
+                    "governance_note": getattr(
+                        strategy,
+                        "governance_note",
+                        None,
+                    ),
                     "evidence_chain": evidence_chain,
                     "promotion_blockers": blockers,
                     "rollback_suggestion": self._build_rollback_suggestion(
@@ -986,6 +1008,7 @@ class V1051ResearchService:
                     "hits": int(getattr(history, "hits", 0) or 0),
                 }
             )
+
         stage_rank = {
             "PRODUCTION": 5,
             "CHALLENGER": 4,
@@ -996,8 +1019,136 @@ class V1051ResearchService:
             "RETIRED": 0,
         }
         pipeline.sort(
-            key=lambda item: (stage_rank.get(item["stage"], 0), item["run_count"]),
+            key=lambda item: (
+                stage_rank.get(item["stage"], 0),
+                item["run_count"],
+            ),
             reverse=True,
+        )
+        return pipeline
+
+    @staticmethod
+    def _summarize_pipeline_funnel(
+        pipeline: list[dict[str, Any]],
+    ) -> dict[str, int]:
+        return {
+            "discovery": len(pipeline),
+            "limited": sum(1 for item in pipeline if item["stage"] == "LIMITED"),
+            "retired": sum(1 for item in pipeline if item["stage"] == "RETIRED"),
+            "paper": sum(
+                1
+                for item in pipeline
+                if item["stage"] in {"PAPER", "SHADOW_LIVE", "CHALLENGER", "PRODUCTION"}
+            ),
+            "shadow_live": sum(
+                1
+                for item in pipeline
+                if item["stage"] in {"SHADOW_LIVE", "CHALLENGER", "PRODUCTION"}
+            ),
+            "challenger": sum(
+                1 for item in pipeline if item["stage"] in {"CHALLENGER", "PRODUCTION"}
+            ),
+            "production": sum(1 for item in pipeline if item["stage"] == "PRODUCTION"),
+        }
+
+    def _serialize_recent_runs(
+        self,
+        runs_by_strategy: dict[str, list[Any]],
+        strategies: list[Any],
+    ) -> list[dict[str, Any]]:
+        strategy_name_by_id = {strategy.id: strategy.name for strategy in strategies}
+        all_runs = sorted(
+            [run for bucket in runs_by_strategy.values() for run in bucket],
+            key=lambda run: run.created_at or datetime.min,
+            reverse=True,
+        )[:10]
+        recent_runs: list[dict[str, Any]] = []
+        for run in all_runs:
+            history = run.history
+            recent_runs.append(
+                {
+                    "run_id": run.id,
+                    "strategy_id": run.strategy_id,
+                    "strategy_name": strategy_name_by_id.get(
+                        run.strategy_id,
+                        run.strategy_id,
+                    ),
+                    "status": run.status,
+                    "created_at": self._isoformat_or_none(run.created_at),
+                    "finished_at": self._isoformat_or_none(run.finished_at),
+                    "hit_rate": round(
+                        self._safe_float(getattr(history, "hit_rate", 0.0)),
+                        4,
+                    ),
+                    "avg_signal_strength": round(
+                        self._safe_float(getattr(history, "avg_signal_strength", 0.0)),
+                        4,
+                    ),
+                    "hits": int(getattr(history, "hits", 0) or 0),
+                }
+            )
+        return recent_runs
+
+    async def get_alpha_lab_snapshot(
+        self,
+        db: AsyncSession,
+        account_id: str,
+        lookback_days: int = 90,
+    ) -> dict[str, Any]:
+        keys = self._candidate_keys(account_id)
+        now = datetime.now()
+        since = now - timedelta(days=max(lookback_days, 7))
+        signals = await self._load_alpha_lab_signals(db, keys, since)
+        strategies_by_id = await self._load_signal_strategies(db, signals)
+        overall = self._summarize_signal_bucket(signals)
+        by_strategy = self._group_signals_by_strategy(signals)
+        strategy_scorecards = self._build_strategy_scorecards(
+            by_strategy,
+            strategies_by_id,
+        )
+        decay_monitor = self._build_decay_monitor(
+            by_strategy,
+            strategies_by_id,
+            now=now,
+        )
+        current_regime, regimes = await self._load_regime_tape(db)
+        shadow_book = await self._load_shadow_book_summary(db)
+        recent_signals = [
+            self._serialize_recent_signal(signal, strategies_by_id)
+            for signal in signals[:20]
+        ]
+
+        return {
+            "lookback_days": lookback_days,
+            "summary": overall,
+            "origin_breakdown": overall["origin_breakdown"],
+            "signal_integrity": self._build_signal_integrity_summary(signals),
+            "rollout": self._build_rollout_state(),
+            "current_regime": current_regime,
+            "regime_tape": [regime.to_dict() for regime in regimes],
+            "strategy_scorecards": strategy_scorecards[:10],
+            "decay_monitor": decay_monitor[:10],
+            "shadow_book": shadow_book,
+            "recent_signals": recent_signals,
+        }
+
+    async def get_governance_pipeline_snapshot(
+        self,
+        db: AsyncSession,
+        _account_id: str,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        from app.models.ai_insight import ABExperiment, AIInsight
+
+        strategies = await self._load_recent_strategies(db, limit)
+        runs_by_strategy = await self._load_runs_by_strategy(
+            db,
+            strategies,
+            limit,
+        )
+        pipeline = self._build_governance_pipeline(
+            strategies,
+            runs_by_strategy,
         )
 
         experiments_stmt = (
@@ -1007,67 +1158,11 @@ class V1051ResearchService:
 
         insight_stmt = select(AIInsight).order_by(desc(AIInsight.created_at)).limit(10)
         insights = list((await db.execute(insight_stmt)).scalars().all())
-
-        recent_runs = []
-        all_runs = sorted(
-            [run for bucket in runs_by_strategy.values() for run in bucket],
-            key=lambda run: run.created_at or datetime.min,
-            reverse=True,
-        )[:10]
-        strategy_name_by_id = {strategy.id: strategy.name for strategy in strategies}
-        for run in all_runs:
-            history = run.history
-            recent_runs.append(
-                {
-                    "run_id": run.id,
-                    "strategy_id": run.strategy_id,
-                    "strategy_name": strategy_name_by_id.get(
-                        run.strategy_id, run.strategy_id
-                    ),
-                    "status": run.status,
-                    "created_at": (
-                        run.created_at.isoformat() if run.created_at else None
-                    ),
-                    "finished_at": (
-                        run.finished_at.isoformat() if run.finished_at else None
-                    ),
-                    "hit_rate": round(
-                        self._safe_float(getattr(history, "hit_rate", 0.0)), 4
-                    ),
-                    "avg_signal_strength": round(
-                        self._safe_float(getattr(history, "avg_signal_strength", 0.0)),
-                        4,
-                    ),
-                    "hits": int(getattr(history, "hits", 0) or 0),
-                }
-            )
+        recent_runs = self._serialize_recent_runs(runs_by_strategy, strategies)
 
         return {
             "rollout": self._build_rollout_state(),
-            "funnel": {
-                "discovery": len(pipeline),
-                "limited": sum(1 for item in pipeline if item["stage"] == "LIMITED"),
-                "retired": sum(1 for item in pipeline if item["stage"] == "RETIRED"),
-                "paper": sum(
-                    1
-                    for item in pipeline
-                    if item["stage"]
-                    in {"PAPER", "SHADOW_LIVE", "CHALLENGER", "PRODUCTION"}
-                ),
-                "shadow_live": sum(
-                    1
-                    for item in pipeline
-                    if item["stage"] in {"SHADOW_LIVE", "CHALLENGER", "PRODUCTION"}
-                ),
-                "challenger": sum(
-                    1
-                    for item in pipeline
-                    if item["stage"] in {"CHALLENGER", "PRODUCTION"}
-                ),
-                "production": sum(
-                    1 for item in pipeline if item["stage"] == "PRODUCTION"
-                ),
-            },
+            "funnel": self._summarize_pipeline_funnel(pipeline),
             "hard_gate_candidates": sum(
                 1 for item in pipeline if item["hard_gate_ready"]
             ),
@@ -1130,9 +1225,7 @@ class V1051ResearchService:
                     "volatility": self._safe_float(latest.expected_volatility),
                     "sharpe": self._safe_float(latest.sharpe_ratio),
                 },
-                "created_at": (
-                    latest.created_at.isoformat() if latest.created_at else None
-                ),
+                "created_at": self._isoformat_or_none(latest.created_at),
             }
 
         return {
@@ -1148,9 +1241,7 @@ class V1051ResearchService:
                         "sharpe": self._safe_float(snapshot.sharpe_ratio),
                     },
                     "target_weights": snapshot.target_weights,
-                    "created_at": (
-                        snapshot.created_at.isoformat() if snapshot.created_at else None
-                    ),
+                    "created_at": self._isoformat_or_none(snapshot.created_at),
                 }
                 for snapshot in snapshots
             ],

@@ -5,6 +5,7 @@
 市场时段守卫：所有交易型任务（信号生成、持仓扫描）仅在对应市场
 活跃时段（包含盘前/盘中/盘后）内触发；评估与优化任务不受时段限制。
 """
+
 import logging
 from datetime import datetime, timedelta
 
@@ -18,8 +19,10 @@ from app.engine.quant_trading_loop import QuantTradingLoop
 from app.models.db import SessionLocal
 from app.services.portfolio_cache_service import invalidate_portfolio_view_caches
 from app.services.regime_classifier import RegimeClassifier
-from app.services.signal_quality_config import (get_regime_adjusted_config,
-                                                get_signal_quality_config)
+from app.services.signal_quality_config import (
+    get_regime_adjusted_config,
+    get_signal_quality_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,15 +61,15 @@ async def run_daily_trading_cycle():
             loop = QuantTradingLoop(session)
 
             results = await loop.run_full_cycle(
-                account_id=account_id,
-                execute_trades=should_execute,
-                optimize=True
+                account_id=account_id, execute_trades=should_execute, optimize=True
             )
 
-            signals_gen = results['phases']['signal_generation']['total_signals_generated']
-            signals_val = results['phases']['signal_validation']['validated_signals']
-            exec_phase  = results['phases'].get('trade_execution', {})
-            executed    = exec_phase.get('executed', 0)
+            signals_gen = results["phases"]["signal_generation"][
+                "total_signals_generated"
+            ]
+            signals_val = results["phases"]["signal_validation"]["validated_signals"]
+            exec_phase = results["phases"].get("trade_execution", {})
+            executed = exec_phase.get("executed", 0)
             logger.info(
                 f"[quant_jobs] Daily trading cycle OK — "
                 f"level={level} generated={signals_gen} validated={signals_val} executed={executed}"
@@ -103,14 +106,18 @@ async def run_intraday_signal_cycle():
                 optimize=False,
             )
 
-            signals_gen = results['phases']['signal_generation']['total_signals_generated']
-            signals_val = results['phases']['signal_validation']['validated_signals']
+            signals_gen = results["phases"]["signal_generation"][
+                "total_signals_generated"
+            ]
+            signals_val = results["phases"]["signal_validation"]["validated_signals"]
             logger.info(
                 f"[quant_jobs] Intraday signal cycle OK — "
                 f"level={level} generated={signals_gen} validated={signals_val}"
             )
         except Exception as e:
-            logger.error(f"[quant_jobs] Intraday signal cycle FAILED: {e}", exc_info=True)
+            logger.error(
+                f"[quant_jobs] Intraday signal cycle FAILED: {e}", exc_info=True
+            )
 
 
 async def run_autonomous_decision_cycle():
@@ -120,28 +127,32 @@ async def run_autonomous_decision_cycle():
     市场时段守卫：若市场均关闭则跳过。
     """
     if not is_any_market_active():
-        logger.debug("[quant_jobs] run_autonomous_decision_cycle: market inactive, skip")
+        logger.debug(
+            "[quant_jobs] run_autonomous_decision_cycle: market inactive, skip"
+        )
         return
 
     from app.models.db import SessionLocal as _SL
     from app.services.autonomous_engine import autonomous_engine
+
     account_id = await _resolve_runtime_account_id()
 
     async with _SL() as session:
         try:
             results = await autonomous_engine.run_decision_cycle(
-                account_id=account_id,
-                db=session
+                account_id=account_id, db=session
             )
-            executed  = sum(1 for r in results if r.get("order_id"))
-            blocked   = sum(1 for r in results if not r.get("gate_passed"))
+            executed = sum(1 for r in results if r.get("order_id"))
+            blocked = sum(1 for r in results if not r.get("gate_passed"))
             cb_active = any(r.get("circuit_breaker") for r in results)
             logger.info(
                 f"[quant_jobs] Autonomous cycle OK — decisions={len(results)} "
                 f"executed={executed} blocked={blocked} circuit_breaker={cb_active}"
             )
         except Exception as e:
-            logger.error(f"[quant_jobs] Autonomous decision cycle FAILED: {e}", exc_info=True)
+            logger.error(
+                f"[quant_jobs] Autonomous decision cycle FAILED: {e}", exc_info=True
+            )
 
 
 async def run_performance_evaluation():
@@ -152,6 +163,7 @@ async def run_performance_evaluation():
     async with SessionLocal() as session:
         try:
             from app.engine.performance_analyzer import PerformanceAnalyzer
+
             account_id = await _resolve_runtime_account_id()
 
             analyzer = PerformanceAnalyzer(session)
@@ -165,7 +177,9 @@ async def run_performance_evaluation():
                 f"pnl=${performance.get('daily_pnl', 0):.2f}"
             )
         except Exception as e:
-            logger.error(f"[quant_jobs] Performance evaluation FAILED: {e}", exc_info=True)
+            logger.error(
+                f"[quant_jobs] Performance evaluation FAILED: {e}", exc_info=True
+            )
 
 
 async def run_adaptive_optimization():
@@ -176,19 +190,20 @@ async def run_adaptive_optimization():
     async with SessionLocal() as session:
         try:
             from app.engine.adaptive_optimizer import AdaptiveOptimizer
+
             account_id = await _resolve_runtime_account_id()
 
             optimizer = AdaptiveOptimizer(session)
-            results = await optimizer.run_daily_optimization(
-                account_id=account_id
-            )
+            results = await optimizer.run_daily_optimization(account_id=account_id)
 
             logger.info(
                 f"[quant_jobs] Adaptive optimization OK — "
                 f"opts={len(results.get('optimizations', []))}"
             )
         except Exception as e:
-            logger.error(f"[quant_jobs] Adaptive optimization FAILED: {e}", exc_info=True)
+            logger.error(
+                f"[quant_jobs] Adaptive optimization FAILED: {e}", exc_info=True
+            )
 
 
 async def run_position_exit_scan():
@@ -204,6 +219,7 @@ async def run_position_exit_scan():
     async with SessionLocal() as session:
         try:
             from app.engine.position_monitor import PositionMonitor
+
             account_id = await _resolve_runtime_account_id()
 
             monitor = PositionMonitor(session)
@@ -239,8 +255,8 @@ async def run_position_rebalance_scan():
 
     async with SessionLocal() as session:
         try:
-            from app.engine.position_rebalance_monitor import \
-                PositionRebalanceMonitor
+            from app.engine.position_rebalance_monitor import PositionRebalanceMonitor
+
             account_id = await _resolve_runtime_account_id()
 
             monitor = PositionRebalanceMonitor(session)
@@ -260,7 +276,9 @@ async def run_position_rebalance_scan():
                     )
             await invalidate_portfolio_view_caches(account_id)
         except Exception as e:
-            logger.error(f"[quant_jobs] Position rebalance scan FAILED: {e}", exc_info=True)
+            logger.error(
+                f"[quant_jobs] Position rebalance scan FAILED: {e}", exc_info=True
+            )
 
 
 async def run_position_capacity_guard():
@@ -277,15 +295,18 @@ async def run_position_capacity_guard():
 
     async with SessionLocal() as session:
         try:
-            from app.engine.position_rebalance_monitor import \
-                PositionRebalanceMonitor
+            from app.engine.position_rebalance_monitor import PositionRebalanceMonitor
 
             account_id = await _resolve_runtime_account_id()
             sq_cfg = get_signal_quality_config()
             current_regime = await RegimeClassifier.get_current_regime(session)
             regime_name = current_regime.regime if current_regime else None
             regime_cfg = get_regime_adjusted_config(regime_name) if regime_name else {}
-            max_positions = int(regime_cfg.get("MAX_CONCURRENT_POSITIONS", sq_cfg.MAX_CONCURRENT_POSITIONS))
+            max_positions = int(
+                regime_cfg.get(
+                    "MAX_CONCURRENT_POSITIONS", sq_cfg.MAX_CONCURRENT_POSITIONS
+                )
+            )
 
             monitor = PositionRebalanceMonitor(session)
             result = await monitor.enforce_position_capacity(
@@ -311,7 +332,9 @@ async def run_position_capacity_guard():
                     )
             await invalidate_portfolio_view_caches(account_id)
         except Exception as e:
-            logger.error(f"[quant_jobs] Position capacity guard FAILED: {e}", exc_info=True)
+            logger.error(
+                f"[quant_jobs] Position capacity guard FAILED: {e}", exc_info=True
+            )
 
 
 async def run_broker_order_reconcile():
@@ -324,8 +347,9 @@ async def run_broker_order_reconcile():
     """
     async with SessionLocal() as session:
         try:
-            from app.services.broker_order_sync_service import \
-                reconcile_broker_order_status
+            from app.services.broker_order_sync_service import (
+                reconcile_broker_order_status,
+            )
 
             account_id = await _resolve_runtime_account_id()
             result = await reconcile_broker_order_status(
@@ -343,7 +367,9 @@ async def run_broker_order_reconcile():
             )
             await invalidate_portfolio_view_caches(account_id)
         except Exception as e:
-            logger.error(f"[quant_jobs] Broker order reconcile FAILED: {e}", exc_info=True)
+            logger.error(
+                f"[quant_jobs] Broker order reconcile FAILED: {e}", exc_info=True
+            )
 
 
 async def run_post_trade_pipeline_job():
@@ -356,8 +382,9 @@ async def run_post_trade_pipeline_job():
     """
     async with SessionLocal() as session:
         try:
-            from app.services.post_trade_pipeline_service import \
-                post_trade_pipeline_service
+            from app.services.post_trade_pipeline_service import (
+                post_trade_pipeline_service,
+            )
 
             result = await post_trade_pipeline_service.advance_post_trade_plans(
                 db=session,
@@ -379,6 +406,54 @@ async def run_post_trade_pipeline_job():
             logger.error(f"[quant_jobs] Post-trade pipeline FAILED: {e}", exc_info=True)
 
 
+async def run_lifecycle_coherence_job():
+    """
+    双视角协同任务：
+    - 检测 broker/live 与本地 lifecycle 聚合是否失配
+    - 自动关闭 stale TradingPlan / Position
+    - 回灌 broker live 存在但本地缺失的 Position 聚合
+
+    不受市场时段限制，作为运行时真源收敛任务执行。
+    """
+    async with SessionLocal() as session:
+        try:
+            from app.services.lifecycle_coherence_service import (
+                lifecycle_coherence_service,
+            )
+
+            account_id = await lifecycle_coherence_service.resolve_account_id()
+            if not account_id:
+                logger.warning(
+                    "[quant_jobs] Lifecycle coherence skipped: account unresolved"
+                )
+                return
+
+            result = await lifecycle_coherence_service.inspect_and_reconcile(
+                session,
+                account_id=account_id,
+                auto_heal=True,
+            )
+            if (
+                result.get("stale_plans_closed", 0)
+                or result.get("stale_positions_closed", 0)
+                or result.get("hydrated_positions_created", 0)
+                or result.get("mismatch_detected")
+            ):
+                logger.info(
+                    "[quant_jobs] Lifecycle coherence OK — "
+                    f"account={result.get('account_id')} "
+                    f"source={result.get('source')} "
+                    f"mismatch={result.get('mismatch_detected')} "
+                    f"closed_plans={result.get('stale_plans_closed', 0)} "
+                    f"closed_positions={result.get('stale_positions_closed', 0)} "
+                    f"hydrated={result.get('hydrated_positions_created', 0)}"
+                )
+            await invalidate_portfolio_view_caches(account_id)
+        except Exception as e:
+            await session.rollback()
+            logger.error(f"[quant_jobs] Lifecycle coherence FAILED: {e}", exc_info=True)
+
+
 def register_quant_loop_jobs(scheduler: AsyncIOScheduler):
     """
     注册量化交易闭环定时任务，挂载到 APScheduler。
@@ -392,7 +467,8 @@ def register_quant_loop_jobs(scheduler: AsyncIOScheduler):
       ⑥ interval/60m— 持仓再平衡扫描（REDUCE/SELL建议转信号，市场时段守卫）
     ⑦ interval/15m— 超并发持仓主动降载（交易时段守卫）
     ⑧ interval/Nm — 券商订单对账（手动撤单/成交补偿同步，不受时段限制）
-    ⑨ interval/5m — 交易后流水线推进（S12→S16，不受时段限制）
+    ⑨ interval/5m — 生命周期双视角协同（不受时段限制）
+    ⑩ interval/5m — 交易后流水线推进（S12→S16，不受时段限制）
     """
 
     # ① 每日交易周期 — 早上 8:00
@@ -490,7 +566,17 @@ def register_quant_loop_jobs(scheduler: AsyncIOScheduler):
         replace_existing=True,
     )
 
-    # ⑨ 交易后 Pipeline 推进 — 每 5 分钟（S12→S13→S14→S15→S16，不受时段限制）
+    # ⑨ 生命周期双视角协同 — 每 5 分钟（不受时段限制）
+    scheduler.add_job(
+        run_lifecycle_coherence_job,
+        trigger="interval",
+        minutes=5,
+        id="lifecycle_coherence",
+        name="Lifecycle Coherence Auto-Heal (every 5m)",
+        replace_existing=True,
+    )
+
+    # ⑩ 交易后 Pipeline 推进 — 每 5 分钟（S12→S13→S14→S15→S16，不受时段限制）
     scheduler.add_job(
         run_post_trade_pipeline_job,
         trigger="interval",
@@ -501,13 +587,32 @@ def register_quant_loop_jobs(scheduler: AsyncIOScheduler):
     )
 
     logger.info("✓ Quantitative Trading Loop jobs registered:")
-    logger.info("  ① Daily Trading Cycle:       08:00  (Signal Gen + Execute by Autonomy Level)")
-    logger.info("  ①+ Intraday Signal Cycle:    every 30m (all active markets, market guard)")
-    logger.info("  ② Autonomous Decision Cycle: every 30m  (market guard, core auto-trade driver)")
+    logger.info(
+        "  ① Daily Trading Cycle:       08:00  (Signal Gen + Execute by Autonomy Level)"
+    )
+    logger.info(
+        "  ①+ Intraday Signal Cycle:    every 30m (all active markets, market guard)"
+    )
+    logger.info(
+        "  ② Autonomous Decision Cycle: every 30m  (market guard, core auto-trade driver)"
+    )
     logger.info("  ③ Performance Evaluation:    18:00  (Post-Market)")
     logger.info("  ④ Adaptive Optimization:     22:00  (Daily)")
-    logger.info(f" ⑤ Position Exit Scan:        every {settings.POSITION_MONITOR_INTERVAL_MINUTES}m  (market guard)")
-    logger.info("  ⑥ Position Rebalance Scan:   every 60m  (REDUCE/SELL → Signal, market guard)")
-    logger.info(f"  ⑦ Position Capacity Guard:   every {settings.POSITION_CAPACITY_GUARD_INTERVAL_MINUTES}m  (enforce SQ_MAX_CONCURRENT_POSITIONS)")
-    logger.info(f"  ⑧ Broker Order Reconcile:    every {settings.BROKER_ORDER_SYNC_INTERVAL_MINUTES}m  (manual-cancel sync)")
-    logger.info("  ⑨ Post-Trade Pipeline:       every 5m   (S12→S13→S14→S15→S16 auto-advance)")
+    logger.info(
+        f" ⑤ Position Exit Scan:        every {settings.POSITION_MONITOR_INTERVAL_MINUTES}m  (market guard)"
+    )
+    logger.info(
+        "  ⑥ Position Rebalance Scan:   every 60m  (REDUCE/SELL → Signal, market guard)"
+    )
+    logger.info(
+        f"  ⑦ Position Capacity Guard:   every {settings.POSITION_CAPACITY_GUARD_INTERVAL_MINUTES}m  (enforce SQ_MAX_CONCURRENT_POSITIONS)"
+    )
+    logger.info(
+        f"  ⑧ Broker Order Reconcile:    every {settings.BROKER_ORDER_SYNC_INTERVAL_MINUTES}m  (manual-cancel sync)"
+    )
+    logger.info(
+        "  ⑨ Lifecycle Coherence:       every 5m   (broker/live ↔ lifecycle auto-heal)"
+    )
+    logger.info(
+        "  ⑩ Post-Trade Pipeline:       every 5m   (S12→S13→S14→S15→S16 auto-advance)"
+    )

@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
+from redis.exceptions import RedisError
+
 logger = logging.getLogger(__name__)
 
 _KEY_PREFIX = "cv_friction"
@@ -79,9 +81,14 @@ class ConvictionFrictionTracker:
     def __init__(self, redis_client=None) -> None:
         self._redis = redis_client
 
+    def set_redis_client(self, redis_client) -> None:
+        self._redis = redis_client
+
     @staticmethod
     def _build_key(symbol: str, direction: str, regime: str) -> str:
-        return f"{_KEY_PREFIX}:{symbol.upper()}:{direction.upper()}:{regime.upper()}"
+        return (
+            f"{_KEY_PREFIX}:{symbol.upper()}:{direction.upper()}:" f"{regime.upper()}"
+        )
 
     async def record_rejection(
         self,
@@ -121,8 +128,11 @@ class ConvictionFrictionTracker:
                 current_count,
             )
             return current_count
-        except Exception as exc:
-            logger.warning("[FrictionTracker] record_rejection failed: %s", exc)
+        except (RedisError, RuntimeError, TypeError, ValueError) as exc:
+            logger.warning(
+                "[FrictionTracker] record_rejection failed: %s",
+                exc,
+            )
             return 0
 
     async def record_pass(
@@ -144,7 +154,7 @@ class ConvictionFrictionTracker:
                 direction,
                 regime,
             )
-        except Exception as exc:
+        except (RedisError, RuntimeError, TypeError, ValueError) as exc:
             logger.warning("[FrictionTracker] record_pass failed: %s", exc)
 
     async def record_soft_relief_used(
@@ -165,8 +175,11 @@ class ConvictionFrictionTracker:
             pipe.hset(key, "soft_relief_last_used_at", now_iso)
             pipe.expire(key, _TTL_SECONDS)
             await pipe.execute()
-        except Exception as exc:
-            logger.warning("[FrictionTracker] record_soft_relief_used failed: %s", exc)
+        except (RedisError, RuntimeError, TypeError, ValueError) as exc:
+            logger.warning(
+                "[FrictionTracker] record_soft_relief_used failed: %s",
+                exc,
+            )
 
     async def get_friction_state(
         self,
@@ -203,8 +216,11 @@ class ConvictionFrictionTracker:
                 composite_score=float(data.get(b"composite_score", 0.0)),
                 resonance_bonus=float(data.get(b"resonance_bonus", 0.0)),
             )
-        except Exception as exc:
-            logger.warning("[FrictionTracker] get_friction_state failed: %s", exc)
+        except (RedisError, RuntimeError, TypeError, ValueError) as exc:
+            logger.warning(
+                "[FrictionTracker] get_friction_state failed: %s",
+                exc,
+            )
             return None
 
     async def can_use_soft_relief(
@@ -235,7 +251,7 @@ class ConvictionFrictionTracker:
         try:
             keys = await self._collect_keys()
             return await self._load_states(keys, min_rejection_count)
-        except Exception as exc:
+        except (RedisError, RuntimeError, TypeError, ValueError) as exc:
             logger.warning(
                 "[FrictionTracker] get_all_throttled_signals failed: %s", exc
             )
@@ -268,7 +284,12 @@ class ConvictionFrictionTracker:
             parts = raw_key.split(":")
             if len(parts) < 4:
                 continue
-            _, symbol, direction, regime = (parts[0], parts[1], parts[2], parts[3])
+            _, symbol, direction, regime = (
+                parts[0],
+                parts[1],
+                parts[2],
+                parts[3],
+            )
             state = await self.get_friction_state(symbol, direction, regime)
             if state and state.rejection_count >= min_rejection_count:
                 results.append(state)
@@ -281,5 +302,5 @@ conviction_friction_tracker = ConvictionFrictionTracker(redis_client=None)
 
 def init_conviction_friction_tracker(redis_client) -> None:
     """在 app 启动时注入 Redis 客户端。"""
-    conviction_friction_tracker._redis = redis_client  # noqa: SLF001
+    conviction_friction_tracker.set_redis_client(redis_client)
     logger.info("[FrictionTracker] Redis client injected")

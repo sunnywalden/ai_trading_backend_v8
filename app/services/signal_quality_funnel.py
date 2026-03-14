@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import date
 from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -128,6 +127,177 @@ class SignalQualityFunnel:
             # 记录拒绝原因，可选创建 GhostTrade
     """
 
+    @staticmethod
+    def _is_closing_signal(signal: SignalFunnelInput) -> bool:
+        return str(signal.signal_type or "ENTRY").upper() in {
+            "REDUCE",
+            "EXIT",
+            "STOP_LOSS_EXIT",
+            "TAKE_PROFIT_EXIT",
+            "FORCE_EXIT",
+        }
+
+    @staticmethod
+    def _apply_quality_profile(
+        decision: FunnelDecision,
+        quality_profile: SignalQualityProfile,
+    ) -> None:
+        decision.conviction = quality_profile.conviction
+        decision.signal_quality_tier = quality_profile.tier
+        decision.signal_quality_score = quality_profile.score
+        decision.quota_exempt = quality_profile.quota_exempt
+
+    async def _reject_decision(
+        self,
+        decision: FunnelDecision,
+        signal: SignalFunnelInput,
+        db: AsyncSession,
+        *,
+        layer: int,
+        reject: tuple[str, str],
+        create_ghost: bool = False,
+    ) -> FunnelDecision:
+        decision.rejected_at_layer = layer
+        decision.rejection_reason = reject[0]
+        decision.rejection_detail = reject[1]
+        await self._write_audit(decision, signal, db)
+        if create_ghost:
+            await self._create_ghost_trade(decision, signal, db)
+        return decision
+
+    async def _run_pre_layers(
+        self,
+        *,
+        signal: SignalFunnelInput,
+        db: AsyncSession,
+        cfg: SignalQualityConfig,
+        regime_cfg: dict,
+        decision: FunnelDecision,
+        quality_profile: SignalQualityProfile,
+        current_positions_count: int,
+        daily_signals_executed: int,
+        arbiter_approved: bool,
+        is_closing: bool,
+    ) -> FunnelDecision | None:
+        layer_checks = [
+            (0, self._layer0_universe(signal, cfg), False),
+            (1, self._layer1_regime(signal, regime_cfg), False),
+            (
+                2,
+                self._layer2_portfolio(
+                    signal,
+                    regime_cfg,
+                    current_positions_count,
+                    daily_signals_executed,
+                    cfg=cfg,
+                    is_closing=is_closing,
+                    quality_profile=quality_profile,
+                    arbiter_approved=arbiter_approved,
+                ),
+                False,
+            ),
+            (3, self._layer3_resonance(signal, regime_cfg), True),
+        ]
+        for layer, reject, create_ghost in layer_checks:
+            if reject:
+                return await self._reject_decision(
+                    decision,
+                    signal,
+                    db,
+                    layer=layer,
+                    reject=reject,
+                    create_ghost=create_ghost,
+                )
+        return None
+
+    async def _handle_layer4_rejection(
+        self,
+        *,
+        signal: SignalFunnelInput,
+        db: AsyncSession,
+        decision: FunnelDecision,
+        conviction: ConvictionComponents,
+        reject: tuple[str, str],
+        threshold: int,
+        is_closing: bool,
+    ) -> FunnelDecision:
+        if (
+            not is_closing
+            and getattr(settings, "CAPITAL_VELOCITY_V1101_ENABLED", False)
+            and reject[0] == RejectionReason.LOW_CONVICTION
+        ):
+            from app.services.conviction_friction_tracker import (
+                conviction_friction_tracker,
+            )
+
+            await conviction_friction_tracker.record_rejection(
+                symbol=signal.symbol,
+                direction=signal.direction,
+                regime=signal.regime,
+                conviction=conviction.conviction_score,
+                threshold=threshold,
+                composite_score=signal.composite_score * 100,
+                resonance_bonus=conviction.resonance_bonus,
+            )
+        return await self._reject_decision(
+            decision,
+            signal,
+            db,
+            layer=4,
+            reject=reject,
+            create_ghost=True,
+        )
+
+    async def _handle_layer4_pass(
+        self,
+        *,
+        signal: SignalFunnelInput,
+        db: AsyncSession,
+        decision: FunnelDecision,
+        quality_profile: SignalQualityProfile,
+        conviction: ConvictionComponents,
+        threshold: int,
+        effective_threshold: int,
+        soft_threshold_applied: bool,
+        is_closing: bool,
+    ) -> FunnelDecision:
+        if not is_closing and getattr(
+            settings,
+            "CAPITAL_VELOCITY_V1101_ENABLED",
+            False,
+        ):
+            from app.services.conviction_friction_tracker import (
+                conviction_friction_tracker,
+            )
+
+            await conviction_friction_tracker.record_pass(
+                symbol=signal.symbol,
+                direction=signal.direction,
+                regime=signal.regime,
+            )
+            if soft_threshold_applied:
+                logger.info(
+                    "[SignalFunnel] ✅ Layer4 SOFT_THRESHOLD_APPLIED %s %s "
+                    "conviction=%.1f effective_threshold=%d (base=%d)",
+                    signal.symbol,
+                    signal.direction,
+                    conviction.conviction_score,
+                    effective_threshold,
+                    threshold,
+                )
+
+        decision.passed = True
+        await self._write_audit(decision, signal, db)
+        logger.info(
+            "[SignalFunnel] ✅ PASSED %s %s@%s conviction=%.1f quality=%s",
+            signal.symbol,
+            signal.direction,
+            signal.regime,
+            conviction.conviction_score,
+            quality_profile.tier,
+        )
+        return decision
+
     async def evaluate(
         self,
         signal: SignalFunnelInput,
@@ -161,63 +331,28 @@ class SignalQualityFunnel:
             concurrent_positions=current_positions_count,
             daily_signals_used=daily_signals_executed,
         )
-        is_closing = str(signal.signal_type or "ENTRY").upper() in {
-            "REDUCE",
-            "EXIT",
-            "STOP_LOSS_EXIT",
-            "TAKE_PROFIT_EXIT",
-            "FORCE_EXIT",
-        }
-        quality_profile = self.preview_quality(signal, cfg=cfg, regime_cfg=regime_cfg)
-        decision.conviction = quality_profile.conviction
-        decision.signal_quality_tier = quality_profile.tier
-        decision.signal_quality_score = quality_profile.score
-        decision.quota_exempt = quality_profile.quota_exempt
-
-        # ── Layer 0: 宇宙过滤 ───────────────────────────────────────────────
-        reject = self._layer0_universe(signal, cfg)
-        if reject:
-            decision.rejected_at_layer = 0
-            decision.rejection_reason = reject[0]
-            decision.rejection_detail = reject[1]
-            await self._write_audit(decision, signal, cfg, db)
-            return decision
-
-        # ── Layer 1: 体制门控 ────────────────────────────────────────────────
-        reject = self._layer1_regime(signal, regime_cfg)
-        if reject:
-            decision.rejected_at_layer = 1
-            decision.rejection_reason = reject[0]
-            decision.rejection_detail = reject[1]
-            await self._write_audit(decision, signal, cfg, db)
-            return decision
-
-        # ── Layer 2: 组合预检 ────────────────────────────────────────────────
-        reject = self._layer2_portfolio(
+        is_closing = self._is_closing_signal(signal)
+        quality_profile = self.preview_quality(
             signal,
-            regime_cfg,
-            current_positions_count,
-            daily_signals_executed,
-            is_closing=is_closing,
-            quality_profile=quality_profile,
-            arbiter_approved=arbiter_approved,
+            cfg=cfg,
+            regime_cfg=regime_cfg,
         )
-        if reject:
-            decision.rejected_at_layer = 2
-            decision.rejection_reason = reject[0]
-            decision.rejection_detail = reject[1]
-            await self._write_audit(decision, signal, cfg, db)
-            return decision
+        self._apply_quality_profile(decision, quality_profile)
 
-        # ── Layer 3: 多维共振验证 ────────────────────────────────────────────
-        reject = self._layer3_resonance(signal, regime_cfg)
-        if reject:
-            decision.rejected_at_layer = 3
-            decision.rejection_reason = reject[0]
-            decision.rejection_detail = reject[1]
-            await self._write_audit(decision, signal, cfg, db)
-            await self._create_ghost_trade(decision, signal, cfg, db)
-            return decision
+        pre_layer_decision = await self._run_pre_layers(
+            signal=signal,
+            db=db,
+            cfg=cfg,
+            regime_cfg=regime_cfg,
+            decision=decision,
+            quality_profile=quality_profile,
+            current_positions_count=current_positions_count,
+            daily_signals_executed=daily_signals_executed,
+            arbiter_approved=arbiter_approved,
+            is_closing=is_closing,
+        )
+        if pre_layer_decision is not None:
+            return pre_layer_decision
 
         # ── Layer 4: 置信度校准门 ─────────────────────────────────────────────
         conviction = quality_profile.conviction
@@ -233,7 +368,7 @@ class SignalQualityFunnel:
         if fast_path_bypass:
             decision.passed = True
             decision.rejection_detail = "Layer4 bypassed (is_closing fast-path)"
-            await self._write_audit(decision, signal, cfg, db)
+            await self._write_audit(decision, signal, db)
             logger.debug(
                 "[SignalFunnel] Layer4 fast-path bypass %s %s type=%s",
                 signal.symbol,
@@ -265,64 +400,27 @@ class SignalQualityFunnel:
 
         reject = self._layer4_conviction(conviction, cfg, effective_threshold)
         if reject:
-            # V11: 记录摩擦状态（仅 LOW_CONVICTION 触发，其他拒绝原因不计入摩擦）
-            if (
-                not is_closing
-                and getattr(settings, "CAPITAL_VELOCITY_V1101_ENABLED", False)
-                and reject[0] == RejectionReason.LOW_CONVICTION
-            ):
-                from app.services.conviction_friction_tracker import (
-                    conviction_friction_tracker,
-                )
-
-                await conviction_friction_tracker.record_rejection(
-                    symbol=signal.symbol,
-                    direction=signal.direction,
-                    regime=signal.regime,
-                    conviction=conviction.conviction_score,
-                    threshold=threshold,
-                    composite_score=signal.composite_score * 100,
-                    resonance_bonus=conviction.resonance_bonus,
-                )
-            decision.rejected_at_layer = 4
-            decision.rejection_reason = reject[0]
-            decision.rejection_detail = reject[1]
-            await self._write_audit(decision, signal, cfg, db)
-            await self._create_ghost_trade(decision, signal, cfg, db)
-            return decision
-
-        # 通过 Layer 4：重置摩擦计数
-        if not is_closing and getattr(
-            settings, "CAPITAL_VELOCITY_V1101_ENABLED", False
-        ):
-            from app.services.conviction_friction_tracker import (
-                conviction_friction_tracker,
+            return await self._handle_layer4_rejection(
+                signal=signal,
+                db=db,
+                decision=decision,
+                conviction=conviction,
+                reject=reject,
+                threshold=threshold,
+                is_closing=is_closing,
             )
 
-            await conviction_friction_tracker.record_pass(
-                symbol=signal.symbol,
-                direction=signal.direction,
-                regime=signal.regime,
-            )
-            if soft_threshold_applied:
-                logger.info(
-                    "[SignalFunnel] ✅ Layer4 SOFT_THRESHOLD_APPLIED %s %s "
-                    "conviction=%.1f effective_threshold=%d (base=%d)",
-                    signal.symbol,
-                    signal.direction,
-                    conviction.conviction_score,
-                    effective_threshold,
-                    threshold,
-                )
-
-        # ── 通过所有层 ──────────────────────────────────────────────────────
-        decision.passed = True
-        await self._write_audit(decision, signal, cfg, db)
-        logger.info(
-            f"[SignalFunnel] ✅ PASSED {signal.symbol} {signal.direction}@{signal.regime} "
-            f"conviction={conviction.conviction_score:.1f} quality={quality_profile.tier}"
+        return await self._handle_layer4_pass(
+            signal=signal,
+            db=db,
+            decision=decision,
+            quality_profile=quality_profile,
+            conviction=conviction,
+            threshold=threshold,
+            effective_threshold=effective_threshold,
+            soft_threshold_applied=soft_threshold_applied,
+            is_closing=is_closing,
         )
-        return decision
 
     def preview_quality(
         self,
@@ -339,7 +437,7 @@ class SignalQualityFunnel:
         score = round(conviction.conviction_score, 2)
         quota_exempt = tier == SignalQualityTier.ELITE
         logger.debug(
-            "[SignalFunnel] preview quality %s %s -> %s score=%.1f quota_exempt=%s",
+            "[SignalFunnel] preview quality %s %s -> %s " "score=%.1f quota_exempt=%s",
             signal.symbol,
             signal.direction,
             tier,
@@ -353,12 +451,18 @@ class SignalQualityFunnel:
             conviction=conviction,
         )
 
-    def _compute_conviction(self, signal: SignalFunnelInput) -> ConvictionComponents:
+    def _compute_conviction(
+        self,
+        signal: SignalFunnelInput,
+    ) -> ConvictionComponents:
         return signal_conviction_scorer.compute(
             symbol=signal.symbol,
             signal_direction=signal.direction,
             regime=signal.regime,
-            composite_score=self._normalize_ratio(signal.composite_score, default=0.5),
+            composite_score=self._normalize_ratio(
+                signal.composite_score,
+                default=0.5,
+            ),
             aligned_count=signal.aligned_count,
             aligned_dims=signal.aligned_dims,
             opposing_dims=signal.opposing_dims,
@@ -366,13 +470,20 @@ class SignalQualityFunnel:
             tech_direction=signal.tech_direction,
             fundamental_direction=signal.fundamental_direction,
             macro_score=self._normalize_ratio(signal.macro_score, default=0.5),
-            options_score=self._normalize_ratio(signal.options_score, default=0.5),
+            options_score=self._normalize_ratio(
+                signal.options_score,
+                default=0.5,
+            ),
             historical_ic=self._normalize_optional_ratio(signal.historical_ic),
             timing_quality=self._normalize_optional_ratio(signal.timing_quality),
         )
 
     @staticmethod
-    def _normalize_ratio(value: Optional[float], *, default: float = 0.0) -> float:
+    def _normalize_ratio(
+        value: Optional[float],
+        *,
+        default: float = 0.0,
+    ) -> float:
         if value is None:
             return default
         val = float(value)
@@ -381,7 +492,10 @@ class SignalQualityFunnel:
         return max(0.0, min(1.0, val))
 
     @classmethod
-    def _normalize_optional_ratio(cls, value: Optional[float]) -> Optional[float]:
+    def _normalize_optional_ratio(
+        cls,
+        value: Optional[float],
+    ) -> Optional[float]:
         if value is None:
             return None
         return cls._normalize_ratio(value)
@@ -419,12 +533,18 @@ class SignalQualityFunnel:
         if signal.adv_usd is not None and signal.adv_usd < cfg.MIN_ADV_THRESHOLD:
             return (
                 RejectionReason.LOW_LIQUIDITY,
-                f"ADV ${signal.adv_usd:,.0f} < 最低要求 ${cfg.MIN_ADV_THRESHOLD:,.0f}",
+                (
+                    f"ADV ${signal.adv_usd:,.0f} < 最低要求 "
+                    f"${cfg.MIN_ADV_THRESHOLD:,.0f}"
+                ),
             )
         if signal.market_cap is not None and signal.market_cap < cfg.MIN_MARKET_CAP:
             return (
                 RejectionReason.LOW_LIQUIDITY,
-                f"市值 ${signal.market_cap/1e9:.2f}B < 最低要求 ${cfg.MIN_MARKET_CAP/1e9:.2f}B",
+                (
+                    f"市值 ${signal.market_cap/1e9:.2f}B < 最低要求 "
+                    f"${cfg.MIN_MARKET_CAP/1e9:.2f}B"
+                ),
             )
         return None
 
@@ -460,6 +580,7 @@ class SignalQualityFunnel:
         regime_cfg: dict,
         current_positions: int,
         daily_executed: int,
+        cfg: SignalQualityConfig,
         is_closing: bool = False,
         quality_profile: Optional[SignalQualityProfile] = None,
         arbiter_approved: bool = False,
@@ -474,14 +595,10 @@ class SignalQualityFunnel:
         if current_positions >= max_pos:
             # V10.5.2: 若席位竞争仲裁已通过该信号，则跳过硬拒绝，允许继续评估后续层级。
             # 若仲裁功能关闭或该信号未被仲裁覆盖，维持原有硬拒逻辑。
-            from app.services.signal_quality_config import (
-                get_signal_quality_config as _get_cfg,
-            )
-
-            _cfg = _get_cfg()
-            if _cfg.CAPACITY_REPLACEMENT_ENABLED and arbiter_approved:
+            if cfg.CAPACITY_REPLACEMENT_ENABLED and arbiter_approved:
                 logger.debug(
-                    "[SignalFunnel] Layer2 capacity soft-pass: %s approved by CapacityArbiter "
+                    "[SignalFunnel] Layer2 capacity soft-pass: %s "
+                    "approved by CapacityArbiter "
                     "(positions=%d, max=%d)",
                     signal.symbol,
                     current_positions,
@@ -496,7 +613,8 @@ class SignalQualityFunnel:
         if daily_executed >= max_daily:
             if quality_profile and quality_profile.quota_exempt:
                 logger.info(
-                    "[SignalFunnel] ELITE signal bypassing daily quota: %s score=%.1f used=%s/%s",
+                    "[SignalFunnel] ELITE signal bypassing daily quota: "
+                    "%s score=%.1f used=%s/%s",
                     signal.symbol,
                     quality_profile.score,
                     daily_executed,
@@ -513,7 +631,11 @@ class SignalQualityFunnel:
         ):
             return (
                 RejectionReason.HIGH_CORRELATION,
-                f"与现有持仓最大相关系数 {signal.max_correlation_with_existing:.2f} ≥ {max_corr:.2f}",
+                (
+                    "与现有持仓最大相关系数 "
+                    f"{signal.max_correlation_with_existing:.2f} ≥ "
+                    f"{max_corr:.2f}"
+                ),
             )
         return None
 
@@ -540,7 +662,11 @@ class SignalQualityFunnel:
         ):
             return (
                 RejectionReason.ANTI_RESONANCE_KILL,
-                f"技术面(direction={signal.tech_direction})与基本面(direction={signal.fundamental_direction})方向对立",
+                (
+                    "技术面"
+                    f"(direction={signal.tech_direction})与基本面"
+                    f"(direction={signal.fundamental_direction})方向对立"
+                ),
             )
 
         # CRISIS 做多一票否决
@@ -591,12 +717,12 @@ class SignalQualityFunnel:
                     "信号共振元数据不完整，无法可靠评估 Layer 3"
                 ),
             )
-
         if signal.aligned_count <= 0 and list_total > 0:
             return (
                 RejectionReason.MISSING_RESONANCE_METADATA,
                 (
-                    "aligned_dims/opposing_dims/neutral_dims 已存在，但 aligned_count 缺失或为 0；"
+                    "aligned_dims/opposing_dims/neutral_dims 已存在，"
+                    "但 aligned_count 缺失或为 0；"
                     "信号共振元数据不一致，无法可靠评估 Layer 3"
                 ),
             )
@@ -640,9 +766,21 @@ class SignalQualityFunnel:
             min_rounds = getattr(settings, "CONVICTION_FRICTION_MIN_ROUNDS", 3)
             composite_floor = int(getattr(cfg, "CONVICTION_SOFT_COMPOSITE_FLOOR", 96))
             resonance_floor = int(getattr(cfg, "CONVICTION_SOFT_RESONANCE_FLOOR", 80))
-            max_per_cycle = getattr(settings, "CONVICTION_SOFT_RELIEF_MAX_PER_CYCLE", 1)
-            soft_floor_bull = getattr(settings, "CONVICTION_SOFT_FLOOR_BULL", 88)
-            soft_floor_default = getattr(settings, "CONVICTION_SOFT_FLOOR_DEFAULT", 90)
+            max_per_cycle = getattr(
+                settings,
+                "CONVICTION_SOFT_RELIEF_MAX_PER_CYCLE",
+                1,
+            )
+            soft_floor_bull = getattr(
+                settings,
+                "CONVICTION_SOFT_FLOOR_BULL",
+                88,
+            )
+            soft_floor_default = getattr(
+                settings,
+                "CONVICTION_SOFT_FLOOR_DEFAULT",
+                90,
+            )
             relief_max = getattr(settings, "CONVICTION_SOFT_RELIEF_MAX", 3)
 
             friction_delta = getattr(settings, "CONVICTION_FRICTION_DELTA", 3)
@@ -720,7 +858,7 @@ class SignalQualityFunnel:
                 state.rejection_count,
             )
             return effective, True
-        except Exception as exc:
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
             logger.warning("[SoftThreshold] computation failed: %s", exc)
             return base_threshold, False
 
@@ -757,7 +895,8 @@ class SignalQualityFunnel:
                 RejectionReason.LOW_CALIBRATED_FLOOR,
                 (
                     f"校准下界 {conviction.calibrated_lower_bound:.1f} < "
-                    f"最低要求 {cfg.SIGNAL_CONFIDENCE_FLOOR}（conviction={conviction.conviction_score:.1f}）"
+                    f"最低要求 {cfg.SIGNAL_CONFIDENCE_FLOOR}"
+                    f"（conviction={conviction.conviction_score:.1f}）"
                 ),
             )
 
@@ -779,14 +918,11 @@ class SignalQualityFunnel:
 
         return None
 
-    # ──────────────────────────────────────────────────────────────────────────
     # 写入审计日志
-    # ──────────────────────────────────────────────────────────────────────────
     async def _write_audit(
         self,
         decision: FunnelDecision,
         signal: SignalFunnelInput,
-        cfg: SignalQualityConfig,
         db: AsyncSession,
     ) -> None:
         """将漏斗评估结果写入 SignalQualityAuditLog。"""
@@ -820,25 +956,27 @@ class SignalQualityFunnel:
                 daily_signals_used=decision.daily_signals_used,
                 generated_at=signal.generated_at,
             )
-        except Exception as e:
-            logger.warning(f"[SignalFunnel] 审计日志写入失败（不影响主流程）: {e}")
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            logger.warning(
+                "[SignalFunnel] 审计日志写入失败（不影响主流程）: %s",
+                exc,
+            )
 
-    # ──────────────────────────────────────────────────────────────────────────
     # 创建幽灵交易（被 Layer 3/4 拒绝时）
-    # ──────────────────────────────────────────────────────────────────────────
     async def _create_ghost_trade(
         self,
         decision: FunnelDecision,
         signal: SignalFunnelInput,
-        cfg: SignalQualityConfig,
         db: AsyncSession,
     ) -> None:
         """为被拒绝的信号创建幽灵交易虚拟跟踪。"""
+        cfg = get_signal_quality_config()
         if not cfg.GHOST_TRADE_ENABLED:
             return
         if decision.rejection_reason == RejectionReason.MISSING_RESONANCE_METADATA:
             logger.info(
-                "[SignalFunnel] Skip ghost trade for %s because rejection is data-quality related",
+                "[SignalFunnel] Skip ghost trade for %s because rejection "
+                "is data-quality related",
                 signal.symbol,
             )
             return
@@ -859,8 +997,11 @@ class SignalQualityFunnel:
                 ),
                 max_tracking_days=cfg.GHOST_TRADE_MAX_DAYS,
             )
-        except Exception as e:
-            logger.warning(f"[SignalFunnel] 幽灵交易创建失败（不影响主流程）: {e}")
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            logger.warning(
+                "[SignalFunnel] 幽灵交易创建失败（不影响主流程）: %s",
+                exc,
+            )
 
 
 # ── 模块级单例 ────────────────────────────────────────────────────────────────

@@ -12,7 +12,8 @@
 
 数据流：
   - throttled_signals 来自 ConvictionFrictionTracker (Redis SCAN)
-  - false_hold_alerts 来自 position_rebalance_monitor emit_false_hold_alert (Redis keys)
+    - false_hold_alerts 来自 position_rebalance_monitor
+        emit_false_hold_alert (Redis keys)
   - capital_state     来自 GrossExposureAllocator.build_runtime_summary()
 
 持久化：写入 Redis（TTL 1h）供快速读取，后台任务可选写入 MetaStateSnapshot 表（M2完整版）
@@ -27,7 +28,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from uuid import uuid4
 
+from redis.exceptions import RedisError
 from sqlalchemy import delete, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -80,6 +83,9 @@ class MetaStateSnapshotService:
     def __init__(self, redis_client=None) -> None:
         self._redis = redis_client
 
+    def set_redis_client(self, redis_client) -> None:
+        self._redis = redis_client
+
     async def build_snapshot(
         self,
         *,
@@ -101,6 +107,8 @@ class MetaStateSnapshotService:
         throttled = await self._gather_throttled_signals()
         false_holds = await self._gather_false_hold_alerts(account_id)
         capital = self._compute_capital_state(positions, equity)
+        if regime:
+            capital["regime"] = regime
         model = self._compute_model_state(throttled, false_holds)
 
         snap = MetaStateSnapshot(
@@ -132,15 +140,16 @@ class MetaStateSnapshotService:
                 if raw is not None:
                     data = json.loads(raw)
                     return self._snapshot_from_payload(data)
-        except Exception as exc:
+        except (RuntimeError, TypeError, ValueError) as exc:
             logger.warning("[MetaState] get_latest_snapshot failed: %s", exc)
 
         if db is None or not account_id:
             return None
 
         try:
-            from app.models.meta_state_snapshot import \
-                MetaStateSnapshot as MetaStateSnapshotRecord
+            from app.models.meta_state_snapshot import (
+                MetaStateSnapshot as MetaStateSnapshotRecord,
+            )
 
             stmt = (
                 select(MetaStateSnapshotRecord)
@@ -161,8 +170,11 @@ class MetaStateSnapshotService:
             if "generated_at" not in payload and row.generated_at is not None:
                 payload["generated_at"] = row.generated_at.isoformat()
             return self._snapshot_from_payload(payload)
-        except Exception as exc:
-            logger.warning("[MetaState] DB latest snapshot fallback failed: %s", exc)
+        except SQLAlchemyError as exc:
+            logger.warning(
+                "[MetaState] DB latest snapshot fallback failed: %s",
+                exc,
+            )
             return None
 
     # ──────────────────────────────────────────────────────────────────
@@ -172,14 +184,15 @@ class MetaStateSnapshotService:
     async def _gather_throttled_signals(self) -> list[dict]:
         """从 ConvictionFrictionTracker 收集所有摩擦信号。"""
         try:
-            from app.services.conviction_friction_tracker import \
-                conviction_friction_tracker
+            from app.services.conviction_friction_tracker import (
+                conviction_friction_tracker,
+            )
 
             states = await conviction_friction_tracker.get_all_throttled_signals(
                 min_rejection_count=1
             )
             return [s.to_dict() for s in states]
-        except Exception as exc:
+        except (RedisError, RuntimeError, TypeError, ValueError) as exc:
             logger.warning("[MetaState] _gather_throttled_signals: %s", exc)
             return []
 
@@ -192,17 +205,21 @@ class MetaStateSnapshotService:
             pattern = f"false_hold_alert:{account_id}:*"
             cursor = 0
             while True:
-                cursor, keys = await self._redis.scan(cursor, match=pattern, count=100)
+                cursor, keys = await self._redis.scan(
+                    cursor,
+                    match=pattern,
+                    count=100,
+                )
                 for key in keys:
                     raw = await self._redis.get(key)
                     if raw:
                         try:
                             results.append(json.loads(raw))
-                        except Exception:
+                        except json.JSONDecodeError:
                             pass
                 if cursor == 0:
                     break
-        except Exception as exc:
+        except (RedisError, RuntimeError, TypeError, ValueError) as exc:
             logger.warning("[MetaState] _gather_false_hold_alerts: %s", exc)
         return results
 
@@ -229,7 +246,7 @@ class MetaStateSnapshotService:
                 "gross_exposure_pct": round(gross_pct, 4),
                 "idle_cash_ratio": round(idle_ratio, 4),
             }
-        except Exception as exc:
+        except (RuntimeError, TypeError, ValueError) as exc:
             logger.warning("[MetaState] _compute_capital_state: %s", exc)
             return {"equity": equity, "error": str(exc)}
 
@@ -274,15 +291,16 @@ class MetaStateSnapshotService:
                     json.dumps(snap.to_dict()),
                     ex=_SNAPSHOT_TTL,
                 )
-        except Exception as exc:
+        except (RedisError, RuntimeError, TypeError, ValueError) as exc:
             logger.warning("[MetaState] _persist_snapshot failed: %s", exc)
 
         if db is None:
             return
 
         try:
-            from app.models.meta_state_snapshot import \
-                MetaStateSnapshot as MetaStateSnapshotRecord
+            from app.models.meta_state_snapshot import (
+                MetaStateSnapshot as MetaStateSnapshotRecord,
+            )
 
             record = MetaStateSnapshotRecord(
                 snapshot_id=snap.snapshot_id,
@@ -290,30 +308,30 @@ class MetaStateSnapshotService:
                 throttled_signals_count=len(snap.throttled_signals),
                 false_hold_count=len(snap.false_hold_alerts),
                 total_blocked_signals=int(
-                    (snap.model_state or {}).get("total_blocked_signals", 0) or 0
+                    (snap.model_state or {}).get(
+                        "total_blocked_signals",
+                        0,
+                    )
+                    or 0
                 ),
                 idle_cash_ratio=(snap.capital_state or {}).get("idle_cash_ratio"),
-                gross_exposure_pct=(snap.capital_state or {}).get(
-                    "gross_exposure_pct"
-                ),
+                gross_exposure_pct=(snap.capital_state or {}).get("gross_exposure_pct"),
                 snapshot_json=snap.to_dict(),
                 notes="V11.0.1 meta-state snapshot",
             )
             db.add(record)
 
-            cutoff = datetime.now() - timedelta(
-                days=_SNAPSHOT_DB_RETENTION_DAYS
-            )
+            cutoff = datetime.now() - timedelta(days=_SNAPSHOT_DB_RETENTION_DAYS)
             await db.execute(
                 delete(MetaStateSnapshotRecord).where(
                     MetaStateSnapshotRecord.generated_at < cutoff
                 )
             )
             await db.commit()
-        except Exception as exc:
+        except SQLAlchemyError as exc:
             try:
                 await db.rollback()
-            except Exception:
+            except SQLAlchemyError:
                 pass
             logger.warning("[MetaState] DB persist failed: %s", exc)
 
@@ -324,5 +342,5 @@ meta_state_service = MetaStateSnapshotService(redis_client=None)
 
 def init_meta_state_service(redis_client) -> None:
     """在 app 启动时注入 Redis 客户端。"""
-    meta_state_service._redis = redis_client  # noqa: SLF001
+    meta_state_service.set_redis_client(redis_client)
     logger.info("[MetaState] Redis client injected")

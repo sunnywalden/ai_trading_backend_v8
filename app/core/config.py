@@ -36,9 +36,9 @@ class Settings(BaseSettings):
     def DATABASE_URL(self) -> str:
         if self.DB_TYPE == "mysql":
             # 去掉可能的包裹引号（single/double quote）并对用户名/密码进行 URL 编码
-            user = (
-                quote_plus(str(self.MYSQL_USER).strip("'\"")) if self.MYSQL_USER else ""
-            )
+            user = ""
+            if self.MYSQL_USER:
+                user = quote_plus(str(self.MYSQL_USER).strip("'\""))
             pwd = (
                 quote_plus(str(self.MYSQL_PASSWORD).strip("'\""))
                 if self.MYSQL_PASSWORD
@@ -335,7 +335,8 @@ class Settings(BaseSettings):
     AUTONOMOUS_CONTROL_PLANE_V1054_ENABLED: bool = False
     NATIVE_AUDIT_V1054_ENABLED: bool = False
 
-    # ==================== V11.0.1: Capital Velocity & Autonomous Evolution OS ====================
+    # ==================== V11.0.1: Capital Velocity &
+    # Autonomous Evolution OS ====================
     # 主开关：控制所有 V11 Capital Velocity 特性（含 M1.5 阈值软化、GEA 闲置感知、CVS 计分）
     CAPITAL_VELOCITY_V1101_ENABLED: bool = False
     # 主开关：控制所有 V11 自感知特性（MetaStateSnapshot、自感知告警）

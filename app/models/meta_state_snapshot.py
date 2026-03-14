@@ -19,11 +19,19 @@ class MetaStateSnapshot(Base):
 
     __tablename__ = "meta_state_snapshots"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
     snapshot_id: Mapped[str] = mapped_column(
         String(64), nullable=False, unique=True, index=True
     )
-    account_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    account_id: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        index=True,
+    )
     generated_at: Mapped[datetime] = mapped_column(
         DateTime,
         nullable=False,
@@ -51,7 +59,9 @@ class MetaStateSnapshot(Base):
 
     __table_args__ = (
         Index(
-            "ix_meta_state_snapshots_account_generated", "account_id", "generated_at"
+            "ix_meta_state_snapshots_account_generated",
+            "account_id",
+            "generated_at",
         ),
     )
 

@@ -19,8 +19,16 @@ class ImprovementCandidate(Base):
 
     __tablename__ = "improvement_candidates"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    account_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+    account_id: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        index=True,
+    )
 
     # 改进目标描述
     candidate_type: Mapped[str] = mapped_column(
@@ -35,17 +43,27 @@ class ImprovementCandidate(Base):
 
     # 置信度与触发来源
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
-    trigger_source: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    trigger_source: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
     # e.g. "friction_accumulation", "false_hold_repeat", "idle_capital_persist"
 
     # 状态
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="pending",
+    )
     # pending / applied / rejected / expired
 
     evidence_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     expected_impact: Mapped[str | None] = mapped_column(Text, nullable=True)
     validation_plan: Mapped[str | None] = mapped_column(Text, nullable=True)
-    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        nullable=True,
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime,

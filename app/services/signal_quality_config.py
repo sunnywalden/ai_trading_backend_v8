@@ -182,7 +182,8 @@ class SignalQualityConfig(BaseSettings):
         description="同一持仓在被替换后的冷却期（分钟），冷却期内不参与竞争",
     )
 
-    # ── V11.0.1: Conviction Threshold Softening 门控参数 ──────────────────────────
+    # ── V11.0.1: Conviction Threshold Softening
+    # 门控参数 ──────────────────────────
     CONVICTION_SOFT_COMPOSITE_FLOOR: int = Field(
         default=96,
         description=(
@@ -233,7 +234,8 @@ def apply_runtime_override(updates: dict[str, Any]) -> SignalQualityConfig:
     _config_overrides.update(updates)
     new_cfg = get_signal_quality_config()
     logger.info(
-        f"[SignalQualityConfig] Runtime overrides applied: {list(updates.keys())}"
+        "[SignalQualityConfig] Runtime overrides applied: %s",
+        list(updates.keys()),
     )
     return new_cfg
 
@@ -242,7 +244,7 @@ def reset_runtime_overrides() -> None:
     """清除所有热更新覆盖，恢复环境变量默认值。"""
     _config_overrides.clear()
     logger.info(
-        "[SignalQualityConfig] Runtime overrides cleared, restored to env defaults."
+        "[SignalQualityConfig] Runtime overrides cleared, " "restored to env defaults."
     )
 
 

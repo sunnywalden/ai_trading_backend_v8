@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
+import math
 from dataclasses import asdict, dataclass
 from typing import Any
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -32,7 +36,7 @@ class GrossExposureAllocation:
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
-        for key, value in list(payload.items()):
+        for key, value in payload.items():
             if isinstance(value, float):
                 payload[key] = round(value, 6)
         return payload
@@ -104,19 +108,136 @@ class GrossExposureAllocator:
             if not regime:
                 continue
             parsed = cls._safe_float(value.strip(), float("nan"))
-            if parsed == parsed:
+            if not math.isnan(parsed):
                 mapping[regime] = parsed
         return mapping
+
+    @staticmethod
+    def _allocation_from_context(
+        context: dict[str, Any],
+        **updates: Any,
+    ) -> GrossExposureAllocation:
+        payload = dict(context)
+        payload.update(updates)
+        return GrossExposureAllocation(**payload)
+
+    @staticmethod
+    def _pct_to_qty(allowed_pct: float, equity: float, price: float) -> float:
+        if allowed_pct <= 0 or equity <= 0 or price <= 0:
+            return 0.0
+        return (allowed_pct * equity) / price
+
+    @classmethod
+    def _current_symbol_snapshot(
+        cls,
+        *,
+        symbol: str,
+        current_positions: dict[str, Any],
+        equity: float,
+        price: float,
+    ) -> tuple[float, float, float]:
+        current_symbol = current_positions.get(symbol, {})
+        current_symbol_qty = cls._safe_float(
+            (current_symbol.get("qty") if isinstance(current_symbol, dict) else 0.0),
+            0.0,
+        )
+        current_symbol_price = cls._resolve_position_price(current_symbol) or max(
+            price, 0.0
+        )
+        current_symbol_pct = (
+            abs(current_symbol_qty * current_symbol_price) / equity
+            if equity > 0 and current_symbol_price > 0
+            else 0.0
+        )
+        return current_symbol_qty, current_symbol_price, current_symbol_pct
+
+    def _maybe_allocate_with_idle_capital(
+        self,
+        *,
+        symbol: str,
+        base_pct: float,
+        equity: float,
+        price: float,
+        current_gross_pct: float,
+        max_gross_pct: float,
+        max_additional_symbol_pct: float,
+        idle_cash_ratio: float | None,
+        context: dict[str, Any],
+    ) -> GrossExposureAllocation | None:
+        idle_flag = getattr(settings, "CAPITAL_VELOCITY_V1101_ENABLED", False)
+        effective_idle_ratio = (
+            idle_cash_ratio
+            if idle_cash_ratio is not None
+            else max(0.0, 1.0 - current_gross_pct)
+        )
+        idle_threshold = float(getattr(settings, "IDLE_CAPITAL_ALERT_THRESHOLD", 0.25))
+        headroom_factor = float(
+            getattr(settings, "IDLE_CAPITAL_GEA_HEADROOM_FACTOR", 0.8)
+        )
+        max_borrow = float(getattr(settings, "IDLE_CAPITAL_GEA_MAX_BORROW", 0.30))
+        can_idle_adjust = (
+            idle_flag
+            and max_additional_symbol_pct > 0
+            and effective_idle_ratio > idle_threshold
+            and base_pct <= effective_idle_ratio * headroom_factor
+        )
+        if not can_idle_adjust:
+            return None
+
+        borrow_headroom = min(effective_idle_ratio, max_borrow)
+        adjusted_remaining_cap = max(
+            0.0,
+            max_gross_pct + borrow_headroom - current_gross_pct,
+        )
+        if adjusted_remaining_cap <= 0:
+            return None
+
+        logger.info(
+            "[GEA] IdleCapital adjustment %s idle_ratio=%.3f "
+            "adjusted_cap=%.3f borrow=%.3f",
+            symbol,
+            effective_idle_ratio,
+            adjusted_remaining_cap,
+            borrow_headroom,
+        )
+        allowed_pct = min(
+            base_pct,
+            max_additional_symbol_pct,
+            adjusted_remaining_cap,
+        )
+        adjusted_max_qty = self._pct_to_qty(
+            min(max_additional_symbol_pct, adjusted_remaining_cap),
+            equity,
+            price,
+        )
+        return self._allocation_from_context(
+            context,
+            enabled=True,
+            reason="idle-capital-adjusted",
+            remaining_cap_pct=adjusted_remaining_cap,
+            allocated_position_pct=allowed_pct,
+            target_qty=self._pct_to_qty(allowed_pct, equity, price),
+            max_qty_allowed=adjusted_max_qty,
+            boost_applied=False,
+            capped=allowed_pct < base_pct,
+            idle_capital_adjusted=True,
+        )
 
     def resolve_regime_targets(self, regime: str | None) -> dict[str, Any]:
         regime_name = str(regime or "SIDEWAYS").upper()
         base_target = max(
             0.0,
-            self._safe_float(getattr(settings, "TARGET_GROSS_EXPOSURE_PCT", 1.5), 1.5),
+            self._safe_float(
+                getattr(settings, "TARGET_GROSS_EXPOSURE_PCT", 1.5),
+                1.5,
+            ),
         )
         base_max = max(
             base_target,
-            self._safe_float(getattr(settings, "MAX_GROSS_EXPOSURE_PCT", 2.0), 2.0),
+            self._safe_float(
+                getattr(settings, "MAX_GROSS_EXPOSURE_PCT", 2.0),
+                2.0,
+            ),
         )
         target_map = self._parse_regime_map(
             getattr(settings, "GROSS_EXPOSURE_TARGET_BY_REGIME", "")
@@ -202,180 +323,103 @@ class GrossExposureAllocator:
             current_positions,
             equity,
         )
-        current_symbol = current_positions.get(symbol, {})
-        current_symbol_qty = self._safe_float(
-            current_symbol.get("qty") if isinstance(current_symbol, dict) else 0.0,
-            0.0,
-        )
-        current_symbol_price = self._resolve_position_price(current_symbol) or max(
-            price,
-            0.0,
-        )
-        current_symbol_pct = (
-            abs(current_symbol_qty * current_symbol_price) / equity
-            if equity > 0 and current_symbol_price > 0
-            else 0.0
+        _, _, current_symbol_pct = self._current_symbol_snapshot(
+            symbol=symbol,
+            current_positions=current_positions,
+            equity=equity,
+            price=price,
         )
 
         max_single_pct = max(
             0.0,
-            self._safe_float(getattr(settings, "MAX_SINGLE_POSITION_PCT", 0.25), 0.25),
+            self._safe_float(
+                getattr(settings, "MAX_SINGLE_POSITION_PCT", 0.25),
+                0.25,
+            ),
         )
-        max_additional_symbol_pct = max(0.0, max_single_pct - current_symbol_pct)
+        max_additional_symbol_pct = max(
+            0.0,
+            max_single_pct - current_symbol_pct,
+        )
         remaining_target_pct = max(0.0, target_gross_pct - current_gross_pct)
         remaining_cap_pct = max(0.0, max_gross_pct - current_gross_pct)
 
+        allocation_context = {
+            "regime": regime_name,
+            "target_config_source": target_config_source,
+            "max_config_source": max_config_source,
+            "current_gross_exposure_pct": current_gross_pct,
+            "current_net_exposure_pct": current_net_pct,
+            "current_symbol_exposure_pct": current_symbol_pct,
+            "target_gross_exposure_pct": target_gross_pct,
+            "max_gross_exposure_pct": max_gross_pct,
+            "remaining_target_pct": remaining_target_pct,
+            "remaining_cap_pct": remaining_cap_pct,
+            "max_additional_symbol_pct": max_additional_symbol_pct,
+            "base_position_pct": base_pct,
+        }
+
         if not allocator_enabled:
-            allocated_pct = min(base_pct, max_additional_symbol_pct, remaining_cap_pct)
-            max_qty = (
-                (min(max_additional_symbol_pct, remaining_cap_pct) * equity) / price
-                if price > 0 and equity > 0
-                else 0.0
+            allocated_pct = min(
+                base_pct,
+                max_additional_symbol_pct,
+                remaining_cap_pct,
             )
-            return GrossExposureAllocation(
+            max_qty = self._pct_to_qty(
+                min(max_additional_symbol_pct, remaining_cap_pct),
+                equity,
+                price,
+            )
+            return self._allocation_from_context(
+                allocation_context,
                 enabled=False,
                 reason="allocator-disabled",
-                regime=regime_name,
-                target_config_source=target_config_source,
-                max_config_source=max_config_source,
-                current_gross_exposure_pct=current_gross_pct,
-                current_net_exposure_pct=current_net_pct,
-                current_symbol_exposure_pct=current_symbol_pct,
-                target_gross_exposure_pct=target_gross_pct,
-                max_gross_exposure_pct=max_gross_pct,
-                remaining_target_pct=remaining_target_pct,
-                remaining_cap_pct=remaining_cap_pct,
-                max_additional_symbol_pct=max_additional_symbol_pct,
-                base_position_pct=base_pct,
                 allocated_position_pct=allocated_pct,
-                target_qty=max_qty if allocated_pct > 0 and base_pct > 0 else 0.0,
+                target_qty=(max_qty if allocated_pct > 0 and base_pct > 0 else 0.0),
                 max_qty_allowed=max_qty,
                 boost_applied=False,
                 capped=allocated_pct < base_pct,
+                idle_capital_adjusted=False,
             )
 
         if equity <= 0 or price <= 0:
-            return GrossExposureAllocation(
+            return self._allocation_from_context(
+                allocation_context,
                 enabled=False,
                 reason="missing-equity-or-price",
-                regime=regime_name,
-                target_config_source=target_config_source,
-                max_config_source=max_config_source,
-                current_gross_exposure_pct=current_gross_pct,
-                current_net_exposure_pct=current_net_pct,
-                current_symbol_exposure_pct=current_symbol_pct,
-                target_gross_exposure_pct=target_gross_pct,
-                max_gross_exposure_pct=max_gross_pct,
-                remaining_target_pct=remaining_target_pct,
-                remaining_cap_pct=remaining_cap_pct,
-                max_additional_symbol_pct=max_additional_symbol_pct,
-                base_position_pct=base_pct,
                 allocated_position_pct=0.0,
                 target_qty=0.0,
                 max_qty_allowed=0.0,
                 boost_applied=False,
                 capped=False,
+                idle_capital_adjusted=False,
             )
 
         if remaining_cap_pct <= 0 or max_additional_symbol_pct <= 0:
-            # V11.0.1 M1.5.3: 闲置资本感知开仓修正
-            # 条件: 主开关开启 + idle_cash_ratio 高于告警阈值 + 本次开仓比例不超过保守上界
-            idle_flag = getattr(settings, "CAPITAL_VELOCITY_V1101_ENABLED", False)
-            effective_idle_ratio = (
-                idle_cash_ratio
-                if idle_cash_ratio is not None
-                else max(0.0, 1.0 - current_gross_pct)
+            idle_allocation = self._maybe_allocate_with_idle_capital(
+                symbol=symbol,
+                base_pct=base_pct,
+                equity=equity,
+                price=price,
+                current_gross_pct=current_gross_pct,
+                max_gross_pct=max_gross_pct,
+                max_additional_symbol_pct=max_additional_symbol_pct,
+                idle_cash_ratio=idle_cash_ratio,
+                context=allocation_context,
             )
-            idle_threshold = float(
-                getattr(settings, "IDLE_CAPITAL_ALERT_THRESHOLD", 0.25)
-            )
-            headroom_factor = float(
-                getattr(settings, "IDLE_CAPITAL_GEA_HEADROOM_FACTOR", 0.8)
-            )
-            max_borrow = float(getattr(settings, "IDLE_CAPITAL_GEA_MAX_BORROW", 0.30))
-            can_idle_adjust = (
-                idle_flag
-                and max_additional_symbol_pct > 0  # 单标的仍有空间
-                and effective_idle_ratio > idle_threshold
-                and base_pct <= effective_idle_ratio * headroom_factor
-            )
-            if can_idle_adjust:
-                # 临时上调有效上限，允许从闲置资本中开仓
-                borrow_headroom = min(effective_idle_ratio, max_borrow)
-                adjusted_remaining_cap = max(
-                    0.0, max_gross_pct + borrow_headroom - current_gross_pct
-                )
-                if adjusted_remaining_cap > 0:
-                    import logging as _log
+            if idle_allocation is not None:
+                return idle_allocation
 
-                    _log.getLogger(__name__).info(
-                        "[GEA] IdleCapital adjustment %s "
-                        "idle_ratio=%.3f adjusted_cap=%.3f borrow=%.3f",
-                        symbol,
-                        effective_idle_ratio,
-                        adjusted_remaining_cap,
-                        borrow_headroom,
-                    )
-                    allowed_pct = min(
-                        base_pct,
-                        max_additional_symbol_pct,
-                        adjusted_remaining_cap,
-                    )
-                    adjusted_qty = (
-                        (allowed_pct * equity) / price if allowed_pct > 0 else 0.0
-                    )
-                    adjusted_max_qty = (
-                        (
-                            min(max_additional_symbol_pct, adjusted_remaining_cap)
-                            * equity
-                        )
-                        / price
-                        if price > 0
-                        else 0.0
-                    )
-                    return GrossExposureAllocation(
-                        enabled=True,
-                        reason="idle-capital-adjusted",
-                        regime=regime_name,
-                        target_config_source=target_config_source,
-                        max_config_source=max_config_source,
-                        current_gross_exposure_pct=current_gross_pct,
-                        current_net_exposure_pct=current_net_pct,
-                        current_symbol_exposure_pct=current_symbol_pct,
-                        target_gross_exposure_pct=target_gross_pct,
-                        max_gross_exposure_pct=max_gross_pct,
-                        remaining_target_pct=remaining_target_pct,
-                        remaining_cap_pct=adjusted_remaining_cap,
-                        max_additional_symbol_pct=max_additional_symbol_pct,
-                        base_position_pct=base_pct,
-                        allocated_position_pct=allowed_pct,
-                        target_qty=adjusted_qty,
-                        max_qty_allowed=adjusted_max_qty,
-                        boost_applied=False,
-                        capped=allowed_pct < base_pct,
-                        idle_capital_adjusted=True,
-                    )
-
-            return GrossExposureAllocation(
+            return self._allocation_from_context(
+                allocation_context,
                 enabled=True,
                 reason="no-headroom",
-                regime=regime_name,
-                target_config_source=target_config_source,
-                max_config_source=max_config_source,
-                current_gross_exposure_pct=current_gross_pct,
-                current_net_exposure_pct=current_net_pct,
-                current_symbol_exposure_pct=current_symbol_pct,
-                target_gross_exposure_pct=target_gross_pct,
-                max_gross_exposure_pct=max_gross_pct,
-                remaining_target_pct=remaining_target_pct,
-                remaining_cap_pct=remaining_cap_pct,
-                max_additional_symbol_pct=max_additional_symbol_pct,
-                base_position_pct=base_pct,
                 allocated_position_pct=0.0,
                 target_qty=0.0,
                 max_qty_allowed=0.0,
                 boost_applied=False,
                 capped=base_pct > 0,
+                idle_capital_adjusted=False,
             )
 
         desired_pct = base_pct
@@ -394,35 +438,29 @@ class GrossExposureAllocator:
         elif explicit_abs_qty:
             reason = "explicit-abs-shares"
 
-        allowed_pct = min(desired_pct, max_additional_symbol_pct, remaining_cap_pct)
+        allowed_pct = min(
+            desired_pct,
+            max_additional_symbol_pct,
+            remaining_cap_pct,
+        )
         capped = allowed_pct + 1e-9 < desired_pct
-        target_qty = (allowed_pct * equity) / price if allowed_pct > 0 else 0.0
-        max_qty_allowed = (
-            (min(max_additional_symbol_pct, remaining_cap_pct) * equity) / price
-            if price > 0
-            else 0.0
+        target_qty = self._pct_to_qty(allowed_pct, equity, price)
+        max_qty_allowed = self._pct_to_qty(
+            min(max_additional_symbol_pct, remaining_cap_pct),
+            equity,
+            price,
         )
 
-        return GrossExposureAllocation(
+        return self._allocation_from_context(
+            allocation_context,
             enabled=True,
             reason=reason,
-            regime=regime_name,
-            target_config_source=target_config_source,
-            max_config_source=max_config_source,
-            current_gross_exposure_pct=current_gross_pct,
-            current_net_exposure_pct=current_net_pct,
-            current_symbol_exposure_pct=current_symbol_pct,
-            target_gross_exposure_pct=target_gross_pct,
-            max_gross_exposure_pct=max_gross_pct,
-            remaining_target_pct=remaining_target_pct,
-            remaining_cap_pct=remaining_cap_pct,
-            max_additional_symbol_pct=max_additional_symbol_pct,
-            base_position_pct=base_pct,
             allocated_position_pct=allowed_pct,
             target_qty=target_qty,
             max_qty_allowed=max_qty_allowed,
             boost_applied=boost_applied,
             capped=capped,
+            idle_capital_adjusted=False,
         )
 
 
