@@ -5,7 +5,8 @@ This repository is a FastAPI backend for trading risk control, position assessme
 ## Scope and priorities
 
 - Prefer focused, minimal changes that preserve existing APIs, schema shapes, and route structure unless the task explicitly requires an interface change.
-- Treat docs in `docs/PRODUCT.md`, `docs/API.md`, and `docs/BACKEND_DESIGN.md` as the authoritative functional and architecture context before using archived material.
+- Treat docs in `docs/PRODUCT.md`, `docs/API.md`, `docs/BACKEND_DESIGN.md`, and `docs/architecture/*.md` as the authoritative functional and architecture context before using archived material.
+- When the task concerns system architecture, signal/trade/position data flow, risk controls, or scheduler/task orchestration, consult the matching document under `docs/architecture/` first.
 - Favor fixing root causes over adding compatibility layers, one-off branches, or duplicated logic.
 
 ## Backend conventions
