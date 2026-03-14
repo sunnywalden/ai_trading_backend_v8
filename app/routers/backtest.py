@@ -1,4 +1,5 @@
 """V10: 回测中心路由"""
+
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -10,6 +11,7 @@ from app.core.auth import get_current_user
 from app.engine.backtest.runner import backtest_runner
 from app.models.backtest_task import BacktestTask
 from app.models.db import get_session
+from app.services.stress_test_service import stress_test_service as stress_test_svc
 
 router = APIRouter(prefix="/backtest", tags=["V10-Backtest"])
 
@@ -87,7 +89,7 @@ async def list_tasks(
     )
     rows = result.fetchall()
     import json
-    
+
     return {
         "tasks": [
             {
@@ -122,19 +124,55 @@ async def get_task_report(
     row = result.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Task not found")
-    
+
     import json
+
     data = dict(row._mapping)
     # V10: Ensure JSON fields are parsed for the frontend report view
     if isinstance(data.get("result"), str):
         try:
             data["result"] = json.loads(data["result"])
-        except:
+        except Exception:
             pass
     if isinstance(data.get("symbols"), str):
         try:
             data["symbols"] = json.loads(data["symbols"])
-        except:
+        except Exception:
             pass
-            
+
     return data
+
+
+# ── V11.1.1: Stress test sub-routes migrated from stress_test.py ─────────────
+# Frontend: stressTestService.ts path updated to /v1/backtest/stress-test/...
+
+
+class StressTestRequest(BaseModel):
+    scenario_ids: Optional[List[str]] = None
+    symbols: Optional[List[str]] = None
+    use_current_positions: bool = True
+
+
+@router.post("/stress-test/run", tags=["V11.1.1-StressTest"])
+async def run_stress_test(
+    body: StressTestRequest,
+    current_user: str = Depends(get_current_user),
+):
+    """对持仓运行历史情景压力测试（V11.1.1 迁移自 stress_test.py）"""
+    positions = {
+        "AAPL": {"qty": 100, "price": 180, "market_value": 18000},
+        "TSLA": {"qty": 50, "price": 240, "market_value": 12000},
+    }
+    portfolio_equity = 100_000.0
+    result = await stress_test_svc.run_scenarios(
+        positions=positions,
+        portfolio_equity=portfolio_equity,
+        scenario_ids=body.scenario_ids,
+    )
+    return result
+
+
+@router.get("/stress-test/scenarios", tags=["V11.1.1-StressTest"])
+async def get_stress_scenarios(current_user: str = Depends(get_current_user)):
+    """获取可用的压力测试情景列表（V11.1.1 迁移自 stress_test.py）"""
+    return {"scenarios": stress_test_svc.get_available_scenarios()}
