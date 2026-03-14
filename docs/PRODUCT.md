@@ -23,7 +23,8 @@
 > 变更摘要（V10.1）：**兑现承诺 + 打磨质量 + 扩展边界**——Tiger 真实下单接入（覆盖美股/港股/期权）、FULL 模式完整自主交易闭环、Copilot 操作指令执行落地、Dashboard 所有 TODO 指标真实化、AI 组合级决策升级（结构化 JSON 输出 + 批量组合决策）、ETF 标的池正式支持、港股支持（Tiger API 统一，无需 Futu）、Paper→Live 毕业自动化、Dashboard WebSocket 实时推送；**本版本明确不含 Telegram 通知，FULL 模式具备完全自主交易能力**
 > 历史版本：V10.0（2026-02-24）变更摘要见下方历史记录节  
 > 当前已上线版本：**V11.0.1**（已发布） | 实现设计：[V11.0.1 Implementation Design](architecture/v11_0_1_implementation_design.md)  
-> 历史规划归档：[V11.0.1 Release Plan](archived/v11/v11.0/RELEASE_PLAN_V11.0.1.md) | [V10.5.4 Release Plan](archived/v10/v10.5/RELEASE_PLAN_V10.5.4.md)
+> 历史规划归档：[V11.0.1 Release Plan](archived/v11/v11.0/RELEASE_PLAN_V11.0.1.md) | [V10.5.4 Release Plan](archived/v10/v10.5/RELEASE_PLAN_V10.5.4.md)  
+> 下一阶段规划：[V11.1.1 Release Plan — Trader Workbench Convergence & Architecture Simplification](archived/v11/v11.1/RELEASE_PLAN_V11.1.1.md)
 
 ---
 
@@ -1392,14 +1393,15 @@ AI_COMPLEX_MODEL=deepseek-reasoner    # 复杂分析
 - **M4 Evolution Governance**：以 feature flag 为边界，为后续自进化与风格约束提供治理基座
 - **前端重点**：`/autonomy` 工作台统一展示 MetaState、rollout flags、摩擦积累信号、False-Hold 告警与 Improvement 候选
 
-### Phase 15: 下一阶段规划 🔜
+### Phase 15: Trader Workbench Convergence & Architecture Simplification 🔜 V11.1.1 规划中
 
+> 详细规划见：[docs/archived/v11/v11.1/RELEASE_PLAN_V11.1.1.md](archived/v11/v11.1/RELEASE_PLAN_V11.1.1.md)
 
-- 多账户 / 多用户支持
-- 更完整的 Evolution Governance 与 Strategy Genome 落地
-- 个人交易风格对齐与约束增强
-- 更细粒度的 capital velocity / seat value 解释链
-- 移动端与运维态势展示继续收口
+- **M1 平台功能页面治理**：从顶尖量化平台产品、交易经理、交易员视角，收敛现有工作台为 Command Center、Research & Allocation、Execution & Lifecycle、Governance & Operations 四大域，减少页面重叠与跳转成本
+- **M2 前端架构治理**：围绕 `src/views / src/components / src/api / src/stores` 做 thin-view、shared shell、typed contract、legacy route/compat 收口，提升一致性、响应速度与可维护性
+- **M3 后端架构治理**：围绕 `app/services / app/routers / app/jobs` 建立 bounded context、read model、thin router 与单主编排路径纪律，减少平铺增长与兼容债务
+- **M4 代码质量与性能治理**：以高复用、低复杂度、清晰注释、明确预算为原则，统一 DTO / 状态映射 / 错误模型 / 日志口径，并把性能指标纳入版本验收
+- **版本原则**：不放宽 RiskGate、容量纪律和治理门槛；不做无边界重写；不再新增平行控制面或平行页面体系
 
 ---
 
