@@ -12,13 +12,17 @@ AI Trading Backend V8 是一个基于 FastAPI 的**交易风控 + 持仓评估 +
 - **宏观风险 & Opportunities**：宏观风险概览 + 每日机会扫描
 - **AI 能力（可选）**：OpenAI 用于生成摘要/解读；未配置会降级为规则摘要
 
-> 文档入口（权威）：`docs/README.md`
+> 文档入口（权威）：[docs/README.md](docs/README.md)
 
 ## 📚 文档（请从这里开始）
 
 - [docs/PRODUCT.md](docs/PRODUCT.md) — 产品需求（Alpha Loop / 核心功能）
 - [docs/API.md](docs/API.md) — API 参考
 - [docs/BACKEND_DESIGN.md](docs/BACKEND_DESIGN.md) — 后端架构设计
+- [docs/architecture/system-architecture.md](docs/architecture/system-architecture.md) — 总体架构图与组件分层
+- [docs/architecture/signal-trade-position-flows.md](docs/architecture/signal-trade-position-flows.md) — 信号/交易/持仓数据流与时序图
+- [docs/architecture/risk-and-governance.md](docs/architecture/risk-and-governance.md) — 风控机制与治理控制
+- [docs/architecture/job-orchestration.md](docs/architecture/job-orchestration.md) — Scheduler 与后台任务编排
 
 > 其余历史或实现细节已归档到 `docs/archived/`，如需查看请到该目录检索历史记录。
 
