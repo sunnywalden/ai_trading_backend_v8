@@ -52,12 +52,15 @@ from app.jobs.scheduler import (
 from app.jobs.task_config_jobs import register_task_config_jobs  # V10: 动态配置同步任务
 from app.providers.market_data_provider import MarketDataProvider, market_data_provider
 
+# hotspots removed in V11.1.1 – no active frontend caller, frontend redirects to /opportunities
+# stress_test removed in V11.1.1 – endpoints migrated to backtest.py (see /backtest/stress-test/)
+# execution_center removed in V11.1.1 – no active frontend caller (PlanEditDialog is orphan)
 # V9 routers
 # V10.3.3 新路由
 # V10.2-M2-M8 新路由
 # V10.2 新路由
 # V10 新路由
-from app.routers import ai_advisor  # AI 交易决策（统一入口）
+# ai_advisor removed in V11.1.1 – endpoints migrated to autonomy.py (sunset)
 from app.routers import ai_hub  # V10.3.3: AI 中枢 2.0
 from app.routers import alpha_lab  # V10.5.1: Alpha Lab
 from app.routers import attribution  # V10.2-M5: 交易归因
@@ -69,7 +72,6 @@ from app.routers import dashboard_v2  # V10: 全新Dashboard
 from app.routers import etf  # V10.1: ETF自选列表
 from app.routers import events  # V10.2-M2: 事件日历围栏
 from app.routers import execution_algo  # V10: 算法执行
-from app.routers import execution_center  # NEW: 执行中心（Layer 3）
 from app.routers import execution_policy  # V10.5.1: Execution Policy Console
 from app.routers import governance  # V10.5.1: Promotion Pipeline
 from app.routers import insights  # V10.2-M6: AI 洞察
@@ -89,7 +91,6 @@ from app.routers import quant_loop  # NEW: 量化交易闭环路由
 from app.routers import regime  # V10.2-M1: 市场体制感知
 from app.routers import signal_fusion  # V10.2-M4: 六维信号融合
 from app.routers import signal_quality  # V10.4.2: 信号精英化漏斗
-from app.routers import stress_test  # V10: 压力测试
 from app.routers import system_monitor  # V10.4.3: 系统监控增强
 from app.routers import task_config  # V10: 统一任务配置管理
 from app.routers import war_room  # V10.3.3: 战情室
@@ -97,7 +98,6 @@ from app.routers import alerts as v9_alerts
 from app.routers import api_monitoring
 from app.routers import dashboard as v9_dashboard
 from app.routers import equity as v9_equity
-from app.routers import hotspots
 from app.routers import journal as v9_journal
 from app.routers import orders as v9_orders
 from app.routers import position_macro, strategy, trading_plan
@@ -272,7 +272,9 @@ def _restore_signal_handlers() -> None:
 
 def _log_regime_bootstrap_result(result: dict | None) -> None:
     if not isinstance(result, dict):
-        logger.warning("[WarmUp] regime bootstrap returned unexpected result: %r", result)
+        logger.warning(
+            "[WarmUp] regime bootstrap returned unexpected result: %r", result
+        )
         return
 
     if result.get("skipped"):
@@ -288,10 +290,15 @@ def _log_regime_bootstrap_result(result: dict | None) -> None:
 
 def _log_technical_warmup_result(result: dict | None) -> None:
     if not isinstance(result, dict):
-        logger.warning("[WarmUp] technical indicator warm-up returned unexpected result: %r", result)
+        logger.warning(
+            "[WarmUp] technical indicator warm-up returned unexpected result: %r",
+            result,
+        )
         return
     if not result.get("success"):
-        logger.warning("[WarmUp] technical indicator warm-up failed: %s", result.get("error"))
+        logger.warning(
+            "[WarmUp] technical indicator warm-up failed: %s", result.get("error")
+        )
         return
     success_count = int(result.get("success_count") or 0)
     attempted = list(result.get("symbols_attempted") or [])
@@ -306,16 +313,24 @@ def _log_technical_warmup_result(result: dict | None) -> None:
 
 def _log_factor_snapshot_warmup_result(result: dict | None) -> None:
     if not isinstance(result, dict):
-        logger.warning("[WarmUp] factor snapshot warm-up returned unexpected result: %r", result)
+        logger.warning(
+            "[WarmUp] factor snapshot warm-up returned unexpected result: %r", result
+        )
         return
     if not result.get("success"):
-        logger.warning("[WarmUp] factor snapshot warm-up failed: %s", result.get("error"))
+        logger.warning(
+            "[WarmUp] factor snapshot warm-up failed: %s", result.get("error")
+        )
         return
     seeded_accounts = int(result.get("seeded_accounts") or 0)
     if seeded_accounts <= 0:
-        logger.warning("[WarmUp] factor snapshot warm-up deferred: no account snapshot seeded")
+        logger.warning(
+            "[WarmUp] factor snapshot warm-up deferred: no account snapshot seeded"
+        )
         return
-    logger.info("[WarmUp] ✓ Factor exposure snapshot seeded (%d accounts)", seeded_accounts)
+    logger.info(
+        "[WarmUp] ✓ Factor exposure snapshot seeded (%d accounts)", seeded_accounts
+    )
 
 
 async def _warm_up_regime_cache() -> None:
@@ -729,12 +744,7 @@ app.include_router(
     tags=["交易计划"],
     dependencies=[Depends(get_current_user)],
 )
-app.include_router(
-    hotspots.router,
-    prefix="/api/v1",
-    tags=["市场热点"],
-    dependencies=[Depends(get_current_user)],
-)
+# hotspots.router removed in V11.1.1 (V11.1.1-sunset)
 app.include_router(
     strategy.router,
     prefix="/api/v1",
@@ -747,12 +757,8 @@ app.include_router(
 app.include_router(
     task_config.router, prefix="/api/v1", dependencies=[Depends(get_current_user)]
 )
-app.include_router(
-    execution_center.router, dependencies=[Depends(get_current_user)]
-)  # NEW: 执行中心（Layer 3）
-app.include_router(
-    ai_advisor.router, dependencies=[Depends(get_current_user)]
-)  # AI 交易决策
+# execution_center.router removed in V11.1.1 (V11.1.1-sunset)
+# ai_advisor.router removed in V11.1.1 (V11.1.1-sunset)
 app.include_router(
     performance.router, dependencies=[Depends(get_current_user)]
 )  # NEW: Alpha/Beta性能分析指标
@@ -769,9 +775,14 @@ app.include_router(
     live_safety.router, dependencies=[Depends(get_current_user)]
 )  # V10.5.1: M4 Live Safety Guard
 
-# V9 路由注册
+# V9 路由注册 (deprecated=True; will be removed in V11.2)
 app.include_router(
-    v9_dashboard.router, prefix="/api/v1", dependencies=[Depends(get_current_user)]
+    v9_dashboard.router,
+    prefix="/api/v1",
+    tags=[
+        "[DEPRECATED-V9] Dashboard – will be removed in V11.2, use /api/v1/dashboard/"
+    ],
+    dependencies=[Depends(get_current_user)],
 )
 app.include_router(
     dashboard_v2.router, prefix="/api/v1", dependencies=[Depends(get_current_user)]
@@ -805,9 +816,7 @@ app.include_router(
 app.include_router(
     copilot.router, prefix="/api/v1", dependencies=[Depends(get_current_user)]
 )
-app.include_router(
-    stress_test.router, prefix="/api/v1", dependencies=[Depends(get_current_user)]
-)
+# stress_test.router removed in V11.1.1; use /api/v1/backtest/stress-test/ (V11.1.1-migration)
 app.include_router(
     paper_trading.router, prefix="/api/v1", dependencies=[Depends(get_current_user)]
 )
