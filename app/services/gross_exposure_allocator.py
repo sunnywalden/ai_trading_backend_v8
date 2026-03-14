@@ -27,6 +27,8 @@ class GrossExposureAllocation:
     max_qty_allowed: float
     boost_applied: bool
     capped: bool
+    # V11.0.1 M1.5.3: 闲置资本感知开仓修正标记
+    idle_capital_adjusted: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -175,6 +177,7 @@ class GrossExposureAllocator:
         base_position_pct: float,
         explicit_abs_qty: bool = False,
         regime: str | None = None,
+        idle_cash_ratio: float | None = None,
     ) -> GrossExposureAllocation:
         base_pct = max(0.0, self._safe_float(base_position_pct, 0.0))
         regime_targets = self.resolve_regime_targets(regime)
@@ -185,7 +188,11 @@ class GrossExposureAllocator:
         max_config_source = str(regime_targets["max_config_source"])
         slice_count = max(
             1,
-            int(self._safe_float(getattr(settings, "GROSS_EXPOSURE_ENTRY_SLICE_COUNT", 4), 4)),
+            int(
+                self._safe_float(
+                    getattr(settings, "GROSS_EXPOSURE_ENTRY_SLICE_COUNT", 4), 4
+                )
+            ),
         )
         allocator_enabled = bool(
             getattr(settings, "GROSS_EXPOSURE_ALLOCATOR_ENABLED", True)
@@ -271,6 +278,84 @@ class GrossExposureAllocator:
             )
 
         if remaining_cap_pct <= 0 or max_additional_symbol_pct <= 0:
+            # V11.0.1 M1.5.3: 闲置资本感知开仓修正
+            # 条件: 主开关开启 + idle_cash_ratio 高于告警阈值 + 本次开仓比例不超过保守上界
+            idle_flag = getattr(settings, "CAPITAL_VELOCITY_V1101_ENABLED", False)
+            effective_idle_ratio = (
+                idle_cash_ratio
+                if idle_cash_ratio is not None
+                else max(0.0, 1.0 - current_gross_pct)
+            )
+            idle_threshold = float(
+                getattr(settings, "IDLE_CAPITAL_ALERT_THRESHOLD", 0.25)
+            )
+            headroom_factor = float(
+                getattr(settings, "IDLE_CAPITAL_GEA_HEADROOM_FACTOR", 0.8)
+            )
+            max_borrow = float(getattr(settings, "IDLE_CAPITAL_GEA_MAX_BORROW", 0.30))
+            can_idle_adjust = (
+                idle_flag
+                and max_additional_symbol_pct > 0  # 单标的仍有空间
+                and effective_idle_ratio > idle_threshold
+                and base_pct <= effective_idle_ratio * headroom_factor
+            )
+            if can_idle_adjust:
+                # 临时上调有效上限，允许从闲置资本中开仓
+                borrow_headroom = min(effective_idle_ratio, max_borrow)
+                adjusted_remaining_cap = max(
+                    0.0, max_gross_pct + borrow_headroom - current_gross_pct
+                )
+                if adjusted_remaining_cap > 0:
+                    import logging as _log
+
+                    _log.getLogger(__name__).info(
+                        "[GEA] IdleCapital adjustment %s "
+                        "idle_ratio=%.3f adjusted_cap=%.3f borrow=%.3f",
+                        symbol,
+                        effective_idle_ratio,
+                        adjusted_remaining_cap,
+                        borrow_headroom,
+                    )
+                    allowed_pct = min(
+                        base_pct,
+                        max_additional_symbol_pct,
+                        adjusted_remaining_cap,
+                    )
+                    adjusted_qty = (
+                        (allowed_pct * equity) / price if allowed_pct > 0 else 0.0
+                    )
+                    adjusted_max_qty = (
+                        (
+                            min(max_additional_symbol_pct, adjusted_remaining_cap)
+                            * equity
+                        )
+                        / price
+                        if price > 0
+                        else 0.0
+                    )
+                    return GrossExposureAllocation(
+                        enabled=True,
+                        reason="idle-capital-adjusted",
+                        regime=regime_name,
+                        target_config_source=target_config_source,
+                        max_config_source=max_config_source,
+                        current_gross_exposure_pct=current_gross_pct,
+                        current_net_exposure_pct=current_net_pct,
+                        current_symbol_exposure_pct=current_symbol_pct,
+                        target_gross_exposure_pct=target_gross_pct,
+                        max_gross_exposure_pct=max_gross_pct,
+                        remaining_target_pct=remaining_target_pct,
+                        remaining_cap_pct=adjusted_remaining_cap,
+                        max_additional_symbol_pct=max_additional_symbol_pct,
+                        base_position_pct=base_pct,
+                        allocated_position_pct=allowed_pct,
+                        target_qty=adjusted_qty,
+                        max_qty_allowed=adjusted_max_qty,
+                        boost_applied=False,
+                        capped=allowed_pct < base_pct,
+                        idle_capital_adjusted=True,
+                    )
+
             return GrossExposureAllocation(
                 enabled=True,
                 reason="no-headroom",
@@ -297,7 +382,11 @@ class GrossExposureAllocator:
         boost_applied = False
         reason = "base-size"
 
-        if not explicit_abs_qty and current_gross_pct < target_gross_pct and remaining_target_pct > 0:
+        if (
+            not explicit_abs_qty
+            and current_gross_pct < target_gross_pct
+            and remaining_target_pct > 0
+        ):
             slice_pct = remaining_target_pct / slice_count
             desired_pct = max(base_pct, slice_pct)
             boost_applied = desired_pct > base_pct

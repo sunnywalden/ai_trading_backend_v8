@@ -8,6 +8,11 @@
      将 SELL   建议 → SignalType.EXIT  （全部平仓）
   4. 写入 TradingSignal，状态 GENERATED，等待 AutonomousEngine 处理
 
+V11.0.1 M2.3 增量：
+  - False-Hold 检测：当同一标的 REDUCE/EXIT 信号在连续 N 个周期均被创建但未平仓，
+    发出 False-Hold 告警并为信号写入 false_hold_protection=True 元数据
+  - V11 主开关（SELF_PERCEPTION_V1101_ENABLED）控制告警逻辑启用
+
 与 PositionMonitor 的区别：
   - PositionMonitor：触发止损/止盈/超龄的「硬性」出场
   - PositionRebalanceMonitor：将 AI 评分给出的「软性」减仓/卖出建议转为信号
@@ -15,6 +20,7 @@
 调用时机：
   - 由 quant_loop_jobs.run_position_rebalance_scan() 每小时触发
 """
+
 from __future__ import annotations
 
 import logging
@@ -22,23 +28,26 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from sqlalchemy import select, and_, or_, desc
+from sqlalchemy import and_, desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.models.trading_signal import (
-    TradingSignal, SignalType, SignalStatus, SignalSource,
-)
 from app.models.position_score import PositionScore
+from app.models.trading_signal import (
+    SignalSource,
+    SignalStatus,
+    SignalType,
+    TradingSignal,
+)
 
 logger = logging.getLogger(__name__)
 
 # 评分建议阈值
-_SCORE_REDUCE_THRESHOLD = 54   # overall_score <= 54 → REDUCE
-_SCORE_SELL_THRESHOLD   = 39   # overall_score <= 39 → EXIT/SELL
+_SCORE_REDUCE_THRESHOLD = 54  # overall_score <= 54 → REDUCE
+_SCORE_SELL_THRESHOLD = 39  # overall_score <= 39 → EXIT/SELL
 
 # 减仓默认比例（30% of current position）
-_DEFAULT_REDUCE_RATIO   = 0.30
+_DEFAULT_REDUCE_RATIO = 0.30
 
 # 评分有效期（超过此时间的评分不参考）
 _SCORE_VALID_HOURS = 24
@@ -95,15 +104,15 @@ class PositionRebalanceMonitor:
                 "details": [],
             }
 
-        reduce_count    = 0
-        exit_count      = 0
-        no_score_count  = 0
+        reduce_count = 0
+        exit_count = 0
+        no_score_count = 0
         already_pending = 0
         details: List[Dict[str, Any]] = []
 
         for pos in positions:
             symbol: str = pos["symbol"]
-            qty: float  = pos["qty"]
+            qty: float = pos["qty"]
 
             if qty == 0:
                 continue
@@ -116,47 +125,79 @@ class PositionRebalanceMonitor:
                 continue
 
             # 强制转为 Python 原始类型，绕过 SQLAlchemy 列的静态推断
-            recommendation: str = str(getattr(score_record, "recommendation", "HOLD") or "HOLD").upper()
+            recommendation: str = str(
+                getattr(score_record, "recommendation", "HOLD") or "HOLD"
+            ).upper()
             overall_val = getattr(score_record, "overall_score", 50)
             overall: int = int(overall_val) if overall_val is not None else 50
 
             # 只处理 REDUCE 和 SELL
             if recommendation not in ("REDUCE", "SELL"):
-                details.append({
-                    "symbol": symbol, "score": overall,
-                    "recommendation": recommendation, "signal_created": None
-                })
+                details.append(
+                    {
+                        "symbol": symbol,
+                        "score": overall,
+                        "recommendation": recommendation,
+                        "signal_created": None,
+                    }
+                )
                 continue
 
             # 检查是否已有待执行的 REDUCE/EXIT 信号
             if await self._has_pending_signal(account_id, symbol):
                 already_pending += 1
-                logger.debug(f"[RebalanceMonitor] {symbol}: pending signal already exists, skip")
-                details.append({
-                    "symbol": symbol, "score": overall,
-                    "recommendation": recommendation, "signal_created": "SKIPPED_PENDING"
-                })
+                logger.debug(
+                    f"[RebalanceMonitor] {symbol}: pending signal already exists, skip"
+                )
+                details.append(
+                    {
+                        "symbol": symbol,
+                        "score": overall,
+                        "recommendation": recommendation,
+                        "signal_created": "SKIPPED_PENDING",
+                    }
+                )
                 continue
 
             # 决定信号类型和数量
             if recommendation == "SELL" or overall <= _SCORE_SELL_THRESHOLD:
                 signal_type = SignalType.EXIT
-                quantity    = abs(qty)   # 全部清仓
-                priority    = 85
+                quantity = abs(qty)  # 全部清仓
+                priority = 85
             else:
                 signal_type = SignalType.REDUCE
-                quantity    = max(1.0, abs(qty) * _DEFAULT_REDUCE_RATIO)
-                priority    = 65
+                quantity = max(1.0, abs(qty) * _DEFAULT_REDUCE_RATIO)
+                priority = 65
+
+            # V11.0.1 M2.3: False-Hold 检测
+            false_hold = False
+            if getattr(settings, "SELF_PERCEPTION_V1101_ENABLED", False):
+                threshold_rounds = int(
+                    getattr(settings, "FALSE_HOLD_DETECTION_ROUNDS", 3)
+                )
+                cycle_count = await self._count_recent_reduce_signals(
+                    account_id, symbol, hours=48
+                )
+                if cycle_count >= threshold_rounds:
+                    false_hold = True
+                    await self._emit_false_hold_alert(
+                        account_id,
+                        symbol,
+                        score=overall,
+                        recommendation=recommendation,
+                        cycle_count=cycle_count,
+                    )
 
             await self._create_signal(
-                account_id  = account_id,
-                symbol      = symbol,
-                qty         = qty,
-                quantity    = quantity,
-                signal_type = signal_type,
-                score       = overall,
-                recommendation = recommendation,
-                priority    = priority,
+                account_id=account_id,
+                symbol=symbol,
+                qty=qty,
+                quantity=quantity,
+                signal_type=signal_type,
+                score=overall,
+                recommendation=recommendation,
+                priority=priority,
+                false_hold_protection=false_hold,
             )
 
             if signal_type == SignalType.EXIT:
@@ -164,13 +205,15 @@ class PositionRebalanceMonitor:
             else:
                 reduce_count += 1
 
-            details.append({
-                "symbol": symbol,
-                "score": overall,
-                "recommendation": recommendation,
-                "signal_created": signal_type.value,
-                "quantity": quantity,
-            })
+            details.append(
+                {
+                    "symbol": symbol,
+                    "score": overall,
+                    "recommendation": recommendation,
+                    "signal_created": signal_type.value,
+                    "quantity": quantity,
+                }
+            )
 
             logger.info(
                 f"[RebalanceMonitor] {signal_type.value} signal created: "
@@ -204,7 +247,9 @@ class PositionRebalanceMonitor:
         current_positions = len(positions)
 
         if max_positions <= 0:
-            logger.warning("[CapacityGuard] invalid max_positions=%s, skip", max_positions)
+            logger.warning(
+                "[CapacityGuard] invalid max_positions=%s, skip", max_positions
+            )
             return {
                 "current_positions": current_positions,
                 "max_positions": max_positions,
@@ -228,8 +273,12 @@ class PositionRebalanceMonitor:
 
         pending_exit_symbols = await self._get_pending_exit_symbols(account_id)
         symbols_in_position = {str(p["symbol"]).upper() for p in positions}
-        pending_exit_symbols = {s for s in pending_exit_symbols if s in symbols_in_position}
-        effective_overflow = max(0, current_positions - max_positions - len(pending_exit_symbols))
+        pending_exit_symbols = {
+            s for s in pending_exit_symbols if s in symbols_in_position
+        }
+        effective_overflow = max(
+            0, current_positions - max_positions - len(pending_exit_symbols)
+        )
 
         if effective_overflow <= 0:
             return {
@@ -282,14 +331,16 @@ class PositionRebalanceMonitor:
                 },
             )
             created += 1
-            details.append({
-                "symbol": symbol,
-                "score": candidate["overall_score"],
-                "recommendation": candidate["recommendation"],
-                "risk_level": candidate.get("risk_level"),
-                "target_position": candidate.get("target_position"),
-                "signal_created": SignalType.EXIT.value,
-            })
+            details.append(
+                {
+                    "symbol": symbol,
+                    "score": candidate["overall_score"],
+                    "recommendation": candidate["recommendation"],
+                    "risk_level": candidate.get("risk_level"),
+                    "target_position": candidate.get("target_position"),
+                    "signal_created": SignalType.EXIT.value,
+                }
+            )
 
         try:
             await self.session.commit()
@@ -315,8 +366,8 @@ class PositionRebalanceMonitor:
     async def _fetch_positions(self, account_id: str) -> List[Dict[str, Any]]:
         """从 Broker 拉取当前持仓"""
         try:
-            from app.broker.factory import make_option_broker_client
             from app.broker.dummy_option_client import DummyOptionClient
+            from app.broker.factory import make_option_broker_client
 
             broker = make_option_broker_client()
             if isinstance(broker, DummyOptionClient):
@@ -326,23 +377,43 @@ class PositionRebalanceMonitor:
             raw = await broker.list_underlying_positions(account_id)
             result = []
             for p in raw:
-                symbol = getattr(p, "symbol", None) or (p.get("symbol") if isinstance(p, dict) else None)
-                qty    = getattr(p, "quantity", None) or (p.get("quantity") or p.get("qty") if isinstance(p, dict) else None)
-                last_price = getattr(p, "last_price", None) or (p.get("last_price") if isinstance(p, dict) else None)
-                avg_price = getattr(p, "avg_price", None) or (p.get("avg_price") if isinstance(p, dict) else None)
+                symbol = getattr(p, "symbol", None) or (
+                    p.get("symbol") if isinstance(p, dict) else None
+                )
+                qty = getattr(p, "quantity", None) or (
+                    p.get("quantity") or p.get("qty") if isinstance(p, dict) else None
+                )
+                last_price = getattr(p, "last_price", None) or (
+                    p.get("last_price") if isinstance(p, dict) else None
+                )
+                avg_price = getattr(p, "avg_price", None) or (
+                    p.get("avg_price") if isinstance(p, dict) else None
+                )
                 if symbol and qty:
-                    result.append({
-                        "symbol": str(symbol).strip().upper(),
-                        "qty": float(qty),
-                        "last_price": float(last_price) if last_price not in (None, "") else None,
-                        "avg_price": float(avg_price) if avg_price not in (None, "") else None,
-                    })
+                    result.append(
+                        {
+                            "symbol": str(symbol).strip().upper(),
+                            "qty": float(qty),
+                            "last_price": (
+                                float(last_price)
+                                if last_price not in (None, "")
+                                else None
+                            ),
+                            "avg_price": (
+                                float(avg_price)
+                                if avg_price not in (None, "")
+                                else None
+                            ),
+                        }
+                    )
             return result
         except Exception as e:
             logger.error(f"[RebalanceMonitor] 持仓拉取失败: {e}")
             return []
 
-    async def _get_latest_score(self, account_id: str, symbol: str) -> Optional[PositionScore]:
+    async def _get_latest_score(
+        self, account_id: str, symbol: str
+    ) -> Optional[PositionScore]:
         """获取 24h 内最新的持仓评分"""
         cutoff = datetime.now(timezone.utc) - timedelta(hours=_SCORE_VALID_HOURS)
         stmt = (
@@ -370,12 +441,14 @@ class PositionRebalanceMonitor:
                 TradingSignal.account_id == account_id,
                 TradingSignal.symbol == symbol,
                 TradingSignal.signal_type.in_([SignalType.REDUCE, SignalType.EXIT]),
-                TradingSignal.status.in_([
-                    SignalStatus.GENERATED,
-                    SignalStatus.VALIDATED,
-                    SignalStatus.QUEUED,
-                    SignalStatus.EXECUTING,
-                ]),
+                TradingSignal.status.in_(
+                    [
+                        SignalStatus.GENERATED,
+                        SignalStatus.VALIDATED,
+                        SignalStatus.QUEUED,
+                        SignalStatus.EXECUTING,
+                    ]
+                ),
             )
         )
         result = await self.session.execute(stmt)
@@ -387,12 +460,14 @@ class PositionRebalanceMonitor:
             and_(
                 TradingSignal.account_id == account_id,
                 TradingSignal.signal_type == SignalType.EXIT,
-                TradingSignal.status.in_([
-                    SignalStatus.GENERATED,
-                    SignalStatus.VALIDATED,
-                    SignalStatus.QUEUED,
-                    SignalStatus.EXECUTING,
-                ]),
+                TradingSignal.status.in_(
+                    [
+                        SignalStatus.GENERATED,
+                        SignalStatus.VALIDATED,
+                        SignalStatus.QUEUED,
+                        SignalStatus.EXECUTING,
+                    ]
+                ),
             )
         )
         result = await self.session.execute(stmt)
@@ -422,19 +497,27 @@ class PositionRebalanceMonitor:
             if score_obj is None:
                 score_obj = await self._get_latest_score(account_id, symbol)
 
-            recommendation = str(getattr(score_obj, "recommendation", "HOLD") or "HOLD").upper()
-            overall_score_val = getattr(score_obj, "overall_score", 50) if score_obj is not None else 50
-            overall_score = int(overall_score_val) if overall_score_val is not None else 50
+            recommendation = str(
+                getattr(score_obj, "recommendation", "HOLD") or "HOLD"
+            ).upper()
+            overall_score_val = (
+                getattr(score_obj, "overall_score", 50) if score_obj is not None else 50
+            )
+            overall_score = (
+                int(overall_score_val) if overall_score_val is not None else 50
+            )
 
-            candidates.append({
-                "symbol": symbol,
-                "qty": float(pos["qty"]),
-                "last_price": last_price,
-                "recommendation": recommendation,
-                "overall_score": overall_score,
-                "risk_level": getattr(score_obj, "risk_level", None),
-                "target_position": getattr(score_obj, "target_position", None),
-            })
+            candidates.append(
+                {
+                    "symbol": symbol,
+                    "qty": float(pos["qty"]),
+                    "last_price": last_price,
+                    "recommendation": recommendation,
+                    "overall_score": overall_score,
+                    "risk_level": getattr(score_obj, "risk_level", None),
+                    "target_position": getattr(score_obj, "target_position", None),
+                }
+            )
 
         return candidates
 
@@ -466,9 +549,9 @@ class PositionRebalanceMonitor:
         priority: int,
         note_reason: Optional[str] = None,
         metadata_extra: Optional[Dict[str, Any]] = None,
+        false_hold_protection: bool = False,
     ) -> TradingSignal:
         """创建 REDUCE / EXIT TradingSignal"""
-        # 确定方向（多头减仓=SELL方向）
         direction = "LONG" if qty > 0 else "SHORT"
 
         notes = note_reason or (
@@ -476,7 +559,7 @@ class PositionRebalanceMonitor:
             f"由 PositionRebalanceMonitor 自动生成"
         )
 
-        metadata = {
+        metadata: Dict[str, Any] = {
             "closing_intent": signal_type.value,
             "execution_path": "FAST_CLOSE",
             "generated_by": "PositionRebalanceMonitor",
@@ -486,29 +569,93 @@ class PositionRebalanceMonitor:
                 "price": None,
             },
         }
+        if false_hold_protection:
+            metadata["false_hold_protection"] = True
+            metadata["funnel_bypass"] = "is_closing_fast_path"
         if metadata_extra:
             metadata.update(metadata_extra)
 
         signal = TradingSignal(
-            signal_id         = str(uuid4()),
-            account_id        = account_id,
-            user_id           = account_id,   # 系统生成信号，user_id 复用 account_id
-            symbol            = symbol,
-            signal_type       = signal_type,
-            signal_source     = SignalSource.RISK_MGMT,
-            status            = SignalStatus.GENERATED,
-            direction         = direction,
-            quantity_mode     = "ABS_SHARES",
-            quantity_value    = quantity,
-            suggested_quantity= quantity,
-            signal_strength   = max(0.1, (100 - score) / 100),  # 分数越低信号越强
-            confidence        = max(0.1, (100 - score) / 100),
-            risk_score        = (100 - score) / 100,
-            priority          = priority,
-            notes             = notes,
-            max_holding_days  = None,
-            created_at        = datetime.utcnow(),
-            extra_metadata    = metadata,
+            signal_id=str(uuid4()),
+            account_id=account_id,
+            user_id=account_id,
+            symbol=symbol,
+            signal_type=signal_type,
+            signal_source=SignalSource.RISK_MGMT,
+            status=SignalStatus.GENERATED,
+            direction=direction,
+            quantity_mode="ABS_SHARES",
+            quantity_value=quantity,
+            suggested_quantity=quantity,
+            signal_strength=max(0.1, (100 - score) / 100),
+            confidence=max(0.1, (100 - score) / 100),
+            risk_score=(100 - score) / 100,
+            priority=priority,
+            notes=notes,
+            max_holding_days=None,
+            created_at=datetime.now(timezone.utc),
+            extra_metadata=metadata,
         )
         self.session.add(signal)
         return signal
+
+    # ──────────────────────────────────────────────────────────────────────
+    # V11.0.1 M2.3: False-Hold 检测与告警
+    # ──────────────────────────────────────────────────────────────────────
+
+    async def _count_recent_reduce_signals(
+        self,
+        account_id: str,
+        symbol: str,
+        *,
+        hours: int = 48,
+    ) -> int:
+        """查询近 N 小时内为该标的创建的 REDUCE/EXIT 信号数量。"""
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        stmt = select(TradingSignal).where(
+            and_(
+                TradingSignal.account_id == account_id,
+                TradingSignal.symbol == symbol,
+                TradingSignal.signal_type.in_([SignalType.REDUCE, SignalType.EXIT]),
+                TradingSignal.signal_source == SignalSource.RISK_MGMT,
+                TradingSignal.created_at >= cutoff,
+            )
+        )
+        result = await self.session.execute(stmt)
+        return len(result.scalars().all())
+
+    async def _emit_false_hold_alert(
+        self,
+        account_id: str,
+        symbol: str,
+        *,
+        score: int,
+        recommendation: str,
+        cycle_count: int,
+    ) -> None:
+        """将 False-Hold 告警写入 Redis（MetaStateSnapshotService 消费）。"""
+        try:
+            from app.models.db import redis_client as _redis
+
+            if _redis is None:
+                return
+            import json as _json
+
+            key = f"false_hold_alert:{account_id}:{symbol}"
+            alert = {
+                "account_id": account_id,
+                "symbol": symbol,
+                "score": score,
+                "recommendation": recommendation,
+                "reduce_cycle_count": cycle_count,
+                "detected_at": datetime.now(timezone.utc).isoformat(),
+            }
+            await _redis.set(key, _json.dumps(alert), ex=86400)
+            logger.info(
+                "[RebalanceMonitor] False-Hold alert emitted: %s " "score=%d cycles=%d",
+                symbol,
+                score,
+                cycle_count,
+            )
+        except Exception as exc:
+            logger.debug("[RebalanceMonitor] _emit_false_hold_alert skipped: %s", exc)

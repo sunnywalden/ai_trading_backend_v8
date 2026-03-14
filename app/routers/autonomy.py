@@ -349,7 +349,9 @@ def _build_signal_integrity_snapshot(signal: TradingSignal) -> dict[str, object]
     }
 
 
-def _build_gross_exposure_allocator_snapshot(signal: TradingSignal) -> dict[str, object] | None:
+def _build_gross_exposure_allocator_snapshot(
+    signal: TradingSignal,
+) -> dict[str, object] | None:
     extra = signal.extra_metadata if isinstance(signal.extra_metadata, dict) else {}
     allocator = extra.get("gross_exposure_allocator")
     return allocator if isinstance(allocator, dict) else None
@@ -619,7 +621,13 @@ async def get_autonomy_status(
         "signal_pipeline": pipeline,
         "failed_trades_today": failed_today,
         "positions_source": positions_truth.get("source"),
-        "positions_count_truth": int(_raw_pc) if isinstance(_raw_pc := positions_truth.get("positions_count"), (int, float)) else 0,
+        "positions_count_truth": (
+            int(_raw_pc)
+            if isinstance(
+                _raw_pc := positions_truth.get("positions_count"), (int, float)
+            )
+            else 0
+        ),
         "audit_source": (
             "AUTONOMY_AUDIT_LOG"
             if settings.NATIVE_AUDIT_V1054_ENABLED
@@ -1433,3 +1441,129 @@ async def get_autonomy_health(
         report = await autonomy_health_monitor.run_all_checks(db)
 
     return report.to_dict()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# V11.0.1 — Capital Intelligence & Self-Perception 端点
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+@router.get("/meta-state")
+async def get_meta_state(
+    session: AsyncSession = Depends(get_session),
+    current_user: str = Depends(get_current_user),
+):
+    """
+    V11.0.1 M2 — 获取最新系统元状态快照。
+
+    返回聚合后的「系统自知画像」，包括：
+    - throttled_signals  : 被置信度阈值阻断的开仓信号（摩擦积累中）
+    - false_hold_alerts  : 被持续压制但多次触发 REDUCE 推荐的标的
+    - capital_state      : 当前资本利用率快照
+    - model_state        : 活跃摩擦 ticker 数、soft relief 可用数等
+    """
+    from app.models.db import redis_client
+    from app.services.meta_state_snapshot_service import meta_state_service
+    from app.services.truth_source_service import truth_source_service
+
+    account_id = await _resolve_account_id()
+
+    # 尝试返回已缓存快照（< 1h 内无需重建）
+    cached = await meta_state_service.get_latest_snapshot()
+    if cached:
+        result = cached.to_dict()
+        result["_cached"] = True
+        return result
+
+    # 缓存未命中，实时构建
+    positions_truth = await truth_source_service.get_positions_truth_snapshot(
+        session, account_id
+    )
+    equity_value, _ = await _get_runtime_equity(session, account_id)
+    positions = positions_truth.get("positions") or {}
+
+    # 注入最新 Redis 客户端（确保启动后已注入）
+    if meta_state_service._redis is None and redis_client is not None:  # noqa: SLF001
+        from app.services.meta_state_snapshot_service import init_meta_state_service
+
+        init_meta_state_service(redis_client)
+
+    snap = await meta_state_service.build_snapshot(
+        account_id=account_id,
+        positions=positions,
+        equity=equity_value,
+    )
+    return snap.to_dict()
+
+
+@router.get("/friction-state")
+async def get_friction_state(
+    current_user: str = Depends(get_current_user),
+):
+    """
+    V11.0.1 M1.5 — 获取所有当前存在摩擦积累的信号状态。
+
+    返回被置信度阈值连续拒绝、尚未触发 soft relief 的开仓信号列表。
+    """
+    from app.services.conviction_friction_tracker import conviction_friction_tracker
+
+    states = await conviction_friction_tracker.get_all_throttled_signals(
+        min_rejection_count=1
+    )
+    return {
+        "throttled_signals": [s.to_dict() for s in states],
+        "count": len(states),
+        "feature_enabled": bool(
+            getattr(settings, "CAPITAL_VELOCITY_V1101_ENABLED", False)
+        ),
+    }
+
+
+@router.get("/false-hold-alerts")
+async def get_false_hold_alerts(
+    current_user: str = Depends(get_current_user),
+):
+    """
+    V11.0.1 M2.3 — 获取所有 False-Hold 告警。
+
+    返回被系统持续压制（连续 N 轮 REDUCE 信号均未执行）的标的列表。
+    """
+    from app.models.db import redis_client
+
+    account_id = await _resolve_account_id()
+    alerts: list[dict] = []
+
+    if redis_client is not None:
+        import json as _json
+
+        try:
+            pattern = f"false_hold_alert:{account_id}:*"
+            cursor = 0
+            while True:
+                cursor, keys = await redis_client.scan(cursor, match=pattern, count=100)
+                for key in keys:
+                    raw = await redis_client.get(key)
+                    if raw:
+                        try:
+                            alerts.append(_json.loads(raw))
+                        except Exception:
+                            pass
+                if cursor == 0:
+                    break
+        except Exception as exc:
+            return {
+                "alerts": [],
+                "count": 0,
+                "error": str(exc),
+                "feature_enabled": bool(
+                    getattr(settings, "SELF_PERCEPTION_V1101_ENABLED", False)
+                ),
+            }
+
+    return {
+        "alerts": alerts,
+        "count": len(alerts),
+        "feature_enabled": bool(
+            getattr(settings, "SELF_PERCEPTION_V1101_ENABLED", False)
+        ),
+    }

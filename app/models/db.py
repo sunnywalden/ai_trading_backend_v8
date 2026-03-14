@@ -135,7 +135,11 @@ async def ensure_mysql_tables() -> None:
     import app.models.execution_policy_profile  # V10.5.3: 执行反馈画像
     import app.models.execution_slice  # V10.4.4: 执行切片
     import app.models.fsm_transition_log  # V10.3: FSM事件日志
+
+    # V11.0.1 新增模型
+    import app.models.improvement_candidate  # noqa: F401
     import app.models.market_universe_symbol  # 机会扫描本地全量股票池
+    import app.models.meta_state_snapshot  # noqa: F401
     import app.models.notification  # noqa: F401
     import app.models.paper_account  # noqa: F401
     import app.models.portfolio_snapshot  # noqa: F401
