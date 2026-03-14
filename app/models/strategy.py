@@ -3,11 +3,20 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import (JSON, Boolean, Column, DateTime, Float, ForeignKey,
-                        Index, Integer, Numeric, String, Text,
-                        UniqueConstraint)
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from sqlalchemy.sql import func
 
 from app.models.db import Base
 
@@ -42,10 +51,15 @@ class Strategy(Base):
     last_run_status: Mapped[Optional[str]] = mapped_column(String(16))
     last_run_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.now(), nullable=False
+        DateTime,
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+        DateTime,
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=text("CURRENT_TIMESTAMP"),
+        nullable=False,
     )
 
     runs: Mapped[List["StrategyRun"]] = relationship(
@@ -92,7 +106,9 @@ class StrategyRun(Base):
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     celery_task_id: Mapped[Optional[str]] = mapped_column(String(64), index=True)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.now(), nullable=False
+        DateTime,
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
     )
 
     strategy: Mapped["Strategy"] = relationship(
@@ -130,7 +146,10 @@ class HistoricalStrategyRun(Base):
     notify_channels: Mapped[Optional[List[str]]] = mapped_column(JSON)
     status_payload: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+        DateTime,
+        server_default=text("CURRENT_TIMESTAMP"),
+        onupdate=text("CURRENT_TIMESTAMP"),
+        nullable=False,
     )
 
 
@@ -155,7 +174,9 @@ class StrategyRunAsset(Base):
     risk_flags: Mapped[Optional[List[str]]] = mapped_column(JSON)
     notes: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.now(), nullable=False
+        DateTime,
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
     )
 
     run: Mapped["StrategyRun"] = relationship("StrategyRun", back_populates="assets")
@@ -179,7 +200,9 @@ class StrategyRunLog(Base):
     message: Mapped[Optional[str]] = mapped_column(Text)
     details: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.now(), nullable=False
+        DateTime,
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
     )
 
     run: Mapped["StrategyRun"] = relationship("StrategyRun", back_populates="logs")
@@ -203,7 +226,9 @@ class StrategyNotification(Base):
     status: Mapped[Optional[str]] = mapped_column(String(16))
     payload: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON)
     sent_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.now(), nullable=False
+        DateTime,
+        server_default=text("CURRENT_TIMESTAMP"),
+        nullable=False,
     )
 
     run: Mapped["StrategyRun"] = relationship(
