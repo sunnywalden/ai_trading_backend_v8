@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS meta_state_snapshots (
 CREATE TABLE IF NOT EXISTS improvement_candidates (
     id              INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
     account_id      VARCHAR(64) NOT NULL,
+    candidate_type  VARCHAR(64) NOT NULL DEFAULT 'parameter_tuning',
     target_module   VARCHAR(128) NOT NULL,
     target_param    VARCHAR(128) NOT NULL,
     current_value   FLOAT NULL,
@@ -94,6 +95,9 @@ CREATE TABLE IF NOT EXISTS improvement_candidates (
     trigger_source  VARCHAR(64) NULL,
     status          VARCHAR(32) NOT NULL DEFAULT 'pending',
     evidence_summary TEXT NULL,
+    expected_impact TEXT NULL,
+    validation_plan TEXT NULL,
+    reviewed_at     DATETIME NULL,
     created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
                     ON UPDATE CURRENT_TIMESTAMP,
@@ -104,9 +108,71 @@ CREATE TABLE IF NOT EXISTS improvement_candidates (
     ),
 ]
 
+ADD_COLUMNS = [
+    (
+        "improvement_candidates",
+        "candidate_type",
+        """
+ALTER TABLE improvement_candidates
+ADD COLUMN candidate_type VARCHAR(64) NOT NULL DEFAULT 'parameter_tuning'
+COMMENT 'V11.0.1: 改进类型'
+""",
+    ),
+    (
+        "improvement_candidates",
+        "expected_impact",
+        """
+ALTER TABLE improvement_candidates
+ADD COLUMN expected_impact TEXT NULL
+COMMENT 'V11.0.1: 预期影响'
+""",
+    ),
+    (
+        "improvement_candidates",
+        "validation_plan",
+        """
+ALTER TABLE improvement_candidates
+ADD COLUMN validation_plan TEXT NULL
+COMMENT 'V11.0.1: 验证计划'
+""",
+    ),
+    (
+        "improvement_candidates",
+        "reviewed_at",
+        """
+ALTER TABLE improvement_candidates
+ADD COLUMN reviewed_at DATETIME NULL
+COMMENT 'V11.0.1: 审核时间'
+""",
+    ),
+    (
+        "strategies",
+        "governance_stage",
+        """
+ALTER TABLE strategies
+ADD COLUMN governance_stage VARCHAR(32) NULL
+COMMENT 'V11.0.1: DISCOVERY/PAPER/SHADOW_LIVE/CHALLENGER/PRODUCTION/LIMITED/RETIRED'
+""",
+    ),
+    (
+        "strategies",
+        "governance_note",
+        """
+ALTER TABLE strategies
+ADD COLUMN governance_note TEXT NULL
+COMMENT 'V11.0.1: 治理说明/回滚备注'
+""",
+    ),
+]
+
 DROP_TABLES_ROLLBACK = [
     "DROP TABLE IF EXISTS improvement_candidates",
     "DROP TABLE IF EXISTS meta_state_snapshots",
+]
+
+DROP_COLUMNS_ROLLBACK = [
+    "ALTER TABLE strategies DROP COLUMN governance_note",
+    "ALTER TABLE strategies DROP COLUMN governance_stage",
 ]
 
 
@@ -125,6 +191,21 @@ async def _table_exists(conn, table_name: str) -> bool:
             "AND table_name = :table_name"
         ),
         {"table_name": table_name},
+    )
+    return bool(res.scalar())
+
+
+async def _column_exists(conn, table_name: str, column_name: str) -> bool:
+    from sqlalchemy import text
+
+    res = await conn.execute(
+        text(
+            "SELECT COUNT(*) FROM information_schema.columns "
+            "WHERE table_schema = DATABASE() "
+            "AND table_name = :table_name "
+            "AND column_name = :column_name"
+        ),
+        {"table_name": table_name, "column_name": column_name},
     )
     return bool(res.scalar())
 
@@ -161,6 +242,13 @@ async def run_upgrade() -> None:
                     print(f"[upgrade] ✓ {table_name} created")
                 else:
                     print(f"[upgrade] {table_name} already exists")
+
+            for table_name, column_name, ddl in ADD_COLUMNS:
+                if not await _column_exists(conn, table_name, column_name):
+                    print(f"[upgrade] Adding {table_name}.{column_name}...")
+                    await conn.execute(text(ddl))
+                else:
+                    print(f"[upgrade] {table_name}.{column_name} already exists")
         print("[upgrade] ✓ V11.0.1 migration complete")
     finally:
         await engine.dispose()
@@ -173,6 +261,11 @@ async def run_rollback() -> None:
 
     try:
         async with engine.begin() as conn:
+            for sql in DROP_COLUMNS_ROLLBACK:
+                try:
+                    await conn.execute(text(sql))
+                except Exception:
+                    pass
             for sql in DROP_TABLES_ROLLBACK:
                 table = sql.split()[-1]
                 print(f"[rollback] Dropping {table}...")

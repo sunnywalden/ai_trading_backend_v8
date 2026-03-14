@@ -224,14 +224,14 @@ def test_summarize_shadow_book_exposes_false_reject_and_protection_benefit():
     assert summary["protection_benefit_pct"] == pytest.approx(-0.02)
 
 
-def test_compute_governance_stage_supports_five_stage_pipeline():
+def test_compute_governance_stage_supports_v11_stage_pipeline():
     compute_governance_stage = getattr(
         V1051ResearchService,
         "_compute_governance_stage",
     )
 
     assert compute_governance_stage(False, None, 0.0, 0) == "DISCOVERY"
-    assert compute_governance_stage(False, "FAILED", 0.4, 3) == "PAPER"
-    assert compute_governance_stage(False, "SUCCESS", 0.52, 12) == "SHADOW_LIVE"
-    assert compute_governance_stage(False, "SUCCESS", 0.56, 24) == "CHALLENGER"
+    assert compute_governance_stage(False, "FAILED", 0.4, 3) == "LIMITED"
+    assert compute_governance_stage(False, "SUCCESS", 0.52, 12) == "LIMITED"
+    assert compute_governance_stage(False, "FAILED", 0.20, 24) == "RETIRED"
     assert compute_governance_stage(True, "SUCCESS", 0.60, 36) == "PRODUCTION"

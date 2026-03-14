@@ -39,6 +39,23 @@ class ExecutionPolicyService:
         return {
             "enabled": enabled,
             "mode": "HARD_CONTROL" if enabled else "OBSERVE_ONLY",
+            "feature_flags": {
+                "capital_velocity_v1101_enabled": bool(
+                    settings.CAPITAL_VELOCITY_V1101_ENABLED
+                ),
+                "self_perception_v1101_enabled": bool(
+                    settings.SELF_PERCEPTION_V1101_ENABLED
+                ),
+                "improvement_engine_v1101_enabled": bool(
+                    settings.IMPROVEMENT_ENGINE_V1101_ENABLED
+                ),
+                "evolution_governance_v1101_enabled": bool(
+                    settings.EVOLUTION_GOVERNANCE_V1101_ENABLED
+                ),
+                "style_alignment_v1101_enabled": bool(
+                    settings.STYLE_ALIGNMENT_V1101_ENABLED
+                ),
+            },
         }
 
     @staticmethod
@@ -55,6 +72,21 @@ class ExecutionPolicyService:
             ),
             "native_audit_v1054_enabled": bool(settings.NATIVE_AUDIT_V1054_ENABLED),
             "governance_hard_gate_enabled": bool(settings.GOVERNANCE_HARD_GATE_ENABLED),
+            "capital_velocity_v1101_enabled": bool(
+                settings.CAPITAL_VELOCITY_V1101_ENABLED
+            ),
+            "self_perception_v1101_enabled": bool(
+                settings.SELF_PERCEPTION_V1101_ENABLED
+            ),
+            "improvement_engine_v1101_enabled": bool(
+                settings.IMPROVEMENT_ENGINE_V1101_ENABLED
+            ),
+            "evolution_governance_v1101_enabled": bool(
+                settings.EVOLUTION_GOVERNANCE_V1101_ENABLED
+            ),
+            "style_alignment_v1101_enabled": bool(
+                settings.STYLE_ALIGNMENT_V1101_ENABLED
+            ),
         }
         if (
             flags["signal_pipeline_v1054_enabled"]

@@ -2,7 +2,8 @@ from typing import AsyncGenerator
 
 import redis.asyncio as redis
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (AsyncSession, async_sessionmaker,
+                                    create_async_engine)
 from sqlalchemy.orm import declarative_base
 
 from app.core.config import settings
@@ -95,6 +96,11 @@ async def ensure_mysql_indexes() -> None:
             "trading_signals",
             "CREATE INDEX ix_signals_origin_generated ON trading_signals (signal_origin_mode, generated_at)",
         ),
+        (
+            "ix_strategies_active_auto_scan_rank",
+            "strategies",
+            "CREATE INDEX ix_strategies_active_auto_scan_rank ON strategies (is_active, auto_scan_enabled, auto_scan_priority, last_run_at)",
+        ),
     ]
 
     async with engine.begin() as conn:
@@ -125,7 +131,6 @@ async def ensure_mysql_tables() -> None:
     import app.models.algo_execution_task  # noqa: F401
     import app.models.audit_log  # noqa: F401
     import app.models.autonomy_audit_log  # noqa: F401
-
     # V10 新增
     import app.models.backtest_task  # noqa: F401
     import app.models.copilot_message  # noqa: F401
@@ -135,7 +140,6 @@ async def ensure_mysql_tables() -> None:
     import app.models.execution_policy_profile  # V10.5.3: 执行反馈画像
     import app.models.execution_slice  # V10.4.4: 执行切片
     import app.models.fsm_transition_log  # V10.3: FSM事件日志
-
     # V11.0.1 新增模型
     import app.models.improvement_candidate  # noqa: F401
     import app.models.market_universe_symbol  # 机会扫描本地全量股票池
@@ -147,7 +151,6 @@ async def ensure_mysql_tables() -> None:
     import app.models.position_eval_task  # noqa: F401
     import app.models.position_lifecycle_event  # V10.4.4: 生命周期事件
     import app.models.price_alert  # noqa: F401
-
     # 持仓评估任务
     import app.models.task_config as task_cfg  # noqa: F401
     import app.models.trade_journal  # noqa: F401
@@ -339,6 +342,51 @@ async def ensure_mysql_schema_updates() -> None:
             _autonomy_audit_log_add_column(
                 "regime_confidence FLOAT NULL COMMENT 'V10.2: 体制置信度'"
             ),
+        ),
+        (
+            "strategies",
+            "auto_scan_enabled",
+            "ALTER TABLE strategies ADD COLUMN auto_scan_enabled TINYINT(1) NOT NULL DEFAULT 1 COMMENT 'V10.5.4: 是否参与自动扫描'",
+        ),
+        (
+            "strategies",
+            "auto_scan_priority",
+            "ALTER TABLE strategies ADD COLUMN auto_scan_priority INT NOT NULL DEFAULT 100 COMMENT 'V10.5.4: 自动扫描优先级'",
+        ),
+        (
+            "improvement_candidates",
+            "candidate_type",
+            "ALTER TABLE improvement_candidates ADD COLUMN "
+            "candidate_type VARCHAR(64) NOT NULL DEFAULT 'parameter_tuning' "
+            "COMMENT 'V11.0.1: 改进类型'",
+        ),
+        (
+            "improvement_candidates",
+            "expected_impact",
+            "ALTER TABLE improvement_candidates ADD COLUMN "
+            "expected_impact TEXT NULL COMMENT 'V11.0.1: 预期影响'",
+        ),
+        (
+            "improvement_candidates",
+            "validation_plan",
+            "ALTER TABLE improvement_candidates ADD COLUMN "
+            "validation_plan TEXT NULL COMMENT 'V11.0.1: 验证计划'",
+        ),
+        (
+            "improvement_candidates",
+            "reviewed_at",
+            "ALTER TABLE improvement_candidates ADD COLUMN "
+            "reviewed_at DATETIME NULL COMMENT 'V11.0.1: 审核时间'",
+        ),
+        (
+            "strategies",
+            "governance_stage",
+            "ALTER TABLE strategies ADD COLUMN governance_stage VARCHAR(32) NULL COMMENT 'V11.0.1: 治理阶段 DISCOVERY/PAPER/SHADOW_LIVE/CHALLENGER/PRODUCTION/LIMITED/RETIRED'",
+        ),
+        (
+            "strategies",
+            "governance_note",
+            "ALTER TABLE strategies ADD COLUMN governance_note TEXT NULL COMMENT 'V11.0.1: 治理阶段说明/回滚备注'",
         ),
     ]
 

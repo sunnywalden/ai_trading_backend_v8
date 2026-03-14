@@ -13,11 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.broker.factory import make_option_broker_client
 from app.core.auth import get_current_user
 from app.core.config import settings
-from app.core.runtime_config import (
-    clear_autonomy_level_override,
-    get_autonomy_level,
-    set_autonomy_level,
-)
+from app.core.runtime_config import (clear_autonomy_level_override,
+                                     get_autonomy_level, set_autonomy_level)
 from app.engine.signal_engine import SignalEngine
 from app.models.autonomy_audit_log import AutonomyAuditLog
 from app.models.db import get_session
@@ -26,8 +23,12 @@ from app.models.trading_plan import TradingPlan
 from app.models.trading_signal import SignalStatus, TradingSignal
 from app.services.autonomous_engine import autonomous_engine
 from app.services.gross_exposure_allocator import gross_exposure_allocator
-from app.services.portfolio_cache_service import invalidate_portfolio_view_caches
-from app.services.signal_quality_funnel import SignalQualityTier, signal_quality_funnel
+from app.services.improvement_candidate_service import \
+    improvement_candidate_service
+from app.services.portfolio_cache_service import \
+    invalidate_portfolio_view_caches
+from app.services.signal_quality_funnel import (SignalQualityTier,
+                                                signal_quality_funnel)
 from app.services.signal_transition_service import signal_transition_service
 from app.services.truth_source_service import truth_source_service
 
@@ -296,6 +297,21 @@ def _build_v1054_rollout_state() -> dict[str, object]:
             settings.EXECUTION_POLICY_HARD_CONTROL_ENABLED
         ),
         "governance_hard_gate_enabled": bool(settings.GOVERNANCE_HARD_GATE_ENABLED),
+        "capital_velocity_v1101_enabled": bool(
+            settings.CAPITAL_VELOCITY_V1101_ENABLED
+        ),
+        "self_perception_v1101_enabled": bool(
+            settings.SELF_PERCEPTION_V1101_ENABLED
+        ),
+        "improvement_engine_v1101_enabled": bool(
+            settings.IMPROVEMENT_ENGINE_V1101_ENABLED
+        ),
+        "evolution_governance_v1101_enabled": bool(
+            settings.EVOLUTION_GOVERNANCE_V1101_ENABLED
+        ),
+        "style_alignment_v1101_enabled": bool(
+            settings.STYLE_ALIGNMENT_V1101_ENABLED
+        ),
     }
     if (
         flags["signal_pipeline_v1054_enabled"]
@@ -1264,10 +1280,8 @@ async def trigger_capacity_guard(
     """手动触发一次容量守卫扫描（超出并发持仓上限时自动生成 EXIT 信号）。"""
     from app.engine.position_rebalance_monitor import PositionRebalanceMonitor
     from app.services.regime_classifier import RegimeClassifier
-    from app.services.signal_quality_config import (
-        get_regime_adjusted_config,
-        get_signal_quality_config,
-    )
+    from app.services.signal_quality_config import (get_regime_adjusted_config,
+                                                    get_signal_quality_config)
 
     account_id = await _resolve_account_id()
     current_regime = await RegimeClassifier.get_current_regime(session)
@@ -1469,9 +1483,18 @@ async def get_meta_state(
     account_id = await _resolve_account_id()
 
     # 尝试返回已缓存快照（< 1h 内无需重建）
-    cached = await meta_state_service.get_latest_snapshot()
+    cached = await meta_state_service.get_latest_snapshot(
+        db=session,
+        account_id=account_id,
+    )
     if cached:
         result = cached.to_dict()
+        result["improvement_candidates"] = await improvement_candidate_service.list_candidates(
+            session,
+            account_id=account_id,
+            status="pending",
+            limit=10,
+        )
         result["_cached"] = True
         return result
 
@@ -1484,7 +1507,8 @@ async def get_meta_state(
 
     # 注入最新 Redis 客户端（确保启动后已注入）
     if meta_state_service._redis is None and redis_client is not None:  # noqa: SLF001
-        from app.services.meta_state_snapshot_service import init_meta_state_service
+        from app.services.meta_state_snapshot_service import \
+            init_meta_state_service
 
         init_meta_state_service(redis_client)
 
@@ -1492,8 +1516,24 @@ async def get_meta_state(
         account_id=account_id,
         positions=positions,
         equity=equity_value,
+        db=session,
     )
-    return snap.to_dict()
+    generated_candidates = await improvement_candidate_service.generate_from_meta_state(
+        session,
+        account_id=account_id,
+        snapshot=snap,
+    )
+    listed_candidates = await improvement_candidate_service.list_candidates(
+        session,
+        account_id=account_id,
+        status="pending",
+        limit=10,
+    )
+    payload = snap.to_dict()
+    payload["improvement_candidates"] = (
+        generated_candidates if generated_candidates else listed_candidates
+    )
+    return payload
 
 
 @router.get("/friction-state")
@@ -1505,7 +1545,8 @@ async def get_friction_state(
 
     返回被置信度阈值连续拒绝、尚未触发 soft relief 的开仓信号列表。
     """
-    from app.services.conviction_friction_tracker import conviction_friction_tracker
+    from app.services.conviction_friction_tracker import \
+        conviction_friction_tracker
 
     states = await conviction_friction_tracker.get_all_throttled_signals(
         min_rejection_count=1
@@ -1566,4 +1607,26 @@ async def get_false_hold_alerts(
         "feature_enabled": bool(
             getattr(settings, "SELF_PERCEPTION_V1101_ENABLED", False)
         ),
+    }
+
+
+@router.get("/improvement-candidates")
+async def get_improvement_candidates(
+    status: str | None = None,
+    limit: int = 20,
+    session: AsyncSession = Depends(get_session),
+    current_user: str = Depends(get_current_user),
+):
+    """V11.0.1 M3 — 查看系统自动生成的改进候选。"""
+    account_id = await _resolve_account_id()
+    rows = await improvement_candidate_service.list_candidates(
+        session,
+        account_id=account_id,
+        status=status,
+        limit=limit,
+    )
+    return {
+        "items": rows,
+        "count": len(rows),
+        "feature_enabled": bool(settings.IMPROVEMENT_ENGINE_V1101_ENABLED),
     }
