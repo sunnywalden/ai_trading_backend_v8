@@ -1,9 +1,11 @@
-from typing import AsyncGenerator
+from contextlib import asynccontextmanager
+from importlib import import_module
+from typing import Any, AsyncGenerator
 
 import redis.asyncio as redis
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import (AsyncSession, async_sessionmaker,
-                                    create_async_engine)
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import declarative_base
 
 from app.core.config import settings
@@ -12,7 +14,7 @@ Base = declarative_base()
 
 # 创建异步数据库引擎
 # 如果是 SQLite，不需要 pool_pre_ping 等参数，但 MySQL 强烈建议
-engine_kwargs = {
+engine_kwargs: dict[str, Any] = {
     "echo": False,
     "future": True,
 }
@@ -30,7 +32,11 @@ if settings.DB_TYPE == "mysql":
 engine = create_async_engine(settings.DATABASE_URL, **engine_kwargs)
 
 # 创建异步会话工厂
-SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+SessionLocal = async_sessionmaker(
+    engine,
+    expire_on_commit=False,
+    class_=AsyncSession,
+)
 
 # 创建 Redis 客户端
 redis_client = None
@@ -47,9 +53,6 @@ async def get_session() -> AsyncGenerator[AsyncSession, None]:
             yield session
         finally:
             await session.close()
-
-
-from contextlib import asynccontextmanager
 
 
 @asynccontextmanager
@@ -74,32 +77,39 @@ async def ensure_mysql_indexes() -> None:
         (
             "ix_behavior_account_symbol_window",
             "symbol_behavior_stats",
-            "CREATE INDEX ix_behavior_account_symbol_window ON symbol_behavior_stats (account_id, symbol, window_days)",
+            "CREATE INDEX ix_behavior_account_symbol_window ON "
+            "symbol_behavior_stats (account_id, symbol, window_days)",
         ),
         (
             "ix_risk_profile_symbol_market",
             "symbol_risk_profile",
-            "CREATE INDEX ix_risk_profile_symbol_market ON symbol_risk_profile (symbol, market)",
+            "CREATE INDEX ix_risk_profile_symbol_market ON "
+            "symbol_risk_profile (symbol, market)",
         ),
         (
             "ix_trend_account_symbol_timeframe_ts",
             "position_trend_snapshots",
-            "CREATE INDEX ix_trend_account_symbol_timeframe_ts ON position_trend_snapshots (account_id, symbol, timeframe, timestamp)",
+            "CREATE INDEX ix_trend_account_symbol_timeframe_ts ON "
+            "position_trend_snapshots (account_id, symbol, timeframe, "
+            "timestamp)",
         ),
         (
             "ix_signals_account_origin_status",
             "trading_signals",
-            "CREATE INDEX ix_signals_account_origin_status ON trading_signals (account_id, signal_origin_mode, status)",
+            "CREATE INDEX ix_signals_account_origin_status ON "
+            "trading_signals (account_id, signal_origin_mode, status)",
         ),
         (
             "ix_signals_origin_generated",
             "trading_signals",
-            "CREATE INDEX ix_signals_origin_generated ON trading_signals (signal_origin_mode, generated_at)",
+            "CREATE INDEX ix_signals_origin_generated ON "
+            "trading_signals (signal_origin_mode, generated_at)",
         ),
         (
             "ix_strategies_active_auto_scan_rank",
             "strategies",
-            "CREATE INDEX ix_strategies_active_auto_scan_rank ON strategies (is_active, auto_scan_enabled, auto_scan_priority, last_run_at)",
+            "CREATE INDEX ix_strategies_active_auto_scan_rank ON strategies "
+            "(is_active, auto_scan_enabled, auto_scan_priority, last_run_at)",
         ),
     ]
 
@@ -127,35 +137,35 @@ async def ensure_mysql_tables() -> None:
     if settings.DB_TYPE != "mysql":
         return
 
-    # 导入所有模型，确保它们注册到 Base.metadata
-    import app.models.algo_execution_task  # noqa: F401
-    import app.models.audit_log  # noqa: F401
-    import app.models.autonomy_audit_log  # noqa: F401
-    # V10 新增
-    import app.models.backtest_task  # noqa: F401
-    import app.models.copilot_message  # noqa: F401
-    import app.models.equity_snapshot  # noqa: F401
-    import app.models.etf_watchlist  # V10.1: ETF自选池
-    import app.models.execution_intent  # V10.3.2: 执行幂等意图
-    import app.models.execution_policy_profile  # V10.5.3: 执行反馈画像
-    import app.models.execution_slice  # V10.4.4: 执行切片
-    import app.models.fsm_transition_log  # V10.3: FSM事件日志
-    # V11.0.1 新增模型
-    import app.models.improvement_candidate  # noqa: F401
-    import app.models.market_universe_symbol  # 机会扫描本地全量股票池
-    import app.models.meta_state_snapshot  # noqa: F401
-    import app.models.notification  # noqa: F401
-    import app.models.paper_account  # noqa: F401
-    import app.models.portfolio_snapshot  # noqa: F401
-    import app.models.position  # V10.4.4: 仓位聚合根
-    import app.models.position_eval_task  # noqa: F401
-    import app.models.position_lifecycle_event  # V10.4.4: 生命周期事件
-    import app.models.price_alert  # noqa: F401
-    # 持仓评估任务
-    import app.models.task_config as task_cfg  # noqa: F401
-    import app.models.trade_journal  # noqa: F401
-    import app.models.trade_pnl_attribution  # noqa: F401
-    import app.models.trading_plan  # noqa: F401
+    model_modules = [
+        "app.models.algo_execution_task",
+        "app.models.audit_log",
+        "app.models.autonomy_audit_log",
+        "app.models.backtest_task",
+        "app.models.copilot_message",
+        "app.models.equity_snapshot",
+        "app.models.etf_watchlist",
+        "app.models.execution_intent",
+        "app.models.execution_policy_profile",
+        "app.models.execution_slice",
+        "app.models.fsm_transition_log",
+        "app.models.improvement_candidate",
+        "app.models.market_universe_symbol",
+        "app.models.meta_state_snapshot",
+        "app.models.notification",
+        "app.models.paper_account",
+        "app.models.portfolio_snapshot",
+        "app.models.position",
+        "app.models.position_eval_task",
+        "app.models.position_lifecycle_event",
+        "app.models.price_alert",
+        "app.models.task_config",
+        "app.models.trade_journal",
+        "app.models.trade_pnl_attribution",
+        "app.models.trading_plan",
+    ]
+    for module_name in model_modules:
+        import_module(module_name)
 
     # 使用 SQLAlchemy metadata.create_all 自动创建所有缺失的表
     async with engine.begin() as conn:
@@ -179,40 +189,47 @@ async def ensure_mysql_schema_updates() -> None:
         return f"ALTER TABLE {trading_plan_table} ADD COLUMN {definition_sql}"
 
     def _autonomy_audit_log_add_column(definition_sql: str) -> str:
-        return f"ALTER TABLE {autonomy_audit_log_table} ADD COLUMN {definition_sql}"
+        return f"ALTER TABLE {autonomy_audit_log_table} " f"ADD COLUMN {definition_sql}"
 
-    # 定义需要检查的列更新
-    # 格式: (table_name, column_name, add_column_sql)
+    # 缺失列补齐定义：table_name, column_name, add_column_sql
     column_updates = [
         (
             "trading_signals",
             "quantity_mode",
-            "ALTER TABLE trading_signals ADD COLUMN quantity_mode VARCHAR(16) NULL COMMENT 'V10.3.2: 数量语义模式 PCT_EQUITY/ABS_SHARES'",
+            "ALTER TABLE trading_signals ADD COLUMN quantity_mode "
+            "VARCHAR(16) NULL COMMENT 'V10.3.2: 数量语义模式 "
+            "PCT_EQUITY/ABS_SHARES'",
         ),
         (
             "trading_signals",
             "quantity_value",
-            "ALTER TABLE trading_signals ADD COLUMN quantity_value FLOAT NULL COMMENT 'V10.3.2: 数量语义原始值'",
+            "ALTER TABLE trading_signals ADD COLUMN quantity_value FLOAT NULL "
+            "COMMENT 'V10.3.2: 数量语义原始值'",
         ),
         (
             "trading_signals",
             "pnl",
-            "ALTER TABLE trading_signals ADD COLUMN pnl FLOAT NULL COMMENT '盈亏（绝对金额）'",
+            "ALTER TABLE trading_signals ADD COLUMN pnl FLOAT NULL COMMENT "
+            "'盈亏（绝对金额）'",
         ),
         (
             "trading_signals",
             "pnl_pct",
-            "ALTER TABLE trading_signals ADD COLUMN pnl_pct FLOAT NULL COMMENT '盈亏百分比'",
+            "ALTER TABLE trading_signals ADD COLUMN pnl_pct FLOAT NULL "
+            "COMMENT "
+            "'盈亏百分比'",
         ),
         (
             "trading_signals",
             "is_winner",
-            "ALTER TABLE trading_signals ADD COLUMN is_winner VARCHAR(8) NULL COMMENT 'YES/NO - 是否盈利交易'",
+            "ALTER TABLE trading_signals ADD COLUMN is_winner VARCHAR(8) NULL "
+            "COMMENT 'YES/NO - 是否盈利交易'",
         ),
         (
             "trading_signals",
             "signal_origin_mode",
-            "ALTER TABLE trading_signals ADD COLUMN signal_origin_mode VARCHAR(16) NULL COMMENT 'V10.5.4: REAL/SYNTHETIC/BACKFILL'",
+            "ALTER TABLE trading_signals ADD COLUMN signal_origin_mode "
+            "VARCHAR(16) NULL COMMENT 'V10.5.4: REAL/SYNTHETIC/BACKFILL'",
         ),
         (
             trading_plan_table,
@@ -346,12 +363,14 @@ async def ensure_mysql_schema_updates() -> None:
         (
             "strategies",
             "auto_scan_enabled",
-            "ALTER TABLE strategies ADD COLUMN auto_scan_enabled TINYINT(1) NOT NULL DEFAULT 1 COMMENT 'V10.5.4: 是否参与自动扫描'",
+            "ALTER TABLE strategies ADD COLUMN auto_scan_enabled TINYINT(1) "
+            "NOT NULL DEFAULT 1 COMMENT 'V10.5.4: 是否参与自动扫描'",
         ),
         (
             "strategies",
             "auto_scan_priority",
-            "ALTER TABLE strategies ADD COLUMN auto_scan_priority INT NOT NULL DEFAULT 100 COMMENT 'V10.5.4: 自动扫描优先级'",
+            "ALTER TABLE strategies ADD COLUMN auto_scan_priority INT NOT "
+            "NULL DEFAULT 100 COMMENT 'V10.5.4: 自动扫描优先级'",
         ),
         (
             "improvement_candidates",
@@ -381,119 +400,147 @@ async def ensure_mysql_schema_updates() -> None:
         (
             "strategies",
             "governance_stage",
-            "ALTER TABLE strategies ADD COLUMN governance_stage VARCHAR(32) NULL COMMENT 'V11.0.1: 治理阶段 DISCOVERY/PAPER/SHADOW_LIVE/CHALLENGER/PRODUCTION/LIMITED/RETIRED'",
+            "ALTER TABLE strategies ADD COLUMN governance_stage VARCHAR(32) "
+            "NULL COMMENT 'V11.0.1: 治理阶段 "
+            "DISCOVERY/PAPER/SHADOW_LIVE/CHALLENGER/PRODUCTION/"
+            "LIMITED/RETIRED'",
         ),
         (
             "strategies",
             "governance_note",
-            "ALTER TABLE strategies ADD COLUMN governance_note TEXT NULL COMMENT 'V11.0.1: 治理阶段说明/回滚备注'",
+            "ALTER TABLE strategies ADD COLUMN governance_note TEXT NULL "
+            "COMMENT 'V11.0.1: 治理阶段说明/回滚备注'",
         ),
     ]
 
     async with engine.begin() as conn:
-        for table_name, column_name, add_sql in column_updates:
-            try:
-                # 1. 检查表是否存在
-                result = await conn.execute(
-                    text(
-                        """
-                        SELECT COUNT(*)
-                        FROM information_schema.tables 
-                        WHERE table_schema = DATABASE() 
-                        AND table_name = :table_name
-                        """
-                    ),
-                    {"table_name": table_name},
-                )
-                if (result.scalar() or 0) == 0:
-                    continue
+        await _apply_missing_column_updates(conn, column_updates)
+        await _ensure_trading_signal_status_enum(conn)
 
-                # 2. 检查列是否存在
-                result = await conn.execute(
-                    text(
-                        """
-                        SELECT COUNT(*)
-                        FROM information_schema.columns 
-                        WHERE table_schema = DATABASE() 
-                        AND table_name = :table_name 
-                        AND column_name = :column_name
-                        """
-                    ),
-                    {"table_name": table_name, "column_name": column_name},
-                )
-                exists = (result.scalar() or 0) > 0
-
-                # 3. 如果不存在则添加
-                if not exists:
-                    await conn.execute(text(add_sql))
-            except Exception:
-                # 忽略错误，避免阻断启动
-                pass
-
-        # 枚举扩容修复：trading_signals.status 增加 SKIPPED（仅 MySQL ENUM 生效）
-        try:
-            result = await conn.execute(
-                text(
-                    """
-                    SELECT COLUMN_TYPE
-                    FROM information_schema.columns
-                    WHERE table_schema = DATABASE()
-                      AND table_name = 'trading_signals'
-                      AND column_name = 'status'
-                    """
-                )
-            )
-            row = result.fetchone()
-            column_type = (row[0] or "") if row else ""
-            if (
-                column_type.lower().startswith("enum(")
-                and "'SKIPPED'" not in column_type
-            ):
-                await conn.execute(
-                    text(
-                        """
-                        ALTER TABLE trading_signals
-                        MODIFY COLUMN status ENUM(
-                            'GENERATED','VALIDATED','REJECTED','QUEUED','EXECUTING','EXECUTED','FAILED','SKIPPED','CANCELLED','EXPIRED'
-                        ) NOT NULL DEFAULT 'GENERATED'
-                        """
-                    )
-                )
-        except Exception:
-            pass
-
-        # 列类型修复（已有列的长度/类型扩展）
-        # 格式: (table, column, min_char_length, modify_sql)
+        # 已有列的长度/类型扩展：table, column, min_char_length, modify_sql
         column_type_fixes = [
             (
                 copilot_messages_table,
                 "role",
                 16,
-                f"ALTER TABLE {copilot_messages_table} MODIFY COLUMN role VARCHAR(16) NOT NULL COMMENT 'user/assistant/system'",
+                (
+                    f"ALTER TABLE {copilot_messages_table} MODIFY COLUMN role "
+                    "VARCHAR(16) NOT NULL COMMENT 'user/assistant/system'"
+                ),
             ),
         ]
-        for table_name, column_name, min_length, modify_sql in column_type_fixes:
-            try:
-                result = await conn.execute(
-                    text(
-                        """
-                        SELECT CHARACTER_MAXIMUM_LENGTH
-                        FROM information_schema.columns
-                        WHERE table_schema = DATABASE()
-                        AND table_name = :table_name
-                        AND column_name = :column_name
-                        """
-                    ),
-                    {"table_name": table_name, "column_name": column_name},
-                )
-                row = result.fetchone()
-                if row and (row[0] or 0) < min_length:
-                    await conn.execute(text(modify_sql))
-            except Exception:
-                pass
+        await _apply_column_type_fixes(conn, column_type_fixes)
 
 
-async def get_redis():
+async def _apply_missing_column_updates(
+    conn: Any,
+    column_updates: list[tuple[str, str, str]],
+) -> None:
+    for table_name, column_name, add_sql in column_updates:
+        try:
+            if not await _mysql_table_exists(conn, table_name):
+                continue
+            if await _mysql_column_exists(conn, table_name, column_name):
+                continue
+            await conn.execute(text(add_sql))
+        except SQLAlchemyError:
+            continue
+
+
+async def _mysql_table_exists(conn: Any, table_name: str) -> bool:
+    result = await conn.execute(
+        text(
+            """
+            SELECT COUNT(*)
+            FROM information_schema.tables
+            WHERE table_schema = DATABASE()
+              AND table_name = :table_name
+            """
+        ),
+        {"table_name": table_name},
+    )
+    return (result.scalar() or 0) > 0
+
+
+async def _mysql_column_exists(
+    conn: Any,
+    table_name: str,
+    column_name: str,
+) -> bool:
+    result = await conn.execute(
+        text(
+            """
+            SELECT COUNT(*)
+            FROM information_schema.columns
+            WHERE table_schema = DATABASE()
+              AND table_name = :table_name
+              AND column_name = :column_name
+            """
+        ),
+        {"table_name": table_name, "column_name": column_name},
+    )
+    return (result.scalar() or 0) > 0
+
+
+async def _ensure_trading_signal_status_enum(conn: Any) -> None:
+    try:
+        result = await conn.execute(
+            text(
+                """
+                SELECT COLUMN_TYPE
+                FROM information_schema.columns
+                WHERE table_schema = DATABASE()
+                  AND table_name = 'trading_signals'
+                  AND column_name = 'status'
+                """
+            )
+        )
+        row = result.fetchone()
+        column_type = (row[0] or "") if row else ""
+        if not column_type.lower().startswith("enum("):
+            return
+        if "'SKIPPED'" in column_type:
+            return
+        await conn.execute(
+            text(
+                """
+                ALTER TABLE trading_signals
+                MODIFY COLUMN status ENUM(
+                    'GENERATED','VALIDATED','REJECTED','QUEUED','EXECUTING','EXECUTED','FAILED','SKIPPED','CANCELLED','EXPIRED'
+                ) NOT NULL DEFAULT 'GENERATED'
+                """
+            )
+        )
+    except SQLAlchemyError:
+        return
+
+
+async def _apply_column_type_fixes(
+    conn: Any,
+    column_type_fixes: list[tuple[str, str, int, str]],
+) -> None:
+    for table_name, column_name, min_length, modify_sql in column_type_fixes:
+        try:
+            result = await conn.execute(
+                text(
+                    """
+                    SELECT CHARACTER_MAXIMUM_LENGTH
+                    FROM information_schema.columns
+                    WHERE table_schema = DATABASE()
+                      AND table_name = :table_name
+                      AND column_name = :column_name
+                    """
+                ),
+                {"table_name": table_name, "column_name": column_name},
+            )
+            row = result.fetchone()
+            if row and (row[0] or 0) < min_length:
+                await conn.execute(text(modify_sql))
+        except SQLAlchemyError:
+            continue
+
+
+def get_redis():
     """获取 Redis 客户端的依赖项"""
     return redis_client
 
@@ -502,11 +549,11 @@ async def close_db_resources() -> None:
     """显式关闭数据库与 Redis 资源（适用于独立脚本退出前调用）。"""
     try:
         await engine.dispose()
-    except Exception:
+    except (RuntimeError, SQLAlchemyError):
         pass
 
     if redis_client:
         try:
             await redis_client.close()
-        except Exception:
+        except RuntimeError:
             pass

@@ -19,11 +19,11 @@ CVS（Capital Velocity Score）定义：
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from sqlalchemy import and_, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -48,23 +48,35 @@ _EFFICIENCY_GRADES = [
 ]
 
 
-@dataclass
 class CapitalVelocityResult:
     """CVS 计算结果。"""
 
-    account_id: str
-    score: float  # 0.0 ~ 200.0
-    turnover_rate: float  # 原始周转率
-    win_rate: float  # 已实现胜率
-    idle_cash_ratio: float  # 闲置资本比例
-    efficiency_grade: str  # A / B / C / D
-    regime: str
-    computed_at: str = field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat()
-    )
-    signal_count: int = 0  # 计算窗口内信号数量
-    is_idle_alert: bool = False  # True 若 idle ratio > 阈值
-    details: dict[str, Any] = field(default_factory=dict)
+    def __init__(
+        self,
+        *,
+        account_id: str,
+        score: float,
+        turnover_rate: float,
+        win_rate: float,
+        idle_cash_ratio: float,
+        efficiency_grade: str,
+        regime: str,
+        computed_at: str | None = None,
+        signal_count: int = 0,
+        is_idle_alert: bool = False,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        self.account_id = account_id
+        self.score = score
+        self.turnover_rate = turnover_rate
+        self.win_rate = win_rate
+        self.idle_cash_ratio = idle_cash_ratio
+        self.efficiency_grade = efficiency_grade
+        self.regime = regime
+        self.computed_at = computed_at or datetime.now(timezone.utc).isoformat()
+        self.signal_count = signal_count
+        self.is_idle_alert = is_idle_alert
+        self.details = details or {}
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -168,9 +180,14 @@ class CapitalVelocityService:
         M1.4 历史 CVS 对比——返回指定天数的日均 CVS 趋势摘要。
 
         Returns:
-            {"daily_scores": [...], "avg_score": float, "trend": "UP"|"DOWN"|"FLAT"}
+            {
+                "daily_scores": [...],
+                "avg_score": float,
+                "trend": "UP"|"DOWN"|"FLAT",
+            }
         """
         regime = regime or "NEUTRAL"
+        equity_reference = round(max(equity, 0.0), 2)
         try:
             from app.models.trading_signal import TradingSignal
 
@@ -219,10 +236,16 @@ class CapitalVelocityService:
                 "daily_scores": daily_scores,
                 "avg_score": round(avg_score, 2),
                 "trend": trend,
+                "equity_reference": equity_reference,
             }
-        except Exception as exc:
+        except (SQLAlchemyError, RuntimeError, TypeError, ValueError) as exc:
             logger.warning("[CVS] compute_historical_comparison: %s", exc)
-            return {"daily_scores": [], "avg_score": 0.0, "trend": "FLAT"}
+            return {
+                "daily_scores": [],
+                "avg_score": 0.0,
+                "trend": "FLAT",
+                "equity_reference": equity_reference,
+            }
 
     # ──────────────────────────────────────────────────────────────────
     # Private helpers
@@ -241,7 +264,7 @@ class CapitalVelocityService:
                 if isinstance(p, dict)
             )
             return max(0.0, 1.0 - (gross / equity))
-        except Exception:
+        except (RuntimeError, TypeError, ValueError):
             return 1.0
 
     @staticmethod
@@ -295,7 +318,7 @@ class CapitalVelocityService:
             win_rate = profitable / len(sigs) if sigs else 0.0
 
             return round(turnover, 6), round(win_rate, 4), len(sigs)
-        except Exception as exc:
+        except (SQLAlchemyError, RuntimeError, TypeError, ValueError) as exc:
             logger.warning("[CVS] _compute_turnover: %s", exc)
             return 1.0, 0.0, 0
 

@@ -6,15 +6,19 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path
 from pydantic import BaseModel
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, select
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.functions import count as sa_count
 
 from app.broker.factory import make_option_broker_client
 from app.core.auth import get_current_user
 from app.core.config import settings
-from app.core.runtime_config import (clear_autonomy_level_override,
-                                     get_autonomy_level, set_autonomy_level)
+from app.core.runtime_config import (
+    clear_autonomy_level_override,
+    get_autonomy_level,
+    set_autonomy_level,
+)
 from app.engine.signal_engine import SignalEngine
 from app.models.autonomy_audit_log import AutonomyAuditLog
 from app.models.db import get_session
@@ -23,12 +27,9 @@ from app.models.trading_plan import TradingPlan
 from app.models.trading_signal import SignalStatus, TradingSignal
 from app.services.autonomous_engine import autonomous_engine
 from app.services.gross_exposure_allocator import gross_exposure_allocator
-from app.services.improvement_candidate_service import \
-    improvement_candidate_service
-from app.services.portfolio_cache_service import \
-    invalidate_portfolio_view_caches
-from app.services.signal_quality_funnel import (SignalQualityTier,
-                                                signal_quality_funnel)
+from app.services.improvement_candidate_service import improvement_candidate_service
+from app.services.portfolio_cache_service import invalidate_portfolio_view_caches
+from app.services.signal_quality_funnel import SignalQualityTier, signal_quality_funnel
 from app.services.signal_transition_service import signal_transition_service
 from app.services.truth_source_service import truth_source_service
 
@@ -297,21 +298,15 @@ def _build_v1054_rollout_state() -> dict[str, object]:
             settings.EXECUTION_POLICY_HARD_CONTROL_ENABLED
         ),
         "governance_hard_gate_enabled": bool(settings.GOVERNANCE_HARD_GATE_ENABLED),
-        "capital_velocity_v1101_enabled": bool(
-            settings.CAPITAL_VELOCITY_V1101_ENABLED
-        ),
-        "self_perception_v1101_enabled": bool(
-            settings.SELF_PERCEPTION_V1101_ENABLED
-        ),
+        "capital_velocity_v1101_enabled": bool(settings.CAPITAL_VELOCITY_V1101_ENABLED),
+        "self_perception_v1101_enabled": bool(settings.SELF_PERCEPTION_V1101_ENABLED),
         "improvement_engine_v1101_enabled": bool(
             settings.IMPROVEMENT_ENGINE_V1101_ENABLED
         ),
         "evolution_governance_v1101_enabled": bool(
             settings.EVOLUTION_GOVERNANCE_V1101_ENABLED
         ),
-        "style_alignment_v1101_enabled": bool(
-            settings.STYLE_ALIGNMENT_V1101_ENABLED
-        ),
+        "style_alignment_v1101_enabled": bool(settings.STYLE_ALIGNMENT_V1101_ENABLED),
     }
     if (
         flags["signal_pipeline_v1054_enabled"]
@@ -458,7 +453,7 @@ async def get_autonomy_status(
 
     # 今日已执行交易数（与引擎对齐：从审计日志统计 order_id 非空的下单记录）
     exec_result = await session.execute(
-        select(func.count(AutonomyAuditLog.id)).where(
+        select(sa_count(AutonomyAuditLog.id)).where(
             and_(
                 AutonomyAuditLog.account_id == account_id,
                 AutonomyAuditLog.order_id.isnot(None),
@@ -471,7 +466,7 @@ async def get_autonomy_status(
 
     # 信号流水线各状态数量（今日）
     pipeline_result = await session.execute(
-        select(TradingSignal.status, func.count(TradingSignal.id))
+        select(TradingSignal.status, sa_count(TradingSignal.id))
         .where(
             and_(
                 TradingSignal.account_id == account_id,
@@ -537,7 +532,7 @@ async def get_autonomy_status(
 
     # 熔断：若今日已执行失败超过 3 笔，视为熔断触发
     fail_result = await session.execute(
-        select(func.count(TradingSignal.id)).where(
+        select(sa_count(TradingSignal.id)).where(
             and_(
                 TradingSignal.account_id == account_id,
                 TradingSignal.status == SignalStatus.FAILED,
@@ -771,7 +766,7 @@ async def get_audit_log(
     safe_offset = max(0, int(offset or 0))
 
     # 总数（用于前端分页）
-    total_res = await session.execute(select(func.count(AutonomyAuditLog.id)))
+    total_res = await session.execute(select(sa_count(AutonomyAuditLog.id)))
     total = int(total_res.scalar() or 0)
 
     result = await session.execute(
@@ -1280,8 +1275,10 @@ async def trigger_capacity_guard(
     """手动触发一次容量守卫扫描（超出并发持仓上限时自动生成 EXIT 信号）。"""
     from app.engine.position_rebalance_monitor import PositionRebalanceMonitor
     from app.services.regime_classifier import RegimeClassifier
-    from app.services.signal_quality_config import (get_regime_adjusted_config,
-                                                    get_signal_quality_config)
+    from app.services.signal_quality_config import (
+        get_regime_adjusted_config,
+        get_signal_quality_config,
+    )
 
     account_id = await _resolve_account_id()
     current_regime = await RegimeClassifier.get_current_regime(session)
@@ -1489,11 +1486,13 @@ async def get_meta_state(
     )
     if cached:
         result = cached.to_dict()
-        result["improvement_candidates"] = await improvement_candidate_service.list_candidates(
-            session,
-            account_id=account_id,
-            status="pending",
-            limit=10,
+        result["improvement_candidates"] = (
+            await improvement_candidate_service.list_candidates(
+                session,
+                account_id=account_id,
+                status="pending",
+                limit=10,
+            )
         )
         result["_cached"] = True
         return result
@@ -1507,8 +1506,7 @@ async def get_meta_state(
 
     # 注入最新 Redis 客户端（确保启动后已注入）
     if meta_state_service._redis is None and redis_client is not None:  # noqa: SLF001
-        from app.services.meta_state_snapshot_service import \
-            init_meta_state_service
+        from app.services.meta_state_snapshot_service import init_meta_state_service
 
         init_meta_state_service(redis_client)
 
@@ -1545,8 +1543,7 @@ async def get_friction_state(
 
     返回被置信度阈值连续拒绝、尚未触发 soft relief 的开仓信号列表。
     """
-    from app.services.conviction_friction_tracker import \
-        conviction_friction_tracker
+    from app.services.conviction_friction_tracker import conviction_friction_tracker
 
     states = await conviction_friction_tracker.get_all_throttled_signals(
         min_rejection_count=1

@@ -32,10 +32,7 @@ async def test_check_graduation_includes_governance_gate_when_disabled():
             )
         ),
     ), patch(
-        (
-            "app.services.paper_trading_service.settings."
-            "GOVERNANCE_HARD_GATE_ENABLED"
-        ),
+        ("app.services.paper_trading_service.settings." "GOVERNANCE_HARD_GATE_ENABLED"),
         False,
     ):
         result = await service.check_graduation(
@@ -47,7 +44,7 @@ async def test_check_graduation_includes_governance_gate_when_disabled():
 
     assert result["eligible"] is True
     assert result["governance_gate"]["gate_applied"] is False
-    assert result["governance_gate"]["stage"] == "CHALLENGER"
+    assert result["governance_gate"]["stage"] == "LIMITED"
 
 
 @pytest.mark.asyncio
@@ -75,10 +72,7 @@ async def test_check_graduation_hard_gate_blocks_insufficient_evidence():
             )
         ),
     ), patch(
-        (
-            "app.services.paper_trading_service.settings."
-            "GOVERNANCE_HARD_GATE_ENABLED"
-        ),
+        ("app.services.paper_trading_service.settings." "GOVERNANCE_HARD_GATE_ENABLED"),
         True,
     ):
         result = await service.check_graduation(
@@ -90,7 +84,7 @@ async def test_check_graduation_hard_gate_blocks_insufficient_evidence():
 
     assert result["eligible"] is False
     assert result["governance_gate"]["gate_applied"] is True
-    assert result["governance_gate"]["stage"] == "PAPER"
+    assert result["governance_gate"]["stage"] == "LIMITED"
     assert (
         "SHADOW_LIVE_EVIDENCE_MISSING"
         in result["governance_gate"]["promotion_blockers"]

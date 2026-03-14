@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from sqlalchemy import and_, desc, or_, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -68,6 +69,15 @@ _RISK_LEVEL_RANK = {
 }
 
 
+def _coerce_optional_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class PositionRebalanceMonitor:
     """
     持仓再平衡监控器
@@ -78,6 +88,55 @@ class PositionRebalanceMonitor:
 
     def __init__(self, session: AsyncSession):
         self.session = session
+
+    @staticmethod
+    def _empty_scan_result(scanned: int = 0) -> Dict[str, Any]:
+        return {
+            "scanned": scanned,
+            "reduce_signals": 0,
+            "exit_signals": 0,
+            "skipped_no_score": 0,
+            "skipped_already_pending": 0,
+            "details": [],
+        }
+
+    @staticmethod
+    def _merge_scan_outcome(
+        summary: Dict[str, Any],
+        outcome: Dict[str, Any],
+    ) -> None:
+        for key in (
+            "reduce_signals",
+            "exit_signals",
+            "skipped_no_score",
+            "skipped_already_pending",
+        ):
+            summary[key] += int(outcome.get(key, 0))
+        detail = outcome.get("detail")
+        if detail is not None:
+            summary["details"].append(detail)
+
+    @staticmethod
+    def _extract_score_snapshot(
+        score_record: PositionScore,
+    ) -> tuple[str, int]:
+        recommendation = str(
+            getattr(score_record, "recommendation", "HOLD") or "HOLD"
+        ).upper()
+        overall_val = getattr(score_record, "overall_score", 50)
+        overall = int(overall_val) if overall_val is not None else 50
+        return recommendation, overall
+
+    @staticmethod
+    def _resolve_signal_plan(
+        recommendation: str,
+        overall: int,
+        qty: float,
+    ) -> tuple[SignalType, float, int]:
+        if recommendation == "SELL" or overall <= _SCORE_SELL_THRESHOLD:
+            return SignalType.EXIT, abs(qty), 85
+        quantity = max(1.0, abs(qty) * _DEFAULT_REDUCE_RATIO)
+        return SignalType.REDUCE, quantity, 65
 
     async def scan(self, account_id: str) -> Dict[str, Any]:
         """
@@ -95,145 +154,18 @@ class PositionRebalanceMonitor:
         """
         positions = await self._fetch_positions(account_id)
         if not positions:
-            return {
-                "scanned": 0,
-                "reduce_signals": 0,
-                "exit_signals": 0,
-                "skipped_no_score": 0,
-                "skipped_already_pending": 0,
-                "details": [],
-            }
+            return self._empty_scan_result()
 
-        reduce_count = 0
-        exit_count = 0
-        no_score_count = 0
-        already_pending = 0
-        details: List[Dict[str, Any]] = []
+        summary = self._empty_scan_result(scanned=len(positions))
 
         for pos in positions:
-            symbol: str = pos["symbol"]
-            qty: float = pos["qty"]
-
-            if qty == 0:
-                continue
-
-            # 获取最新评分（24h 内）
-            score_record = await self._get_latest_score(account_id, symbol)
-            if score_record is None:
-                no_score_count += 1
-                logger.debug(f"[RebalanceMonitor] {symbol}: no recent score, skip")
-                continue
-
-            # 强制转为 Python 原始类型，绕过 SQLAlchemy 列的静态推断
-            recommendation: str = str(
-                getattr(score_record, "recommendation", "HOLD") or "HOLD"
-            ).upper()
-            overall_val = getattr(score_record, "overall_score", 50)
-            overall: int = int(overall_val) if overall_val is not None else 50
-
-            # 只处理 REDUCE 和 SELL
-            if recommendation not in ("REDUCE", "SELL"):
-                details.append(
-                    {
-                        "symbol": symbol,
-                        "score": overall,
-                        "recommendation": recommendation,
-                        "signal_created": None,
-                    }
-                )
-                continue
-
-            # 检查是否已有待执行的 REDUCE/EXIT 信号
-            if await self._has_pending_signal(account_id, symbol):
-                already_pending += 1
-                logger.debug(
-                    f"[RebalanceMonitor] {symbol}: pending signal already exists, skip"
-                )
-                details.append(
-                    {
-                        "symbol": symbol,
-                        "score": overall,
-                        "recommendation": recommendation,
-                        "signal_created": "SKIPPED_PENDING",
-                    }
-                )
-                continue
-
-            # 决定信号类型和数量
-            if recommendation == "SELL" or overall <= _SCORE_SELL_THRESHOLD:
-                signal_type = SignalType.EXIT
-                quantity = abs(qty)  # 全部清仓
-                priority = 85
-            else:
-                signal_type = SignalType.REDUCE
-                quantity = max(1.0, abs(qty) * _DEFAULT_REDUCE_RATIO)
-                priority = 65
-
-            # V11.0.1 M2.3: False-Hold 检测
-            false_hold = False
-            if getattr(settings, "SELF_PERCEPTION_V1101_ENABLED", False):
-                threshold_rounds = int(
-                    getattr(settings, "FALSE_HOLD_DETECTION_ROUNDS", 3)
-                )
-                cycle_count = await self._count_recent_reduce_signals(
-                    account_id, symbol, hours=48
-                )
-                if cycle_count >= threshold_rounds:
-                    false_hold = True
-                    await self._emit_false_hold_alert(
-                        account_id,
-                        symbol,
-                        score=overall,
-                        recommendation=recommendation,
-                        cycle_count=cycle_count,
-                    )
-
-            await self._create_signal(
-                account_id=account_id,
-                symbol=symbol,
-                qty=qty,
-                quantity=quantity,
-                signal_type=signal_type,
-                score=overall,
-                recommendation=recommendation,
-                priority=priority,
-                false_hold_protection=false_hold,
+            self._merge_scan_outcome(
+                summary,
+                await self._process_position(account_id, pos),
             )
 
-            if signal_type == SignalType.EXIT:
-                exit_count += 1
-            else:
-                reduce_count += 1
-
-            details.append(
-                {
-                    "symbol": symbol,
-                    "score": overall,
-                    "recommendation": recommendation,
-                    "signal_created": signal_type.value,
-                    "quantity": quantity,
-                }
-            )
-
-            logger.info(
-                f"[RebalanceMonitor] {signal_type.value} signal created: "
-                f"{symbol} score={overall} qty={quantity:.0f}"
-            )
-
-        try:
-            await self.session.commit()
-        except Exception as e:
-            logger.error(f"[RebalanceMonitor] DB commit failed: {e}")
-            await self.session.rollback()
-
-        return {
-            "scanned": len(positions),
-            "reduce_signals": reduce_count,
-            "exit_signals": exit_count,
-            "skipped_no_score": no_score_count,
-            "skipped_already_pending": already_pending,
-            "details": details,
-        }
+        await self._commit_changes("[RebalanceMonitor]")
+        return summary
 
     async def enforce_position_capacity(
         self,
@@ -307,10 +239,12 @@ class PositionRebalanceMonitor:
             qty = float(candidate["qty"])
             quantity = abs(qty)
             note_reason = (
-                f"超出最大并发持仓上限：当前 {current_positions} 个 > 上限 {max_positions} 个；"
-                f"基于持仓评估自动腾挪仓位（score={candidate['overall_score']}, rec={candidate['recommendation']}）"
+                f"超出最大并发持仓上限：当前 {current_positions} 个 > "
+                f"上限 {max_positions} 个；基于持仓评估自动腾挪仓位"
+                f"（score={candidate['overall_score']}, "
+                f"rec={candidate['recommendation']}）"
             )
-            await self._create_signal(
+            self._create_signal(
                 account_id=account_id,
                 symbol=symbol,
                 qty=qty,
@@ -322,7 +256,7 @@ class PositionRebalanceMonitor:
                 note_reason=note_reason,
                 metadata_extra={
                     "capacity_guard": True,
-                    "capacity_guard_overflow": current_positions - max_positions,
+                    "capacity_guard_overflow": (current_positions - max_positions),
                     "capacity_guard_target_max": max_positions,
                     "capacity_guard_rank": created + 1,
                     "risk_level": candidate.get("risk_level"),
@@ -342,12 +276,7 @@ class PositionRebalanceMonitor:
                 }
             )
 
-        try:
-            await self.session.commit()
-        except Exception as e:
-            logger.error(f"[CapacityGuard] DB commit failed: {e}")
-            await self.session.rollback()
-            raise
+        await self._commit_changes("[CapacityGuard]", raise_on_error=True)
 
         return {
             "current_positions": current_positions,
@@ -359,9 +288,159 @@ class PositionRebalanceMonitor:
             "status": "capacity-reduced",
         }
 
-    # ─────────────────────────────────────────────────────────
-    # 内部方法
-    # ─────────────────────────────────────────────────────────
+    async def _process_position(
+        self,
+        account_id: str,
+        pos: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        symbol = str(pos["symbol"])
+        qty = float(pos["qty"])
+        if qty == 0:
+            return {}
+
+        score_record = await self._get_latest_score(account_id, symbol)
+        if score_record is None:
+            logger.debug(
+                "[RebalanceMonitor] %s: no recent score, skip",
+                symbol,
+            )
+            return {"skipped_no_score": 1}
+
+        recommendation, overall = self._extract_score_snapshot(score_record)
+        if recommendation not in ("REDUCE", "SELL"):
+            return {
+                "detail": {
+                    "symbol": symbol,
+                    "score": overall,
+                    "recommendation": recommendation,
+                    "signal_created": None,
+                }
+            }
+
+        if await self._has_pending_signal(account_id, symbol):
+            logger.debug(
+                "[RebalanceMonitor] %s: pending signal already exists, skip",
+                symbol,
+            )
+            return {
+                "skipped_already_pending": 1,
+                "detail": {
+                    "symbol": symbol,
+                    "score": overall,
+                    "recommendation": recommendation,
+                    "signal_created": "SKIPPED_PENDING",
+                },
+            }
+
+        signal_type, quantity, priority = self._resolve_signal_plan(
+            recommendation,
+            overall,
+            qty,
+        )
+        false_hold = await self._should_flag_false_hold(
+            account_id,
+            symbol,
+            score=overall,
+            recommendation=recommendation,
+        )
+
+        self._create_signal(
+            account_id=account_id,
+            symbol=symbol,
+            qty=qty,
+            quantity=quantity,
+            signal_type=signal_type,
+            score=overall,
+            recommendation=recommendation,
+            priority=priority,
+            false_hold_protection=false_hold,
+        )
+        logger.info(
+            "[RebalanceMonitor] %s signal created: %s score=%s qty=%.0f",
+            signal_type.value,
+            symbol,
+            overall,
+            quantity,
+        )
+        return {
+            "reduce_signals": int(signal_type == SignalType.REDUCE),
+            "exit_signals": int(signal_type == SignalType.EXIT),
+            "detail": {
+                "symbol": symbol,
+                "score": overall,
+                "recommendation": recommendation,
+                "signal_created": signal_type.value,
+                "quantity": quantity,
+            },
+        }
+
+    async def _commit_changes(
+        self,
+        log_prefix: str,
+        *,
+        raise_on_error: bool = False,
+    ) -> None:
+        try:
+            await self.session.commit()
+        except SQLAlchemyError as exc:
+            logger.error("%s DB commit failed: %s", log_prefix, exc)
+            await self.session.rollback()
+            if raise_on_error:
+                raise
+
+    async def _should_flag_false_hold(
+        self,
+        account_id: str,
+        symbol: str,
+        *,
+        score: int,
+        recommendation: str,
+    ) -> bool:
+        if not getattr(settings, "SELF_PERCEPTION_V1101_ENABLED", False):
+            return False
+
+        threshold_rounds = int(getattr(settings, "FALSE_HOLD_DETECTION_ROUNDS", 3))
+        cycle_count = await self._count_recent_reduce_signals(
+            account_id,
+            symbol,
+            hours=48,
+        )
+        if cycle_count < threshold_rounds:
+            return False
+        await self._emit_false_hold_alert(
+            account_id,
+            symbol,
+            score=score,
+            recommendation=recommendation,
+            cycle_count=cycle_count,
+        )
+        return True
+
+    @staticmethod
+    def _normalize_position(position: Any) -> Dict[str, Any] | None:
+        symbol = getattr(position, "symbol", None) or (
+            position.get("symbol") if isinstance(position, dict) else None
+        )
+        qty = getattr(position, "quantity", None) or (
+            (position.get("quantity") or position.get("qty"))
+            if isinstance(position, dict)
+            else None
+        )
+        last_price = getattr(position, "last_price", None) or (
+            position.get("last_price") if isinstance(position, dict) else None
+        )
+        avg_price = getattr(position, "avg_price", None) or (
+            position.get("avg_price") if isinstance(position, dict) else None
+        )
+        parsed_qty = _coerce_optional_float(qty)
+        if not symbol or parsed_qty in (None, 0.0):
+            return None
+        return {
+            "symbol": str(symbol).strip().upper(),
+            "qty": parsed_qty,
+            "last_price": _coerce_optional_float(last_price),
+            "avg_price": _coerce_optional_float(avg_price),
+        }
 
     async def _fetch_positions(self, account_id: str) -> List[Dict[str, Any]]:
         """从 Broker 拉取当前持仓"""
@@ -375,40 +454,14 @@ class PositionRebalanceMonitor:
                 return []
 
             raw = await broker.list_underlying_positions(account_id)
-            result = []
-            for p in raw:
-                symbol = getattr(p, "symbol", None) or (
-                    p.get("symbol") if isinstance(p, dict) else None
-                )
-                qty = getattr(p, "quantity", None) or (
-                    p.get("quantity") or p.get("qty") if isinstance(p, dict) else None
-                )
-                last_price = getattr(p, "last_price", None) or (
-                    p.get("last_price") if isinstance(p, dict) else None
-                )
-                avg_price = getattr(p, "avg_price", None) or (
-                    p.get("avg_price") if isinstance(p, dict) else None
-                )
-                if symbol and qty:
-                    result.append(
-                        {
-                            "symbol": str(symbol).strip().upper(),
-                            "qty": float(qty),
-                            "last_price": (
-                                float(last_price)
-                                if last_price not in (None, "")
-                                else None
-                            ),
-                            "avg_price": (
-                                float(avg_price)
-                                if avg_price not in (None, "")
-                                else None
-                            ),
-                        }
-                    )
-            return result
-        except Exception as e:
-            logger.error(f"[RebalanceMonitor] 持仓拉取失败: {e}")
+            positions: List[Dict[str, Any]] = []
+            for raw_position in raw:
+                normalized = self._normalize_position(raw_position)
+                if normalized is not None:
+                    positions.append(normalized)
+            return positions
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            logger.error("[RebalanceMonitor] 持仓拉取失败: %s", exc)
             return []
 
     async def _get_latest_score(
@@ -500,9 +553,9 @@ class PositionRebalanceMonitor:
             recommendation = str(
                 getattr(score_obj, "recommendation", "HOLD") or "HOLD"
             ).upper()
-            overall_score_val = (
-                getattr(score_obj, "overall_score", 50) if score_obj is not None else 50
-            )
+            overall_score_val = getattr(score_obj, "overall_score", 50)
+            if score_obj is None:
+                overall_score_val = 50
             overall_score = (
                 int(overall_score_val) if overall_score_val is not None else 50
             )
@@ -515,7 +568,11 @@ class PositionRebalanceMonitor:
                     "recommendation": recommendation,
                     "overall_score": overall_score,
                     "risk_level": getattr(score_obj, "risk_level", None),
-                    "target_position": getattr(score_obj, "target_position", None),
+                    "target_position": getattr(
+                        score_obj,
+                        "target_position",
+                        None,
+                    ),
                 }
             )
 
@@ -537,7 +594,7 @@ class PositionRebalanceMonitor:
             str(candidate.get("symbol") or ""),
         )
 
-    async def _create_signal(
+    def _create_signal(
         self,
         account_id: str,
         symbol: str,
@@ -599,10 +656,6 @@ class PositionRebalanceMonitor:
         self.session.add(signal)
         return signal
 
-    # ──────────────────────────────────────────────────────────────────────
-    # V11.0.1 M2.3: False-Hold 检测与告警
-    # ──────────────────────────────────────────────────────────────────────
-
     async def _count_recent_reduce_signals(
         self,
         account_id: str,
@@ -651,11 +704,17 @@ class PositionRebalanceMonitor:
                 "detected_at": datetime.now(timezone.utc).isoformat(),
             }
             await _redis.set(key, _json.dumps(alert), ex=86400)
+            message = (
+                "[RebalanceMonitor] False-Hold alert emitted: %s " "score=%d cycles=%d"
+            )
             logger.info(
-                "[RebalanceMonitor] False-Hold alert emitted: %s " "score=%d cycles=%d",
+                message,
                 symbol,
                 score,
                 cycle_count,
             )
-        except Exception as exc:
-            logger.debug("[RebalanceMonitor] _emit_false_hold_alert skipped: %s", exc)
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            logger.debug(
+                "[RebalanceMonitor] _emit_false_hold_alert skipped: %s",
+                exc,
+            )

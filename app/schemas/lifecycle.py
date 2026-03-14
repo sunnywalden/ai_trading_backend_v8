@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from decimal import Decimal
-from typing import Any, Optional
+from typing import Optional
 
 from pydantic import BaseModel, Field
 
@@ -78,7 +77,7 @@ class PipelineDistribution(BaseModel):
     as_of: datetime
 
 
-# ── Plan FSM ──────────────────────────────────────────────────────────────────
+# ── Plan FSM ─────────────────────────────────────────────────────
 PLAN_FSM_STATES = [
     "AI_GENERATED",
     "AUTO_EXECUTING",
@@ -105,7 +104,7 @@ class PlanFsmSummary(BaseModel):
     as_of: datetime
 
 
-# ── Position FSM ──────────────────────────────────────────────────────────────
+# ── Position FSM ─────────────────────────────────────────────────
 POSITION_FSM_STATES = [
     "PENDING",
     "OPENING",
@@ -144,7 +143,26 @@ class PositionFsmSummary(BaseModel):
     mismatch_symbols: list[str] = Field(default_factory=list)
 
 
-# ── FSM Transition Events ─────────────────────────────────────────────────────
+class LifecycleCoherenceSummary(BaseModel):
+    account_id: Optional[str] = None
+    source: str = "UNKNOWN"
+    active_positions: int = 0
+    broker_active_positions: int = 0
+    lifecycle_active_positions: int = 0
+    mismatch_detected: bool = False
+    mismatch_symbols: list[str] = Field(default_factory=list)
+    stale_plans_closed: int = 0
+    stale_positions_closed: int = 0
+    hydrated_positions_created: int = 0
+    reconciled_plan_ids: list[int] = Field(default_factory=list)
+    reconciled_position_ids: list[int] = Field(default_factory=list)
+    hydrated_position_ids: list[int] = Field(default_factory=list)
+    run_mode: str = "inspect_only"
+    notes: list[str] = Field(default_factory=list)
+    as_of: datetime
+
+
+# ── FSM Transition Events ────────────────────────────────────────
 class FsmTransitionEvent(BaseModel):
     id: int
     plan_id: int
@@ -165,9 +183,9 @@ class FsmEventPage(BaseModel):
     size: int
 
 
-# ── Decision Provenance ───────────────────────────────────────────────────────
+# ── Decision Provenance ──────────────────────────────────────────
 class SixDimScore(BaseModel):
-    dimension: str  # technical / fundamental / macro / volatility / options / sentiment
+    dimension: str  # technical/fundamental/macro/volatility/options/sentiment
     label: str
     raw_score: float
     regime_multiplier: float
@@ -219,7 +237,7 @@ class PositionBoard(BaseModel):
     mismatch_symbols: list[str] = Field(default_factory=list)
 
 
-# ── Decision Provenance ───────────────────────────────────────────────────────
+# ── Decision Provenance ──────────────────────────────────────────
 class DecisionProvenance(BaseModel):
     plan_id: int
     symbol: str

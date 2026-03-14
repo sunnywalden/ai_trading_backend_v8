@@ -59,7 +59,11 @@ class SignalQualityAuditLog(Base):
 
     __tablename__ = "signal_quality_audit_logs"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
 
     # ── 关联原始信号 ──
     signal_id: Mapped[Optional[int]] = mapped_column(
@@ -94,16 +98,32 @@ class SignalQualityAuditLog(Base):
     )
 
     # ── 评分详情 ──
-    conviction_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    composite_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    resonance_bonus: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    regime_alignment: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    conviction_score: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    composite_score: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    resonance_bonus: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
+    regime_alignment: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
     calibrated_lower_bound: Mapped[Optional[float]] = mapped_column(
         Float, nullable=True
     )
 
     # ── 共振详情 ──
-    aligned_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    aligned_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+    )
     aligned_dims: Mapped[Optional[dict]] = mapped_column(
         JSON,
         nullable=True,
@@ -130,11 +150,20 @@ class SignalQualityAuditLog(Base):
         String(8), nullable=True
     )  # LONG / SHORT
     regime: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
-    concurrent_positions: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    daily_signals_used: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    concurrent_positions: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    daily_signals_used: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+    )
 
     # ── 时间戳 ──
-    generated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    generated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime,
+        nullable=True,
+    )
     evaluated_at: Mapped[datetime] = mapped_column(
         DateTime,
         nullable=False,
