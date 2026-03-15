@@ -1,8 +1,9 @@
 # LLM-Native Quant OS 设计提案
 
-> 状态：提案 / 讨论稿（尚未实现）  
+> 状态：**第二版提案**（经专家评审后全面更新，尚未实现）  
 > 适用范围：后端认知架构、交易主链演进、自治研究与自诊断体系  
-> 更新时间：2026-03-15
+> 更新时间：2026-03-15  
+> 变更说明：基于华尔街量化专家 / 硅谷 LLM 技术专家 / LLM 产品经理 / 华尔街交易员四视角评审，补充 Alpha 归因框架、时间尺度分层、幻觉防护层、记忆遗忘机制、Human-in-the-loop Escalation、Belief Graph、MarketActorModel、反事实引擎、认知漂移监控、异步预计算认知等核心能力，并修正了原版结构性缺陷。
 
 ---
 
@@ -44,7 +45,11 @@
 2. **规则层不消失，而是降级为生存边界层。**
 3. **交易只是认知循环的一种输出，不是系统唯一目标。**
 4. **平台必须具备连续记忆，而不是每轮重新“失忆开机”。**
-5. **反思、自诊断、自主研究必须进入主循环，而不是盘后附加功能。**
+5. **反思、自诊断、自主研究必须进入主循环，而不是盘后附加功能。**6. **Explainability 是核心价值主张，而非工作台附件：每个决策必须能被用户完整溯源。**
+6. **认知循环必须分时间尺度运行——战术层（分钟级）、操作层（小时/日级）、战略层（周级），各层深度不同，不能用同一频率同一深度对待所有决策。**
+7. **记忆必须有遗忘机制：错误的经验比没有经验更危险，所有原则须可被证伪，记忆须带置信度字段。**
+8. **所有 LLM 生成的数值（置信度、收益预测、风险估算）必须经 Ground Truth 独立校验，不能自证自查。**
+9. **系统在高不确定性、多智能体严重分歧或市场极端波动时，必须触发人工干预协议，不能默默自行决策。**
 
 ---
 
@@ -55,10 +60,17 @@
 | 主脑形态 | `AutonomousEngine` + 控制平面 | `Cognitive Kernel` + 认知循环 |
 | LLM 角色 | 局部分析、摘要、单次决策 | 持续感知、规划、反思、研究 |
 | 驱动方式 | `pending signals -> evaluate -> execute` | `goal -> perceive -> deliberate -> plan -> act -> reflect` |
-| 记忆 | 日志/审计/快照为主 | 短期工作记忆 + 中期情境记忆 + 长期原则记忆 |
-| 自我优化 | 参数/权重/候选改进 | 自主提出研究问题并做实验治理 |
-| 故障定位 | 健康检查 + 指标 + watchdog | 根因分析 + 修复建议 + 验证计划 |
-| 多智能体 | 专题协作/旁路能力 | 主认知链 deliberation layer |
+| 记忆 | 日志/审计/快照为主 | 短期工作记忆 + 中期情境记忆 + 长期原则记忆，带遗忘与置信度 |
+| 自我优化 | 参数/权重/候选改进 | 自主研究循环 + Expert Priming + Bayesian 实验治理 |
+| 故障定位 | 健康检查 + 指标 + watchdog | 根因分析 + 修复建议 + 验证计划（独立 SRE 通道） |
+| 多智能体 | 专题协作/旁路能力 | 主认知链 deliberation layer + HallucinationGuard |
+| α 来源 | 无显式归因 | AlphaTruthStack：每笔交易归因到信息优势 / 执行优势 / 运气 |
+| 世界建模 | 无 | BeliefGraph（节点=实体，边=因果+置信度+时效）+ MarketActorModel |
+| 时间尺度 | 单一循环频率 | 战术（5–15 min）/ 操作（小时/日）/ 战略（周）三层分频 |
+| 幻觉防护 | 无 | HallucinationGuard：LLM 数值输出独立 Ground Truth 校验 |
+| 对手方建模 | 无 | MarketActorModel：从 order flow / 期权持仓构建对手方行为假设 |
+| 可解释性 | 附加工作台功能 | 每个决策的完整溯源链，作为核心 UX 需求内嵌决策流 |
+| 人工干预 | 无协议 | EscalationManager：定义置信度阈值、极端波动触发条件 |
 
 ---
 
@@ -69,18 +81,38 @@ flowchart TB
     subgraph Interface[交互层]
         FE[Frontend / Workbench / Copilot]
         API[FastAPI Routers]
+        ESC[EscalationManager 人工干预协议]
     end
 
     subgraph Cognitive[认知自治层]
         CK[Cognitive Kernel]
-        SM[Self Model]
-        WM[World Model]
-        GM[Goal Manager]
-        DL[Deliberation Layer]
-        RF[Reflection Engine]
-        SD[Self-Diagnostics]
-        RL[Research Loop]
-        MEM[Memory System]
+
+        subgraph Perception[感知与建模]
+            SM[Self Model / AccountState vs CognitiveState]
+            ATS[Alpha Truth Stack alpha来源归因]
+            BG[Belief Graph 世界因果图谱]
+            MAM[Market Actor Model 对手方行为建模]
+        end
+
+        subgraph Planningblock[规划与目标]
+            GM[Goal Manager + Position Sizing / Kelly]
+            APC[Async Pre-Computed Cognition 时间分层预计算]
+        end
+
+        subgraph Deliberationblock[审议层]
+            DL[Deliberation Layer 7 Agents]
+            HG[Hallucination Guard Ground Truth 校验]
+        end
+
+        subgraph Learningblock[学习与演进]
+            RF[Reflection Engine + Counterfactual]
+            CDM[Cognitive Drift Monitor 认知漂移检测]
+            RL[Research Loop Bayesian 实验治理]
+            EPP[Expert Priming Protocol 人工知识注入]
+            MEM[Memory System 三层+遗忘机制]
+        end
+
+        SD[Self-Diagnostics 根因分析]
     end
 
     subgraph Safety[确定性边界层]
@@ -97,18 +129,18 @@ flowchart TB
         PM[Position Monitor]
         PTP[Post-Trade Pipeline]
         JOBS[Scheduler Jobs]
+        SREM[SRE Monitor 独立并行通道]
     end
 
     Interface --> API --> CK
-    CK --> SM
-    CK --> WM
-    CK --> GM
-    CK --> DL
-    CK --> RF
+    CK <--> Perception
+    CK <--> Planningblock
+    CK <--> Deliberationblock
+    CK <--> Learningblock
     CK --> SD
-    CK --> RL
-    CK <--> MEM
+    CK --> ESC
 
+    HG --> AUDIT
     CK --> Safety
     Safety --> AE
     AE --> OE
@@ -118,59 +150,109 @@ flowchart TB
     OE --> AUDIT
     PM --> RF
     PTP --> RL
+    SREM -.->|异常 escalation| ESC
 ```
 
 ### 4.1 架构解释
 
-- **认知自治层**：负责“理解、规划、解释、研究、反思”。
-- **确定性边界层**：负责“什么不能做错”。
-- **执行与运行层**：负责“把批准后的行动真正落地”。
+目标架构分为四层：
 
-当前平台最强的是第二层与第三层；未来演进重点应集中在第一层。
+- **认知自治层**：负责"理解、规划、解释、研究、反思"。新增感知与建模模组（BeliefGraph、MarketActorModel、AlphaTruthStack）、规划层（含时间分层预计算）、审议层（含 HallucinationGuard）、学习层（含记忆遗忘、认知漂移监控、Expert Priming）。
+- **确定性边界层**：负责"什么不能做错"——不因认知层升级而放松。
+- **执行与运行层**：负责"把批准后的行动真正落地"。SRE Monitor 从审议层独立出来，作为并行监控通道只在异常时触发 escalation。
+- **交互层**：新增 EscalationManager，作为人工干预的统一接口。
+
+当前平台最强的是第二层与第三层；未来演进重点集中在第一层的感知、规划、审议、学习四个模组。
 
 ---
 
-## 5. 六大原生能力
+## 5. 十大原生能力
 
 ### 5.1 Self Model（自我模型）
 
-系统需要维护自身状态，而不仅是账户状态。
+系统需要维护**两个独立但相互校验**的状态：`AccountState`（客观账户真相）和 `CognitiveState`（系统的自我认知）。
 
-应回答：
+#### AccountState vs CognitiveState
+
+- **`AccountState`**：资金余额、持仓明细、已实现/未实现 P&L——来自交易所/券商数据，不允许 LLM 生成或修改。
+- **`CognitiveState`**：系统对自身能力、风格、当前偏差的主观认知——由 LLM 维护，但必须定期对照 `AccountState` 进行客观校验，防止认知自欺（Cognitive Dissonance）。
+
+Self Model 应能回答：
 
 - 当前模型在哪些 regime 下最易误判？
 - 当前主要收益依赖哪些因子/叙事？
-- 当前是“过于保守”还是“过于激进”？
-- 最近推理质量是否退化？
+- 当前是"过于保守"还是"过于激进"？
+- 最近推理质量是否退化？（与 CognitiveDriftMonitor 联动）
 - 哪些 hard gate 长期阻塞资金周转？
+
+#### Alpha Truth Stack（α 归因框架）
+
+Self Model 必须维护一个 `AlphaTruthStack`，对每笔已关闭的交易做显式来源归因：
+
+| 来源类型 | 描述 | 示例 |
+| -------- | ---- | ---- |
+| **信息优势** | 对某类异构信息的更快/更准解读 | 财报语义理解领先于市场反应 |
+| **执行优势** | 比基准更优的入场/出场时机 | 算法滑点控制优于市价单 |
+| **运气** | 无法归因到任何可重复优势的收益 | 随机噪声偶然方向一致 |
+
+没有 `AlphaTruthStack` 的自我优化是盲目的——系统会把"运气"误认为"能力"，进行无意义的策略强化。
 
 建议输出对象：
 
-- `self_state_snapshot`
+- `self_state_snapshot`（含 AccountState / CognitiveState 双视图）
 - `decision_style_profile`
 - `confidence_drift_profile`
 - `failure_mode_clusters`
+- `alpha_attribution_log`（每笔平仓后追加）
 
-### 5.2 World Model（世界模型）
+### 5.2 World Model（世界模型 → Belief Graph）
 
-系统不应只读取指标，而要持续维护市场世界解释。
+系统不应只读取指标，而要持续维护市场世界的**结构性因果认知**。
 
-应覆盖：
+#### 从纯文本叙事升级到 Belief Graph
 
-- regime 及其可信度
-- 主叙事与反叙事
-- 风险簇与相关性团簇
-- 事件-资产-组合的传播路径
-- 价格、资金流、新闻、宏观之间的因果假设
+纯文本叙事难以量化、难以追踪矛盾。目标方案采用 Belief Graph：
+
+```text
+节点：市场实体（资产、因子、宏观变量、事件、参与者类型）
+边：因果关系 + 置信度 + 时效性（有效期）
+
+示例：
+  FED_HAWKISH  --[降低估值, conf=0.80, ttl=3m]--> TECH_VALUATION
+  AI_CAPEX_BEAT --[提升预期, conf=0.72, ttl=1q]--> NVDA_EPS_NEXT_Q
+  NVDA_EPS_BEAT --[触发板块重评, conf=0.60]--> AI_SECTOR_RERATING
+```
+
+LLM 负责：从新信息中提取新节点和边，更新置信度，标记失效节点。
+
+#### 可证伪的市场假设
+
+每个叙事必须绑定可测试的预测——叙事如果不绑定可验证的预测，Research Loop 就是在做创意写作：
+
+```text
+叙事：科技业 AI 资本开支超预期，有利于半导体
+假设：NVDA/AMD 下季度财报超预期概率 > 20%
+跟踪指标：Q2 财报 EPS vs 预期
+结果记录：实际超预期 → 置信度 +0.10；未超 → 置信度 -0.15
+```
+
+#### Market Actor Model（对手方建模）
+
+World Model 只建模"市场状态"是不够的——真正有 α 的认知需要建模"其他参与者的行为"：
+
+> "动量交易者当前在什么位置？机构是在积累还是派发？期权做市商的 gamma 敞口会把价格钉在哪里？"
+
+`MarketActorModel` 从 order flow 方向与规模、期权持仓分布（PUT/CALL ratio、Delta 敞口）、融资余额与杠杆率变化、ETF 申赎量与机构资金流构建隐含的对手方行为假设。这类异构信息融合正是 LLM 相对于传统因子模型的结构性差异化优势。
 
 建议输出对象：
 
-- `market_world_state`
-- `narrative_graph`
+- `belief_graph_snapshot`（含所有节点-边的当前状态）
+- `falsifiable_hypotheses`（绑定追踪指标的叙事列表）
+- `market_actor_state`（对手方行为假设摘要）
 - `risk_cluster_map`
-- `event_impact_hypotheses`
+- `narrative_contradiction_alerts`（Belief Graph 中检测到的矛盾节点告警）
 
-### 5.3 Goal Manager（目标管理）
+### 5.3 Goal Manager（目标管理 + 仓位规模化框架）
 
 系统需要显式回答“今天的最优行动类型是什么”，而不是只对 signal 被动响应。
 
@@ -182,7 +264,15 @@ flowchart TB
 - 保护高价值头寸
 - 进入研究模式而非交易模式
 
-### 5.4 Reflection Engine（反思引擎）
+#### 目标到仓位规模的映射框架
+
+原版设计仅定义目标类型，缺少从“目标 + 置信度”到“具体仓位规模”的映射。目标平台必须有显式的仓位规模化机制：
+
+- **Kelly Criterion 变体**：根据历史胜率、赔率计算最大押注比例，使用 fractional Kelly（0.25×–0.5×）控制爆仓风险。
+- **风险预算树**：组合总风险预算 → 按 regime / 因子 / 叙事分配 → 单标的最大风险暴露。
+- **流动性感知约束**：仓位规模不超过该股票日均成交量的 X%，避免市场冲击成本超预期。
+
+### 5.4 Reflection Engine（反思引擎 + 反事实引擎）
 
 反思需要进入主循环，覆盖：
 
@@ -191,41 +281,95 @@ flowchart TB
 - **事后反思**：失败来自市场、执行、认知还是治理门？
 - **元反思**：最近一周的判断风格是否发生偏移？
 
-### 5.5 Self-Diagnostics（自诊断）
+#### Counterfactual Reasoning Engine（反事实推理）
 
-自诊断能力不只是“服务挂了没”，而是“为什么系统没做出应有动作”。
+每次决策后，系统自动生成反事实场景：如果选了候选方案 B 而非 A，今天结果如何？如果早/晚入场 2 小时，结果会不同吗？导致最终结果的是市场因素还是我的决策质量？
 
-需要回答：
+反事实不为后悔，而是构建**系统化的决策质量数据集**，用于识别系统性认知偏差，为未来微调决策风格提供统计基础。
 
-- 为什么今天零交易？
-- 为什么高置信度信号持续被拒？
-- 为什么执行质量恶化？
-- 为什么校准因子持续向 0.5 收敛？
-- 为什么某类研究方向持续无效？
+### 5.5 Self-Diagnostics（自我诊断）
 
-输出目标：
+系统定期评估自身认知状态：
 
-- `root_cause_report`
-- `evidence_chain`
-- `repair_recommendations`
-- `verification_plan`
+- 置信度校准：预测置信度与实际准确率是否一致？
+- 决策速度：是否在数据不足时过度自信？
+- Regime 感知延迟：市场转变后多久调整了模型？
+- 幻觉暴露：近期决策中有无被 LLM 错误数值误导的情形？
 
-### 5.6 Research Loop（自治研究循环）
+每条诊断结论须附 **evidence_chain**（"我是从哪些观测中得出这个诊断的？"），避免无依据的自我评价。
 
-系统必须能把“自我优化”升级为“自我研究”。
+### 5.6 Research Loop（研究循环 + 专家引导协议）
 
-标准闭环：
+系统不应只响应信号，还需要独立形成假设并检验：
 
-1. 发现异常/机会
-2. 提出研究问题
-3. 形成假设
-4. 设计 shadow / paper / backtest 实验
-5. 比较结果
-6. 提交升级/回滚建议
+- 提出假设 → 设计可被证伪的检验条件 → 收集数据 → 评估结论 → 更新世界模型
 
-这要求研究循环与治理放量严格绑定，而不是直接改 live 行为。
+#### 量化接受标准
 
----
+研究结论只有满足以下任一条件才可写入语义记忆：
+
+| 标准 | 阈值 |
+|------|------|
+| 样本内回测 Sharpe | ≥ 1.2 |
+| 样本外降级比例 | ≤ 30% |
+| 最大回撤 | ≤ 基准的 1.5× |
+| 显著性概率 | p < 0.05（经多重检验修正） |
+
+#### Expert Priming Protocol（专家引导协议）
+
+支持人类专家向系统注入高优先级知识：
+
+```json
+{
+  "type": "system_principle",
+  "source": "human_expert",
+  "content": "在衍生品到期日前 3 天减少 gamma 暴露",
+  "valid_until": "2027-12-31",
+  "priority_weight": 0.85
+}
+```
+
+注入的 principle 优先级高于统计归纳结论，但必须具备可证伪条件（`invalidation_condition`），避免形成不可撤销的偏见。
+
+### 5.7 Hallucination Guard（幻觉防护层）
+
+LLM 输出的数值类断言（价格、涨跌幅、持仓量、财报数字等）在进入执行链之前须经过独立的 Ground Truth 校验：
+
+1. **校验来源**：关系型数据库实时行情 / 监管公告 / 交易所 API。
+2. **校验失败处理**：
+   - 低风险字段 → 自动用 Ground Truth 覆盖并记录 AUDIT。
+   - 高风险字段（触发交易的核心数値）→ 降级为"信息不足，拒绝决策"并触发 EscalationManager。
+3. **审计日志**：每次幻觉检测均记录 `hallucination_audit` 表，供 CognitiveDriftMonitor 统计趋势。
+
+### 5.8 Escalation Manager（人机协作升级协议）
+
+系统在以下情形自动将决策权移交给人类监督者：
+
+| 触发条件 | 阈值 | 行动 |
+|----------|------|------|
+| 置信度过低 | < 0.55 | 暂停执行，等待确认 |
+| Multi-agent 分歧度 | > 0.70 | 强制人类仲裁 |
+| 市场波动率指数 | VIX > 35 | 降低头寸上限 50%，通知监督者 |
+| 连续亏损 | N 次 ≥ 阈值 | 进入暂停模式，启动 Research Loop |
+| 幻觉检测率异常 | 近 20 次 > 15% | 系统自检 + 人工审查 |
+
+### 5.9 Cognitive Drift Monitor（认知漂移监控）
+
+周期性（每周）运行"基准场景集"对系统当前世界模型进行衡量：
+
+- 若在标准场景上的判断与前一版本偏差超过阈值（drift_score > 0.3），触发 Self Model 重新校准。
+- 漂移报告写入 `cognitive_drift_report` 表，供人类 review。
+- 防止 regime change 后系统仍坚持旧框架做决策。
+
+### 5.10 Async Pre-Computed Cognition（异步预计算认知）
+
+实时交易路径中最大的延迟来源是完整的认知循环（Multi-agent deliberation + World Model 更新 + Research Loop）。异步预计算将深度推理从关键路径剥离：
+
+| 时段 | 任务 |
+|------|------|
+| **盘前（T-30min）** | 完整认知循环：更新 Belief Graph、运行 Deliberation、生成 ActionPlan 并预签正候选 |
+| **盘中** | 只做条件检查：市场条件 vs. 预计划 threshold，若满足则执行预核准动作 |
+| **行情突变时** | 触发紧急覆盖循环，限时 ≤ 5 秒完成轻量 Deliberation，超时则降级为人工确认 |
 
 ## 6. 认知循环（Cognitive Cycle）
 
@@ -267,9 +411,43 @@ sequenceDiagram
     POST->>MEM: persist lessons / failures / hypotheses
 ```
 
----
+### 6.2 三层时间尺度分层
 
-## 7. 分层落地建议（映射当前仓库）
+认知循环并非单一节奏，而分为三个时间层级并发运行：
+
+| 层级 | 触发频率 | 推理深度 | 主要任务 |
+|------|---------|---------|---------|
+| **战术层** | 5–15 分钟 | 轻量检查 | 条件门检查 + 持仓风险扫描 |
+| **操作层** | 每小时 / 每日 | 完整认知循环 | Multi-agent Deliberation + World Model 更新 |
+| **战略层** | 每周 | 深度回顾 | Self Model 校准 + Research Loop + 原则集更新 |
+
+三层结果逐层汇报：战术层触发可覆盖操作层已签署的 ActionPlan；战略层在每周末更新
+Semantic Memory 并为下周认知循环预热。
+
+### 6.3 异步预计算流程
+
+完整的 Multi-agent Deliberation 耗时从数秒到数分钟，无法在交易信号触发时同步完成。
+系统通过以下异步架构将深度推理剥离为关键路径的外围任务：
+
+```text
+[盘前 T-30min]
+  ↓ CognitiveKernel.schedule_precompute()
+  ↓ 完整认知循环：更新 Belief Graph → Deliberation → 生成预签 ActionPlan
+  ↓ 存入 precomputed_action_cache
+
+[盘中触发]
+  ↓ 只做条件检查：市场条件 vs. 预签 ActionPlan threshold
+  ↓ 满足 → 执行预核准动作（亚秒级）
+  ↓ 不满足 → 跳过，等待下一个预计算窗口
+
+[行情突变]
+  ↓ EscalationManager 检测到 threshold 突破
+  ↓ 触发紧急覆盖循环（Emergency Override）
+  ↓ 限时 ≤ 5 秒轻量 Deliberation（仅 RiskCriticAgent + GovernorAgent）
+  ↓ 超时 → 降级为人工确认，拒绝新开仓
+```
+
+---
 
 ### 7.1 新增认知中枢目录
 
@@ -280,11 +458,18 @@ app/services/
   cognitive_kernel.py
   self_model_service.py
   world_model_service.py
+  belief_graph_service.py          # Belief Graph + Falsifiable Hypothesis
+  market_actor_model_service.py    # 市场参与者建模
+  alpha_truth_stack_service.py     # Alpha Attribution + Edge Decay 跟踪
   goal_manager_service.py
   reflection_service.py
   self_diagnostics_service.py
   memory_service.py
   research_governor_service.py
+  hallucination_guard.py           # LLM 数值 Ground Truth 校验
+  escalation_manager.py            # 人机升级协议
+  cognitive_drift_monitor.py       # 认知漂移周期检测
+  sre_monitor.py                   # SRE 并行监控通道（独立于 Deliberation）
 ```
 
 ### 7.2 现有服务的角色重定位
@@ -349,21 +534,55 @@ app/services/
 - `research_hypotheses`
 - `system_principles`
 
+### 8.3 记忆遗忘与置信度管理机制
+
+纯累积的记忆会导致系统逐渐被过时知识主导。V2 引入以下遗忘机制：
+
+- **Episodic Memory 时间衰减**：近期事件赋予更高检索权重，超过 90 天的情境记忆
+  自动降权，允许被更近期的反例覆盖。
+- **Semantic Memory 置信度字段**：每条 `system_principle` 携带 `belief_confidence`
+  分数（0–1）和 `last_validated_at` 时间戳。置信度低于 0.4 的原则标记为待验证。
+- **Regime Change 隔离**：当 CognitiveDriftMonitor 检测到 regime 转变，旧记忆自
+  动标记为 `historical_context`，不再直接应用于新 regime 下的决策推理。
+- **挑战-验证闭环**：每条 Semantic Memory 须附 `invalidation_condition`，Research
+  Loop 周期性尝试证伪，成功证伪则降低置信度。
+
+### 8.4 Expert Priming Protocol 接入点
+
+支持人类专家以高优先级方式将领域知识直接注入 Semantic Memory，绕过统计归纳路径：
+
+```json
+{
+  "type": "system_principle",
+  "source": "human_expert",
+  "content": "在衍生品到期日前 3 天减少 gamma 暴露",
+  "valid_until": "2027-12-31",
+  "priority_weight": 0.85,
+  "invalidation_condition": "若 3 次连续到期周均未见显著波动，重新评估"
+}
+```
+
+专家注入的 principle 优先级高于统计归纳结论，但同样须具备可证伪条件，且须通过
+Research Loop 的周期性挑战，避免永久性偏见积累。
+
 ---
 
 ## 9. 多智能体主链化建议
 
-不建议把当前多智能体直接接到下单链，而应先形成 **Deliberation Layer**。
-
 建议角色：
+
+**Deliberation Layer（参与交易决策）**
 
 - `MarketSenseAgent`：市场叙事、regime、热点与拥挤度理解
 - `PortfolioAgent`：组合层机会成本、风险预算、资本效率
 - `RiskCriticAgent`：强制反驳与极端场景挑战
 - `ExecutionAgent`：执行窗口、算法、成交风险建议
 - `ReflectionAgent`：从历史 episode 中提取“别再犯什么错”
-- `SREAgent`：定位数据/任务/模型/券商链路异常
 - `GovernorAgent`：综合裁决并生成结构化 `ActionPlan`
+
+**并行监控通道（不参与交易决策）**
+
+- `SREAgent` → 已独立迁移至 `sre_monitor.py`，作为独立系统健康监控通道运行，只在检测到异常时触发 `EscalationManager`，不参与任何 Deliberation 流程，从而避免运维关注点污染交易决策推理。
 
 ### 9.1 ActionPlan 建议结构
 
@@ -372,6 +591,24 @@ app/services/
   "cycle_id": "uuid",
   "goal": "improve-capital-efficiency",
   "world_state_ref": "snapshot-id",
+  "timeframe_sensitivity": "daily-close",
+  "position_sizing_model": {
+    "method": "fractional_kelly",
+    "fraction": 0.3,
+    "max_pct_adv": 0.05
+  },
+  "invalidation_conditions": [
+    "regime_shifts_to_high_vol",
+    "earnings_surprise_negative"
+  ],
+  "escalate_to_human_if": {
+    "confidence_below": 0.55,
+    "disagreement_above": 0.70
+  },
+  "memory_relevance_refs": [
+    "episode-2025-11-03",
+    "principle-momentum-in-high-vol"
+  ],
   "actions": [
     {
       "type": "TRADE_ENTRY",
@@ -431,7 +668,9 @@ app/services/
 交付：
 
 - 输出 objections / alternatives / rationale
-- 与 `ActionPlan` 绑定
+- 与 `ActionPlan` 绑定（含 `position_sizing_model` + `invalidation_conditions`）
+- 引入 `BeliefGraph` + `MarketActorModel`，替代纯文本 World Model
+- 引入 `CognitiveDriftMonitor` 首次运行基准快照
 - 对主链执行结果进行计划-结果偏差比对
 
 ### Phase 3：执行协调器改造（中风险）
@@ -450,9 +689,11 @@ app/services/
 
 交付：
 
-- `ReflectionService`
-- `SelfDiagnosticsService`
-- `ResearchGovernorService`
+- `ReflectionService`（含 Counterfactual Reasoning Engine）
+- `SelfDiagnosticsService`（含 evidence_chain 强制校验）
+- `ResearchGovernorService`（含量化接受标准 + Expert Priming Protocol UI）
+- 记忆遗忘机制 + `belief_confidence` 字段上线
+- `EscalationManager` 进入生产模式（真实阻断高风险决策）
 - shadow/paper 实验治理流水线
 
 ### Phase 5：有限真实接管（高风险）
@@ -474,7 +715,6 @@ app/services/
 
 ```text
 GET  /api/v1/cognitive/state
-GET  /api/v1/cognitive/world-model
 GET  /api/v1/cognitive/self-model
 GET  /api/v1/cognitive/goals
 GET  /api/v1/cognitive/action-plans
@@ -482,6 +722,15 @@ GET  /api/v1/cognitive/reflections
 GET  /api/v1/cognitive/diagnostics
 GET  /api/v1/cognitive/research-hypotheses
 POST /api/v1/cognitive/run-cycle
+
+# V2 新增
+GET  /api/v1/cognitive/belief-graph          # Belief Graph 当前快照
+GET  /api/v1/cognitive/alpha-attribution     # AlphaTruthStack 归因报告
+GET  /api/v1/cognitive/market-actors         # MarketActorModel 当前建模
+GET  /api/v1/cognitive/drift-report          # 认知漂移最新报告
+GET  /api/v1/cognitive/hallucination-audit   # 幻觉检测日志
+POST /api/v1/cognitive/escalate              # 手动触发 EscalationManager
+POST /api/v1/cognitive/expert-priming        # 人类专家注入原则
 ```
 
 ### 12.2 前端建议工作台
@@ -505,6 +754,10 @@ POST /api/v1/cognitive/run-cycle
 2. **引入复杂 agent 但没有审计真源，导致更黑盒**
 3. **没有记忆治理，导致系统持续“自我污染”**
 4. **研究循环直接影响 live 行为，绕过 rollout discipline**
+5. **LLM 幻觉传播到执行链**（缓解：HallucinationGuard 独立 Ground Truth 校验，校验失败阻断执行而非静默通过）
+6. **无 Ground Truth 的认知循环形成自洽错误闭环**（缓解：AlphaTruthStack拆解每笔 Alpha 来源，强制区分“能力” vs.“运气” vs.“数据噪声”）
+7. **记忆污染导致旧偏见在 regime 转变后仍主导决策**（缓解：记忆遗忘机制 + `belief_confidence` 衰减 + Regime Change 隔离标记）
+8. **时间尺度混用：慢速战略认知覆盖快速战术决策**（缓解：三层时间尺度分层架构，战略层输出不得直接阻断战术层已批准的执行动作）
 
 ### 13.2 应对原则
 
@@ -531,6 +784,8 @@ POST /api/v1/cognitive/run-cycle
 这也是当前仓库在工程上最现实、最安全、也最符合你目标愿景的方向。
 
 ---
+
+> **归档说明**：本节（第 15–20 节）为 2026-03-15 专家评审记录。评审意见已全面落实到第 1–14 节（第二版提案），本节作为决策背景与评审历史存档保留，不再代表当前设计意图。
 
 ## 15. 专家评审团多视角可行性评估
 
