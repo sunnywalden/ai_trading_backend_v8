@@ -4,8 +4,9 @@
 > 本文档已拆分为模块化子文档，位于 [`docs/product/`](product/README.md)。
 > 本文件保留作为向后兼容入口，正式维护请在 `docs/product/` 目录进行。
 > **AI量化交易闭环系统** - 个人美港股智能交易平台  
-> 版本：V11.1.1（当前实现） | 更新日期：2026-03-15  
-> 生产基线：V11.0.1（已上线）  
+> 版本：V11.2.1（当前实现 & 生产基线） | 更新日期：2026-03-15  
+> 下一版本：V11.3.1（规划定稿） | [V11.3.1 Release Plan](archived/v11/v11.3/RELEASE_PLAN_V11.3.1.md)  
+> 变更摘要（V11.2.1 已上线）：**RBAC & Role Workbench**——建立正式用户—角色—权限模型（Researcher / Trader / Supervisor / Administrator 四角色）；引入后端 RBAC 真源（`roles`、`permissions`、`user_role_bindings`、`role_permission_grants`、`authorization_audit_logs` 五张表）；新增四类角色工作台首页与专属导航；前端统一 `PermissionButton / PermissionGuard` 组件化授权；`/api/v1/auth/me` 携带 `feature_flags`；首登改密闭环（`must_change_password` + `POST /api/v1/auth/change-password`）；管理后台补齐用户/角色/权限目录/审计四件套。  
 > 变更摘要（V11.1.1 当前实现）：**Trader Workbench Convergence & Architecture Simplification**——围绕 `WorkbenchShell`、`ExplainabilityStrip`、typed workbench contract、read model 路由与任务页收口推进当前实现：`/dashboard`、`/order-book`、`/system-monitor` 三个主工作台共享统一壳层与解释条，`/task-management` 收口为 `SystemMonitorPage` 的 tasks Tab，后端新增 Dashboard / Order Book / System Monitor 三个聚合读模型接口，并通过 public service API、thin router 与契约化前端消费降低跨层耦合。  
 > 变更摘要（V11.0.1 已上线）：**Capital Velocity & Autonomous Evolution OS**——在 V10.5.4 控制平面基线之上，围绕 **Capital Velocity**（近命中信号摩擦跟踪、闲置资本感知、资本轮转效率提升）、**Self-Perception**（MetaState Snapshot、False-Hold Alert、模型阻断画像）、**Improvement Engine**（自动生成参数/模块级改进候选）与 **Evolution Governance**（flag-gated 进化治理与风格约束预留）四条主线推进，重点解决“为什么资金闲置、为什么信号被卡住、哪里值得改进”三类当前生产问题，同时保持既有 RiskGate、容量保护带与治理硬门不被放宽。  
 > 变更摘要（V10.5.4 基线）：**Signal Pipeline Integrity & Control-Plane Hardening**——V10.5.4 已作为 V11.0.1 的前序控制平面基线，提供 `signal_origin_mode`、canonical signal payload、原生状态迁移、原生审计优先与 Observe → Shadow → Semi → Full 渐进放量纪律。  
@@ -24,8 +25,9 @@
 > 变更摘要（V10.2-M1）：**市场体制感知引擎** ——RegimeClassifier 五维评分体系（趋势强度/波动率制度/量价关系/宏观环境/广度指标）、6类体制自动识别（BULL_TREND / BEAR_TREND / HIGH_VOL / MEAN_REVERT / RANGE_BOUND / CRISIS）、3日确认防噪机制、EventBus 异步事件总线（REGIME_CHANGED 事件驱动策略权重自适应切换、VaR 门限动态调整）、StrategyWeightAllocator 体制感知仓位分配、AI 自主交易闭环升级至 **17 阶段**  
 > 变更摘要（V10.1）：**兑现承诺 + 打磨质量 + 扩展边界**——Tiger 真实下单接入（覆盖美股/港股/期权）、FULL 模式完整自主交易闭环、Copilot 操作指令执行落地、Dashboard 所有 TODO 指标真实化、AI 组合级决策升级（结构化 JSON 输出 + 批量组合决策）、ETF 标的池正式支持、港股支持（Tiger API 统一，无需 Futu）、Paper→Live 毕业自动化、Dashboard WebSocket 实时推送；**本版本明确不含 Telegram 通知，FULL 模式具备完全自主交易能力**
 > 历史版本：V10.0（2026-02-24）变更摘要见下方历史记录节  
-> 当前代码实现：**V11.1.1** | 实现设计：[V11.1.1 Implementation Design](architecture/v11_1_1_implementation_design.md)  
-> 生产已上线版本：**V11.0.1**（已发布） | 实现设计：[V11.0.1 Implementation Design](architecture/v11_0_1_implementation_design.md)  
+> 当前代码实现：**V11.2.1** | 实现设计：[V11.2.1 RBAC & Role Workbench Design](architecture/v11_2_1_rbac_workbench_design.md)  
+> 生产已上线版本：**V11.2.1**（已发布） | 实现设计：[V11.2.1 RBAC & Role Workbench Design](architecture/v11_2_1_rbac_workbench_design.md)  
+> 下一版本规划：**V11.3.1** Multi-Account Support & Account-Scoped Data Governance | [V11.3.1 Release Plan](archived/v11/v11.3/RELEASE_PLAN_V11.3.1.md) | [V11.3.1 实现设计](architecture/v11_3_1_multi_account_design.md)  
 > 历史规划归档：[V11.2.1 Release Plan](archived/v11/v11.2/RELEASE_PLAN_V11.2.1.md) | [V11.1.1 Release Plan](archived/v11/v11.1/RELEASE_PLAN_V11.1.1.md) | [V11.0.1 Release Plan](archived/v11/v11.0/RELEASE_PLAN_V11.0.1.md) | [V10.5.4 Release Plan](archived/v10/v10.5/RELEASE_PLAN_V10.5.4.md)
 
 ---

@@ -110,13 +110,37 @@
 - **M4 Evolution Governance**：为后续进化治理与风格约束提供 flag-gated 基座
 - **前端重点**：Autonomy 工作台统一显示 MetaState / rollout flags / improvement 候选
 
-### Phase 17: Trader Workbench Convergence & Architecture Simplification ✅ V11.1.1 当前实现已对齐（代码版本）
+### Phase 17: Trader Workbench Convergence & Architecture Simplification ✅ V11.1.1 已上线
 
-> 当前实现设计见：[docs/architecture/v11_1_1_implementation_design.md](../architecture/v11_1_1_implementation_design.md)  
+> 实现设计见：[docs/architecture/v11_1_1_implementation_design.md](../architecture/v11_1_1_implementation_design.md)  
 > 历史规划见：[docs/archived/v11/v11.1/RELEASE_PLAN_V11.1.1.md](../archived/v11/v11.1/RELEASE_PLAN_V11.1.1.md)
 
-- **M1 平台功能页面治理（当前实现）**：`/dashboard`、`/order-book`、`/system-monitor` 完成统一壳层与解释条接入；`/task-management` 收口为系统监控 tasks Tab
-- **M2 前端架构治理（当前实现）**：落地 `src/components/workbench/*` 共享壳层与 typed workbench contract，减少页面重复摘要与重复取数
-- **M3 后端架构治理（当前实现）**：落地 Dashboard / Order Book / System Monitor 三个 read-model 路由，保持 thin-router 与单主编排路径纪律
-- **M4 代码质量与性能治理（当前实现）**：read model 改为依赖 public service API，FastAPI 新路由对齐 `Annotated` 依赖注入与显式响应，前端收紧类型与状态复用
-- **说明**：当前代码实现已对齐 V11.1.1 的首批工作台收敛目标；生产已上线基线仍为 V11.0.1
+- **M1 平台功能页面治理**：`/dashboard`、`/order-book`、`/system-monitor` 完成统一壳层与解释条接入；`/task-management` 收口为系统监控 tasks Tab
+- **M2 前端架构治理**：落地 `src/components/workbench/*` 共享壳层与 typed workbench contract，减少页面重复摘要与重复取数
+- **M3 后端架构治理**：落地 Dashboard / Order Book / System Monitor 三个 read-model 路由，保持 thin-router 与单主编排路径纪律
+- **M4 代码质量与性能治理**：read model 改为依赖 public service API，FastAPI 新路由对齐 `Annotated` 依赖注入与显式响应，前端收紧类型与状态复用
+
+### Phase 18: RBAC & Role Workbench ✅ V11.2.1 已上线
+
+> 实现设计见：[docs/architecture/v11_2_1_rbac_workbench_design.md](../architecture/v11_2_1_rbac_workbench_design.md)  
+> 历史规划见：[docs/archived/v11/v11.2/RELEASE_PLAN_V11.2.1.md](../archived/v11/v11.2/RELEASE_PLAN_V11.2.1.md)
+
+- **M1 RBAC 数据模型**：`roles`、`permissions`、`users`、`user_role_bindings`、`role_permission_grants`、`authorization_audit_logs` 六张表建立后端授权真源
+- **M2 认证扩展**：JWT 携带 `role / permissions / permissions_version / display_name`；新增 `/api/v1/auth/me`、`/api/v1/auth/change-password`；`feature_flags` 随登录响应下发
+- **M3 角色工作台首页**：`/research`、`/trading`、`/executive`、`/admin` 四类角色工作台入口
+- **M4 前端鉴权统一**：`PermissionButton / PermissionGuard` 组件化；路由 `meta.roles / meta.permissions` 元信息化；`resolveRouteAccess()` 集中管理角色路由规则
+- **M5 管理后台**：`/admin/users`（用户 CRUD + 角色分配）、`/admin/roles`、`/admin/audit`、`/admin/permissions` 目录
+- **前端重点**：首登强制改密闭环（`must_change_password`）；主管仅可访问 `executive / reports / dashboard / attribution / portfolio / copilot`；后端路由统一接入 `require_permission / require_any_role`
+
+### Phase 19: Multi-Account Support & Account-Scoped Data Governance 🚀 V11.3.1 规划定稿
+
+> Release Plan：[docs/archived/v11/v11.3/RELEASE_PLAN_V11.3.1.md](../archived/v11/v11.3/RELEASE_PLAN_V11.3.1.md)  
+> 实现设计：[docs/architecture/v11_3_1_multi_account_design.md](../architecture/v11_3_1_multi_account_design.md)
+
+- **M0 基础设施（数据层）**：新增 `broker_accounts`、`user_broker_account_grants`、`broker_account_credentials` 三张表；迁移脚本回补默认账户与现有用户授权
+- **M1 Tiger 客户端注册表**：`BrokerAccountRegistry` 替代 `factory.py` 全局单例，按 `account_id` 路由 `TigerOptionClient` 实例；凭证 AES-256-GCM 加密存储
+- **M2 认证扩展（UserContext + JWT）**：`accessible_account_ids`、`default_account_id`、`account_grants` 注入 `UserContext` 与 JWT payload；新增 `require_account_access` 依赖注入
+- **M3 数据隔离层**：主要数据服务按 `account_id` 过滤；新增 `/api/v1/auth/my-accounts`；`ACCOUNT_DATA_ISOLATION_V1131_ENABLED` 控制进退
+- **M4 账户管理 Admin API**：`/api/v1/admin/broker-accounts` CRUD + 凭证上传；`/api/v1/admin/users/{id}/account-grants` CRUD；所有操作写入授权审计日志
+- **M5 前端**：`AdminBrokerAccountsPage.vue`（账户注册 + 凭证管理）；用户详情增加账户授权标签页；`WorkbenchShell` 账户选择器（多账户用户可见）；`auth` store 扩展 `currentAccountId / accountGrants`
+- **不在范围**：跨账户聚合风险计算、SaaS 完整多租户 schema 隔离、用户自助注册流程
