@@ -18,7 +18,9 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import and_, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.account_context import require_account_access
 from app.core.auth import get_current_user
+from app.core.config import settings
 from app.models.db import get_session
 from app.models.position import Position, PositionStatus
 from app.models.trading_plan import TradingPlan
@@ -28,8 +30,8 @@ from app.models.trading_signal import (
     SignalType,
     TradingSignal,
 )
-from app.services.position_query_service import ACTIVE_POSITION_STATUSES
 from app.services.ghost_trade_service import ghost_trade_service
+from app.services.position_query_service import ACTIVE_POSITION_STATUSES
 from app.services.regime_classifier import RegimeClassifier
 from app.services.signal_audit_log_service import signal_audit_log_service
 from app.services.signal_quality_config import (
@@ -151,7 +153,7 @@ async def get_audit_log(
     symbol: Optional[str] = Query(None),
     since_days: int = Query(30, ge=1, le=365),
     db: AsyncSession = Depends(get_session),
-    _user: str = Depends(get_current_user),
+    account_id: str = Depends(require_account_access("ANALYZE")),
 ):
     """
     返回近 `since_days` 天内经过漏斗评估的信号列表，
@@ -164,6 +166,7 @@ async def get_audit_log(
         funnel_result=funnel_result,
         symbol=symbol,
         since_days=since_days,
+        account_id=account_id,
     )
     return {"data": rows, "offset": offset, "limit": limit, "count": len(rows)}
 
@@ -177,7 +180,7 @@ async def get_audit_log(
 async def get_funnel_stats(
     since_days: int = Query(7, ge=1, le=90),
     db: AsyncSession = Depends(get_session),
-    _user: str = Depends(get_current_user),
+    account_id: str = Depends(require_account_access("ANALYZE")),
 ):
     """
     Returns:
@@ -196,7 +199,9 @@ async def get_funnel_stats(
     - regime_confidence: 当前体制置信度
     - capacity_guard: 最近容量守卫自动减仓动作摘要
     """
-    stats = await signal_audit_log_service.get_funnel_stats(db, since_days=since_days)
+    stats = await signal_audit_log_service.get_funnel_stats(
+        db, since_days=since_days, account_id=account_id
+    )
 
     # 实时注入当前持仓数与配置上限，帮助解释 L2 (MAX_POSITIONS_REACHED) 拦截原因。
     # 保留 capacity 口径（HELD）用于解释名额占用，同时补充 lifecycle_active 口径供页面解释与其他模块对齐。
@@ -207,10 +212,15 @@ async def get_funnel_stats(
         PositionStatus.SCALING_OUT.value,
         PositionStatus.PARTIALLY_CLOSED.value,
     ]
+    _pos_acct_filter = (
+        [Position.account_id == account_id]
+        if settings.ACCOUNT_DATA_ISOLATION_V1131_ENABLED
+        else []
+    )
     held_count_stmt = (
         select(func.count())
         .select_from(Position)
-        .where(Position.status.in_(_held_statuses))
+        .where(and_(Position.status.in_(_held_statuses), *_pos_acct_filter))
     )
     current_positions_count = (
         await db.execute(held_count_stmt)
@@ -218,7 +228,11 @@ async def get_funnel_stats(
     lifecycle_active_count_stmt = (
         select(func.count())
         .select_from(Position)
-        .where(Position.status.in_(tuple(ACTIVE_POSITION_STATUSES)))
+        .where(
+            and_(
+                Position.status.in_(tuple(ACTIVE_POSITION_STATUSES)), *_pos_acct_filter
+            )
+        )
     )
     lifecycle_active_positions_count = (
         await db.execute(lifecycle_active_count_stmt)
@@ -318,7 +332,7 @@ async def get_ghost_trades(
     symbol: Optional[str] = Query(None),
     since_days: int = Query(30, ge=1, le=365),
     db: AsyncSession = Depends(get_session),
-    _user: str = Depends(get_current_user),
+    account_id: str = Depends(require_account_access("ANALYZE")),
 ):
     """返回被漏斗拒绝信号的虚拟仓位跟踪，用于事后反事实验证。"""
     rows = await ghost_trade_service.get_ghost_trades(
@@ -328,6 +342,7 @@ async def get_ghost_trades(
         ghost_result=ghost_result,
         symbol=symbol,
         since_days=since_days,
+        account_id=account_id,
     )
     return {"data": rows, "offset": offset, "limit": limit, "count": len(rows)}
 
@@ -336,7 +351,7 @@ async def get_ghost_trades(
 async def get_ghost_analysis(
     since_days: int = Query(30, ge=1, le=365),
     db: AsyncSession = Depends(get_session),
-    _user: str = Depends(get_current_user),
+    account_id: str = Depends(require_account_access("ANALYZE")),
 ):
     """
     对比幽灵交易胜率与实际信号胜率，评估漏斗是否过严/过松。
@@ -350,4 +365,6 @@ async def get_ghost_analysis(
     - recommendation:     LOOSEN_THRESHOLD / MAINTAIN / TIGHTEN_THRESHOLD
     - conclusion:         可读性诊断结论
     """
-    return await ghost_trade_service.get_ghost_analysis(db, since_days=since_days)
+    return await ghost_trade_service.get_ghost_analysis(
+        db, since_days=since_days, account_id=account_id
+    )

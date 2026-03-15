@@ -9,15 +9,17 @@
   3. get_ghost_trades()            — 获取幽灵交易列表（用于 Signal Watchtower）
   4. get_ghost_analysis()          — 幽灵胜率 vs 实际胜率对比分析
 """
+
 from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import func, select, and_, update
+from sqlalchemy import and_, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models.ghost_trade import GhostTrade, GhostTradeResult
 
 logger = logging.getLogger(__name__)
@@ -36,8 +38,8 @@ class GhostTradeService:
         rejection_reason: Optional[str],
         rejected_at_layer: Optional[int],
         conviction_at_rejection: Optional[float],
-        entry_price: Optional[float] = None,   # 可选：由外部传入，否则需后续填充
-        stop_loss: Optional[float]   = None,
+        entry_price: Optional[float] = None,  # 可选：由外部传入，否则需后续填充
+        stop_loss: Optional[float] = None,
         take_profit: Optional[float] = None,
         max_tracking_days: int = 10,
     ) -> Optional[GhostTrade]:
@@ -48,20 +50,20 @@ class GhostTradeService:
         """
         try:
             trade = GhostTrade(
-                signal_id               = signal_id,
-                symbol                  = symbol,
-                direction               = direction,
-                rejection_reason        = rejection_reason,
-                rejected_at_layer       = rejected_at_layer,
-                conviction_score_at_rejection = conviction_at_rejection,
-                entry_price             = entry_price or 0.0,
-                stop_loss               = stop_loss,
-                take_profit             = take_profit,
-                max_tracking_days       = max_tracking_days,
-                tracking_day            = 0,
-                ghost_result            = GhostTradeResult.OPEN,
-                price_history           = [],
-                tracking_start          = datetime.now(timezone.utc),
+                signal_id=signal_id,
+                symbol=symbol,
+                direction=direction,
+                rejection_reason=rejection_reason,
+                rejected_at_layer=rejected_at_layer,
+                conviction_score_at_rejection=conviction_at_rejection,
+                entry_price=entry_price or 0.0,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                max_tracking_days=max_tracking_days,
+                tracking_day=0,
+                ghost_result=GhostTradeResult.OPEN,
+                price_history=[],
+                tracking_start=datetime.now(timezone.utc),
             )
             db.add(trade)
             await db.flush()
@@ -77,7 +79,7 @@ class GhostTradeService:
     async def update_daily_prices(
         self,
         db: AsyncSession,
-        price_map: dict[str, float],   # symbol → 当日收盘价
+        price_map: dict[str, float],  # symbol → 当日收盘价
     ) -> int:
         """
         每日收盘后批量更新处于 OPEN 状态的幽灵交易 PnL。
@@ -89,7 +91,9 @@ class GhostTradeService:
         Returns:
             更新条数
         """
-        stmt = select(GhostTrade).where(GhostTrade.ghost_result == GhostTradeResult.OPEN)
+        stmt = select(GhostTrade).where(
+            GhostTrade.ghost_result == GhostTradeResult.OPEN
+        )
         result = await db.execute(stmt)
         open_trades = result.scalars().all()
 
@@ -102,8 +106,10 @@ class GhostTradeService:
             # 第一次更新时补填 entry_price（若创建时未提供）
             if trade.entry_price == 0.0:
                 trade.entry_price = close
-                trade.stop_loss   = close * (0.95 if trade.direction == "LONG" else 1.05)
-                trade.take_profit = close * (1.10 if trade.direction == "LONG" else 0.90)
+                trade.stop_loss = close * (0.95 if trade.direction == "LONG" else 1.05)
+                trade.take_profit = close * (
+                    1.10 if trade.direction == "LONG" else 0.90
+                )
 
             # 计算 PnL
             if trade.direction == "LONG":
@@ -122,15 +128,17 @@ class GhostTradeService:
 
             # 追加价格历史
             history: list[dict] = list(trade.price_history or [])
-            history.append({
-                "date":    datetime.now(timezone.utc).date().isoformat(),
-                "close":   close,
-                "pnl_pct": round(pnl_pct * 100, 2),
-            })
-            trade.price_history = history[-trade.max_tracking_days:]
+            history.append(
+                {
+                    "date": datetime.now(timezone.utc).date().isoformat(),
+                    "close": close,
+                    "pnl_pct": round(pnl_pct * 100, 2),
+                }
+            )
+            trade.price_history = history[-trade.max_tracking_days :]
 
             # 更新状态
-            trade.last_price    = close
+            trade.last_price = close
             trade.ghost_pnl_pct = round(pnl_pct * 100, 2)
             trade.ghost_pnl_abs = round(pnl_abs, 2)
             trade.tracking_day += 1
@@ -152,7 +160,10 @@ class GhostTradeService:
                         trade.ghost_result = GhostTradeResult.WIN
                         trade.tracking_end = datetime.now(timezone.utc)
 
-            if trade.tracking_day >= trade.max_tracking_days and trade.ghost_result == GhostTradeResult.OPEN:
+            if (
+                trade.tracking_day >= trade.max_tracking_days
+                and trade.ghost_result == GhostTradeResult.OPEN
+            ):
                 trade.ghost_result = GhostTradeResult.EXPIRED
                 trade.tracking_end = datetime.now(timezone.utc)
                 # EXPIRED 视为 PnL > 0 则 WIN，否则 LOSS
@@ -176,6 +187,7 @@ class GhostTradeService:
         ghost_result: Optional[str] = None,
         symbol: Optional[str] = None,
         since_days: int = 30,
+        account_id: Optional[str] = None,
     ) -> list[dict]:
         """获取幽灵交易列表。"""
         cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
@@ -184,6 +196,16 @@ class GhostTradeService:
             conditions.append(GhostTrade.ghost_result == ghost_result)
         if symbol:
             conditions.append(GhostTrade.symbol == symbol)
+        if account_id and settings.ACCOUNT_DATA_ISOLATION_V1131_ENABLED:
+            from app.models.trading_signal import TradingSignal
+
+            conditions.append(
+                GhostTrade.signal_id.in_(
+                    select(TradingSignal.id).where(
+                        TradingSignal.account_id == account_id
+                    )
+                )
+            )
 
         stmt = (
             select(GhostTrade)
@@ -201,6 +223,7 @@ class GhostTradeService:
         db: AsyncSession,
         *,
         since_days: int = 30,
+        account_id: Optional[str] = None,
     ) -> dict:
         """
         幽灵交易分析：对比幽灵胜率 vs 实际信号胜率。
@@ -213,17 +236,25 @@ class GhostTradeService:
             GhostTrade.tracking_start >= cutoff,
             GhostTrade.ghost_result.in_([GhostTradeResult.WIN, GhostTradeResult.LOSS]),
         ]
+        if account_id and settings.ACCOUNT_DATA_ISOLATION_V1131_ENABLED:
+            from app.models.trading_signal import TradingSignal
+
+            conditions.append(
+                GhostTrade.signal_id.in_(
+                    select(TradingSignal.id).where(
+                        TradingSignal.account_id == account_id
+                    )
+                )
+            )
 
         stmt = select(GhostTrade).where(and_(*conditions))
         result = await db.execute(stmt)
         closed_trades = result.scalars().all()
 
-        total     = len(closed_trades)
-        wins      = sum(1 for t in closed_trades if t.ghost_result == GhostTradeResult.WIN)
-        win_rate  = round(wins / max(1, total) * 100, 1)
-        avg_pnl   = (
-            sum(t.ghost_pnl_pct or 0 for t in closed_trades) / max(1, total)
-        )
+        total = len(closed_trades)
+        wins = sum(1 for t in closed_trades if t.ghost_result == GhostTradeResult.WIN)
+        win_rate = round(wins / max(1, total) * 100, 1)
+        avg_pnl = sum(t.ghost_pnl_pct or 0 for t in closed_trades) / max(1, total)
 
         # 按拒绝层级的胜率
         layer_stats: dict[str, dict] = {}
@@ -276,35 +307,47 @@ class GhostTradeService:
             conclusion = f"幽灵胜率: {win_rate}%（实际胜率数据不足，无法对比）"
 
         return {
-            "since_days":         since_days,
-            "ghost_total":        total,
-            "ghost_wins":         wins,
+            "since_days": since_days,
+            "ghost_total": total,
+            "ghost_wins": wins,
             "ghost_win_rate_pct": win_rate,
-            "ghost_avg_pnl_pct":  round(avg_pnl, 2),
-            "real_win_rate_pct":  real_win_rate,
-            "win_rate_gap_pct":   round(win_rate - (real_win_rate or win_rate), 1),
-            "layer_breakdown":    layer_stats,
-            "reason_breakdown":   reason_stats,
-            "conclusion":         conclusion,
+            "ghost_avg_pnl_pct": round(avg_pnl, 2),
+            "real_win_rate_pct": real_win_rate,
+            "win_rate_gap_pct": round(win_rate - (real_win_rate or win_rate), 1),
+            "layer_breakdown": layer_stats,
+            "reason_breakdown": reason_stats,
+            "conclusion": conclusion,
             "recommendation": (
-                "LOOSEN_THRESHOLD" if (real_win_rate and win_rate - real_win_rate > 10) else
-                "MAINTAIN" if (real_win_rate and abs(win_rate - real_win_rate) <= 10) else
-                "TIGHTEN_THRESHOLD"
+                "LOOSEN_THRESHOLD"
+                if (real_win_rate and win_rate - real_win_rate > 10)
+                else (
+                    "MAINTAIN"
+                    if (real_win_rate and abs(win_rate - real_win_rate) <= 10)
+                    else "TIGHTEN_THRESHOLD"
+                )
             ),
         }
 
     async def _get_real_signal_win_rate(
-        self, db: AsyncSession, since_days: int,
+        self,
+        db: AsyncSession,
+        since_days: int,
     ) -> Optional[float]:
         """从 trade_attribution_entries 获取最近 N 天的实际信号胜率。"""
         try:
-            from app.models.trade_attribution import TradeAttributionEntry, AttributionCategory
+            from app.models.trade_attribution import (
+                AttributionCategory,
+                TradeAttributionEntry,
+            )
+
             cutoff = datetime.now(timezone.utc) - timedelta(days=since_days)
             stmt = select(
                 func.count().label("total"),
-                func.sum(func.if_(
-                    TradeAttributionEntry.category == AttributionCategory.WIN, 1, 0
-                )).label("wins"),
+                func.sum(
+                    func.if_(
+                        TradeAttributionEntry.category == AttributionCategory.WIN, 1, 0
+                    )
+                ).label("wins"),
             ).where(TradeAttributionEntry.created_at >= cutoff)
             row = (await db.execute(stmt)).one_or_none()
             if row and row[0] and row[0] > 5:
@@ -315,28 +358,31 @@ class GhostTradeService:
 
     def _row_to_dict(self, r: GhostTrade) -> dict:
         return {
-            "id":               r.id,
-            "signal_id":        r.signal_id,
-            "symbol":           r.symbol,
-            "direction":        r.direction,
+            "id": r.id,
+            "signal_id": r.signal_id,
+            "symbol": r.symbol,
+            "direction": r.direction,
             "rejection_reason": r.rejection_reason,
             "rejected_at_layer": r.rejected_at_layer,
             "conviction_score_at_rejection": r.conviction_score_at_rejection,
-            "entry_price":      r.entry_price,
-            "stop_loss":        r.stop_loss,
-            "take_profit":      r.take_profit,
-            "last_price":       r.last_price,
-            "ghost_pnl_pct":    r.ghost_pnl_pct,
-            "ghost_pnl_abs":    r.ghost_pnl_abs,
-            "ghost_result":     r.ghost_result,
-            "tracking_day":     r.tracking_day,
+            "entry_price": r.entry_price,
+            "stop_loss": r.stop_loss,
+            "take_profit": r.take_profit,
+            "last_price": r.last_price,
+            "ghost_pnl_pct": r.ghost_pnl_pct,
+            "ghost_pnl_abs": r.ghost_pnl_abs,
+            "ghost_result": r.ghost_result,
+            "tracking_day": r.tracking_day,
             "max_tracking_days": r.max_tracking_days,
-            "price_history":    r.price_history,
-            "tracking_start":   r.tracking_start.isoformat() if r.tracking_start else None,
-            "tracking_end":     r.tracking_end.isoformat() if r.tracking_end else None,
-            "created_at":       r.created_at.isoformat() if r.created_at else None,
+            "price_history": r.price_history,
+            "tracking_start": (
+                r.tracking_start.isoformat() if r.tracking_start else None
+            ),
+            "tracking_end": r.tracking_end.isoformat() if r.tracking_end else None,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
         }
 
 
 # ── 模块级单例 ────────────────────────────────────────────────────────────────
+ghost_trade_service = GhostTradeService()
 ghost_trade_service = GhostTradeService()
