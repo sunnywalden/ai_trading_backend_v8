@@ -4,7 +4,9 @@
 > 本文档已拆分为模块化子文档，位于 [`docs/product/`](product/README.md)。
 > 本文件保留作为向后兼容入口，正式维护请在 `docs/product/` 目录进行。
 > **AI量化交易闭环系统** - 个人美港股智能交易平台  
-> 版本：V11.0.1（已上线） | 更新日期：2026-03-14  
+> 版本：V11.1.1（当前实现） | 更新日期：2026-03-15  
+> 生产基线：V11.0.1（已上线）  
+> 变更摘要（V11.1.1 当前实现）：**Trader Workbench Convergence & Architecture Simplification**——围绕 `WorkbenchShell`、`ExplainabilityStrip`、typed workbench contract、read model 路由与任务页收口推进当前实现：`/dashboard`、`/order-book`、`/system-monitor` 三个主工作台共享统一壳层与解释条，`/task-management` 收口为 `SystemMonitorPage` 的 tasks Tab，后端新增 Dashboard / Order Book / System Monitor 三个聚合读模型接口，并通过 public service API、thin router 与契约化前端消费降低跨层耦合。  
 > 变更摘要（V11.0.1 已上线）：**Capital Velocity & Autonomous Evolution OS**——在 V10.5.4 控制平面基线之上，围绕 **Capital Velocity**（近命中信号摩擦跟踪、闲置资本感知、资本轮转效率提升）、**Self-Perception**（MetaState Snapshot、False-Hold Alert、模型阻断画像）、**Improvement Engine**（自动生成参数/模块级改进候选）与 **Evolution Governance**（flag-gated 进化治理与风格约束预留）四条主线推进，重点解决“为什么资金闲置、为什么信号被卡住、哪里值得改进”三类当前生产问题，同时保持既有 RiskGate、容量保护带与治理硬门不被放宽。  
 > 变更摘要（V10.5.4 基线）：**Signal Pipeline Integrity & Control-Plane Hardening**——V10.5.4 已作为 V11.0.1 的前序控制平面基线，提供 `signal_origin_mode`、canonical signal payload、原生状态迁移、原生审计优先与 Observe → Shadow → Semi → Full 渐进放量纪律。  
 > 变更摘要（V10.5.2 交付）：**组合席位竞争引擎（Capacity-Aware Admission & Replacement Engine）**——把「持仓上限」从刚性拒绝规则升级为动态席位分配机制：新增 **Unified Candidate Pool**（当前持仓 + 新信号统一候选池）+ **统一准入评分** `admission_score = alpha_quality - replacement_friction - risk_penalty + regime_fit`，满仓时按分数淘汰末位 N 个对象（持仓→EXIT、信号→REJECTED_BY_CAPACITY_REPLACEMENT）；引入替换保护带（`MIN_REPLACEMENT_EDGE_BPS / MAX_REPLACEMENTS_PER_CYCLE / MIN_HOLD_MINUTES / REPLACEMENT_COOLDOWN_MINUTES`）防止过度翻仓；**Incumbent Decay Model** 让持仓持续参与席位竞争（alpha 衰减 + 体制适配 + 机会成本）；新增 `capacity_decision_audit_log` 全量审计；支持 `CAPACITY_REPLACEMENT_DRY_RUN` 先观测再放量；前端 `/portfolio`、`/autonomy`、`/order-book` 增加「席位竞争结果」可视化。  
@@ -22,9 +24,28 @@
 > 变更摘要（V10.2-M1）：**市场体制感知引擎** ——RegimeClassifier 五维评分体系（趋势强度/波动率制度/量价关系/宏观环境/广度指标）、6类体制自动识别（BULL_TREND / BEAR_TREND / HIGH_VOL / MEAN_REVERT / RANGE_BOUND / CRISIS）、3日确认防噪机制、EventBus 异步事件总线（REGIME_CHANGED 事件驱动策略权重自适应切换、VaR 门限动态调整）、StrategyWeightAllocator 体制感知仓位分配、AI 自主交易闭环升级至 **17 阶段**  
 > 变更摘要（V10.1）：**兑现承诺 + 打磨质量 + 扩展边界**——Tiger 真实下单接入（覆盖美股/港股/期权）、FULL 模式完整自主交易闭环、Copilot 操作指令执行落地、Dashboard 所有 TODO 指标真实化、AI 组合级决策升级（结构化 JSON 输出 + 批量组合决策）、ETF 标的池正式支持、港股支持（Tiger API 统一，无需 Futu）、Paper→Live 毕业自动化、Dashboard WebSocket 实时推送；**本版本明确不含 Telegram 通知，FULL 模式具备完全自主交易能力**
 > 历史版本：V10.0（2026-02-24）变更摘要见下方历史记录节  
-> 当前已上线版本：**V11.0.1**（已发布） | 实现设计：[V11.0.1 Implementation Design](architecture/v11_0_1_implementation_design.md)  
-> 历史规划归档：[V11.0.1 Release Plan](archived/v11/v11.0/RELEASE_PLAN_V11.0.1.md) | [V10.5.4 Release Plan](archived/v10/v10.5/RELEASE_PLAN_V10.5.4.md)  
-> 下一阶段规划：[V11.1.1 Release Plan — Trader Workbench Convergence & Architecture Simplification](archived/v11/v11.1/RELEASE_PLAN_V11.1.1.md)
+> 当前代码实现：**V11.1.1** | 实现设计：[V11.1.1 Implementation Design](architecture/v11_1_1_implementation_design.md)  
+> 生产已上线版本：**V11.0.1**（已发布） | 实现设计：[V11.0.1 Implementation Design](architecture/v11_0_1_implementation_design.md)  
+> 历史规划归档：[V11.1.1 Release Plan](archived/v11/v11.1/RELEASE_PLAN_V11.1.1.md) | [V11.0.1 Release Plan](archived/v11/v11.0/RELEASE_PLAN_V11.0.1.md) | [V10.5.4 Release Plan](archived/v10/v10.5/RELEASE_PLAN_V10.5.4.md)
+
+---
+
+## V11.1.1 当前实现验收（A-D，已对齐）
+
+> 实现设计详见 [docs/architecture/v11_1_1_implementation_design.md](architecture/v11_1_1_implementation_design.md)
+
+- [x] **A. 架构设计清晰，具有前瞻性**：前端以 `WorkbenchShell + ExplainabilityStrip` 统一工作台骨架；后端以 Dashboard / Order Book / System Monitor 三个 read model 路由承接工作台聚合；继续坚持 `AutonomousEngine.run_decision_cycle()` 单主编排路径，不新造平行控制面。
+- [x] **B. 算法、功能实现优雅且高性能**：工作台改为聚合读模型和 typed contract，减少前端重复取数与跨页面拼装；`SystemMonitorPage` 统一复用 workbench 请求；`order_book/summary` 直接复用 `order_book/workbench` 结果，避免重复聚合逻辑。
+- [x] **C. 可复用度高、复杂度低、可读性高**：`DashboardV2Service` 暴露稳定 public workbench context，read model 不再依赖受保护成员；新工作台页面共享壳层、解释条、状态语言与任务收口模式；新路由按 thin-router 方式保留单一职责。
+- [x] **D. 符合最佳实践原则**：FastAPI 新增路由对齐 `Annotated + Query/Depends` 约定并显式声明 404；前端路由标题字符串化、fallback service typed contract、部分监控可访问性样式得到修正；文档明确区分“当前代码实现”与“生产已上线基线”。
+
+### V11.1.1 当前实现范围
+
+- [x] `/dashboard`、`/order-book`、`/system-monitor` 接入统一 `WorkbenchShell`
+- [x] 三个主工作台接入统一 `ExplainabilityStrip`
+- [x] `/task-management` 收口为 `SystemMonitorPage` 内嵌 tasks Tab，并保留直达路由
+- [x] 后端新增 `/api/v1/dashboard/v2/workbench-summary`、`/api/v1/order-book/workbench`、`/api/v1/system-monitor/workbench`
+- [x] `app/services/read_models/` 成为本轮工作台聚合主入口，避免把聚合逻辑继续散落到视图层
 
 ---
 
@@ -209,11 +230,8 @@
 
 **P0 — Execution Microscope（执行显微镜）**
 
-
-- [x] `ExecutionMicroscopeService` 计算 Implementation Shortfall (IS) 四分解：`delay_cost + market_impact_cost + opportunity_cost + timing_cost`，每笔 intent 完成后写入 `execution_quality_log` 表。
 - [x] `GET /api/v1/observability/execution-quality` 返回按时段/标的聚合的 Fill Rate、IS 分解、vs VWAP deviation 三组指标。
 - [x] Dashboard 执行质量面板：Execution Alpha（到达价 vs 实际成交价）色码热力图，实时 P95 滑点数值。
-
 
 **P1 — Signal Intelligence Observatory（信号情报观察站）**
 
@@ -221,13 +239,10 @@
 - [x] `GET /api/v1/observability/signal-intelligence` 返回六维 IC 曲线、半衰期、拥挤度评分（Crowding Score）。
 - [x] 信号拥挤度超阈值（`SIGNAL_CROWDING_WARN=0.75`）时，写入感知栏告警并降低该维度融合权重。
 
-
 **P2 — Risk Observability Cluster（风险可观测集群）**
 
-- [x] 实时计算五个主因子敞口（Market / HML / SMB / MOM / QMJ）并写入 `portfolio_factor_exposure` 快照，频率 5分钟/次。
 - [x] `GET /api/v1/observability/risk-cluster` 返回因子敞口条、实时期望损失（ES@97.5%）、组合内相关性均值。
 - [x] 组合内相关性均值骤升超 `CORRELATION_SPIKE_THRESHOLD=0.65` 时触发 `CORRELATION_SPIKE` 告警事件。
-
 
 #### 二、AI 中枢 2.0 (AI Hub 2.0)
 
@@ -240,13 +255,9 @@
 
 **P1 — AI Confidence Calibration（置信度校准系统）**
 
-
 - [x] `ConfidenceCalibrationService` 每日 08:15 运行：将过去 90 日 `[confidence_bucket → actual_win_rate]` 映射写入 `confidence_calibration_snapshot` 表，计算 Brier Score 和 ECE（Expected Calibration Error）。
 - [x] 当整体 ECE > `ECE_WARN_THRESHOLD=0.12` 时，在 AI 决策输出上自动叠加 `calibration_adjustment_factor`（向 0.5 方向收敛），并将校准状态写入感知栏。
 - [x] `GET /api/v1/ai-hub/calibration` 返回分体制 Reliability Diagram 数据点、Brier Score 趋势、当前校准因子。
-
-**P2 — Adaptive Factor Framework（自适应因子框架）**
-
 
 - [x] `AdaptiveFactorWeightingService` 使用 Kalman Filter 对六维信号权重进行在线更新（观测值 = 最近5日 IC，过程噪声 Q=0.001，观测噪声 R=0.01），更新频率：每日收盘后。
 - [x] 因子动量加成：近20日 IC 排名前两位的因子权重额外 +5%，排名末位因子权重 -5%，总权重归一化至100%。
@@ -254,23 +265,16 @@
 
 **P3 — Decision Post-Mortem Engine（决策事后剖析引擎）**
 
-
 - [x] `DecisionPostMortemService`：每笔持仓完全平仓后（`position_status=CLOSED`），自动触发 `deepseek-reasoner` 生成结构化复盘，包含：`factual_summary / counterfactual_buy / counterfactual_hold / counterfactual_sell / key_lessons / improvement_suggestions`。
 - [x] 事后剖析结果写入 `decision_post_mortems` 表，并自动提炼1条 LESSON 型洞察推入 `ai_insight_repository`（`source=POST_MORTEM`）。
 - [x] `GET /api/v1/ai-hub/post-mortems/{trade_id}` 返回完整剖析报告；`GET /api/v1/ai-hub/post-mortems` 支持分页浏览。
 
 #### 三、指挥室演进 (War Room Dashboard)
 
-
-**P0 — War Room Mode（全屏六格指挥视图）**
-
 - [x] 新增 `/war-room` 路由，全屏 6 面板网格布局可由用户自由配置（拖拽 + 尺寸调整），面板类型含：P&L Ticker / Intelligence Feed / Portfolio Heatmap / Risk Gauges / Signal Pulse / Execution Queue Monitor。
 - [x] 顶部实时 P&L Ticker：每5秒推送 `{ total_pnl, pnl_change_1h, top_contributor, top_detractor, vs_spy_alpha }`，支持归因下钻。
 
 - [x] 全局键盘快捷键：`W` 进入 War Room / `Esc` 退出 / ` `` ` 全局 Copilot / 数字键 1-6 聚焦对应面板。
-
-**P1 — Intelligence Feed（AI情报流）**
-
 
 - [x] `IntelligenceFeedService` 聚合以下事件流并按 `urgency_score` 排序：Agent 决策摘要 / 告警事件 / 事件日历倒计时 / 因子异常 / Copilot 主动推送。
 - [x] `GET /api/v1/war-room/intelligence-feed?limit=50` 返回带 urgency_score（0-100）、category（DECISION/RISK/EVENT/SIGNAL）、action_required 标记的事件列表。
@@ -280,7 +284,6 @@
 
 - [x] `GET /api/v1/war-room/exposure` 返回：行业敞口分布（sector → net_exposure_pct）+ 五因子当前偏差（factor → z_score）+ 地理敞口（US/HK/Global）+ 持仓间相关矩阵。
 - [x] 行业热力图：每格显示板块净敞口%、当日 P&L、对 SPY 的 Beta，Color scale：红（空头）→ 绿（多头）。
-
 **P3 — Smart Alert Center（智能告警分级中枢）**
 
 - [x] `SmartAlertService` 对原始告警进行 AI 分级（CRITICAL/HIGH/MEDIUM/LOW）+ 相似告警聚合（cosine similarity > 0.85 自动合并）+ 自动生成建议行动（`recommended_action_text`）。
@@ -425,7 +428,6 @@ ALLOWED_ASSET_TYPES=STOCK,ETF,OPTION   # 开启期权（需谨慎）
 - 运行中：通过 Copilot 随时查询，重大操作（SEMI 模式）收通知可撤销
 - 复盘：查看 AI 自动生成的周报，调整边界配置
 
-
 ### 3.2 核心模块
 
 #### A. 数据与研究层
@@ -435,11 +437,9 @@ ALLOWED_ASSET_TYPES=STOCK,ETF,OPTION   # 开启期权（需谨慎）
 - **宏观风险评分**：地缘政治 + 经济指标综合判断
 
 - **技术面分析**：多指标技术分析（AI 自主触发）
-- **基本面分析**：估值 + 成长性评估
 - **事件日历** ★ V10.2-M2：yfinance 盈利日历 + 硬编码 FOMC/CPI/NFP，每日 07:00 同步，风险分级（LOW/MEDIUM/HIGH/CRITICAL）
 
 #### B. AI 决策层（V10 核心升级）
-
 
 - **策略库**：12大类量化策略（股票模式下跳过期权策略）
 - **组合智能**：Markowitz + 风险平价 + Kelly，从单标的决策升级为组合视角
@@ -450,12 +450,9 @@ ALLOWED_ASSET_TYPES=STOCK,ETF,OPTION   # 开启期权（需谨慎）
 
 #### C. 执行层
 
-
 - **智能执行路由**：小单市价 → 大单 TWAP/VWAP 自动选择
-- **Paper/Live 双轨**：新策略先走 Paper，回测通过后升级 Live
 - **止损/止盈引擎**：AI 动态更新止损位（追踪止损）
 - **动态仓位生命周期** ★ V10.2-M3：PositionStateMachine 三引擎（ScaleInEngine：盈利回调触发加仓；ScaleOutEngine：超目标分批减仓；TrailingStopEngine：14日 ATR 移动止损）
-
 
 #### D. 监控与复盘层
 
@@ -463,14 +460,11 @@ ALLOWED_ASSET_TYPES=STOCK,ETF,OPTION   # 开启期权（需谨慎）
 - **AI 自动复盘**：交易日志自动填写，AI 生成质量评估
 - **AI 周报**：每周日自动推送 Telegram，全面覆盖收益/策略/行为三个维度
 - **行为评分**：对 AI 自身决策质量打分（替代人类行为评分）
-- **交易归因引擎** ★ V10.2-M5：三层向下钻取——Alpha 源贡献（策略/信号）/ 执行质量（滑点/时机）/ 仓位管理（加减仓/止损效果）
 - **AI 进化引擎** ★ V10.2-M6：InsightService 自动抽取洞察（每周日 deepseek-reasoner）、ABTestEngine 策略 A/B 实验（scipy t-test 显著性检验，p<0.05 自动结论）
 - **Copilot Partner** ★ V10.2-M7：DeepResearchEngine 多步深度研究报告（市场情绪→基本面→风险因素→综合评级）、ProactiveIntelligenceService 主动推送重大事件摘要
 
 #### E. 可观测性 2.0 层 ★ V10.3.3 新增
 
-
-- **Execution Microscope（执行显微镜）**：Implementation Shortfall 四分解（迟延成本/市场冲击成本/机会成本/时机成本），执行 Alpha 衡量（到达价 vs 实际成交价），按时段/标的热力图可视化
 - **Signal Intelligence Observatory（信号情报观察站）**：IC 滚动序列（近5/20/60日），Alpha 半衰期估算，六维因子相关矩阵，信号拥挤度评分（Crowding Score > 0.75 自动降权）
 - **Risk Observability Cluster（风险可观测集群）**：五因子实时敞口（Market/HML/SMB/MOM/QMJ），期望损失 ES@97.5% 实时仪表，组合内相关性骤升检测
 
@@ -481,10 +475,7 @@ ALLOWED_ASSET_TYPES=STOCK,ETF,OPTION   # 开启期权（需谨慎）
 - **Adaptive Factor Framework（自适应因子框架）**：Kalman Filter 在线权重更新，因子动量加成（近20日 IC 前两名 +5%），因子拥挤度检测
 - **Decision Post-Mortem Engine（事后剖析）**：每笔平仓后自动生成反事实分析（BUY/HOLD/SELL 三条路径对比），洞察自动反哺 InsightService（source=POST_MORTEM）
 
-
 ## 4. 核心功能详述
-
-### 4.1 AI 自主决策引擎（Autonomous Decision Engine）
 
 **V10 核心升级**：不再是"AI 给建议 → 人决策"，而是"AI 直接决策并执行，人设定边界"。
 
@@ -496,7 +487,6 @@ ALLOWED_ASSET_TYPES=STOCK,ETF,OPTION   # 开启期权（需谨慎）
 3. 组合优化：计算最优仓位分配（Kelly/Markowitz）
 4. 风险门禁：VaR 检查 + 压力测试（不通过则拒绝执行）
 5. 决策记录：写入审计日志，推送 Telegram 通知（SEMI 模式）
-6. 执行：小单市价 / 大单 TWAP/VWAP，独立的 Paper 或 Live 账户
 ```
 
 **AI 决策输出**（完整 JSON）：
@@ -549,7 +539,6 @@ ADVISORY → autonomy_action = PENDING_CONFIRM（等待人工确认）
 
 **决策安全边界**（AI 不可突破）：
 
-
 - 单标的仓位 ≤ `MAX_SINGLE_POSITION_PCT`（默认 25%）
 - 总风险敞口（VaR@95%）≤ `MAX_VAR_PCT`（默认 3%）
 - 单日最大交易笔数 ≤ `MAX_DAILY_TRADES`（默认 10）
@@ -560,16 +549,13 @@ ADVISORY → autonomy_action = PENDING_CONFIRM（等待人工确认）
 
 **V10 变化**：计划不再需要人工创建，AI 自主生成并根据自主度等级决定是否自动执行。
 
-
 **生命周期**：
 
 ```
 
 AI_GENERATED → [SEMI/FULL: AUTO_EXECUTING] / [ADVISORY: PENDING_CONFIRM]
-2                        ↓
               EXECUTED / CANCELLED / EXPIRED / FAILED
 ```
-
 
 2*来源字段** `source`：
 
@@ -578,18 +564,14 @@ AI_GENERATED → [SEMI/FULL: AUTO_EXECUTING] / [ADVISORY: PENDING_CONFIRM]
 - `AI_ADVISORY`：AI 建议，人工确认（ADVISORY 模式）
 2 `MANUAL`：用户手动创建
 
-**撤销机制**（SEMI 模式专用）：
-
-
 2AI 执行后推送 Telegram："已执行 AAPL 买入 $178.50 × 100股 [撤销链接]"
+
 - 30分钟内点击撤销链接，系统自动平仓（同价区间内市价反向）
 - 超时则确认，写入日志
-
 
 2# 4.3 策略库（股票模式 = 10 类策略，期权模式 = 12 类）
 
 **股票模式下启用（`ALLOWED_ASSET_TYPES=STOCK`）**：
-
 
 #### A. 均值回归策略
 
@@ -598,55 +580,51 @@ AI_GENERATED → [SEMI/FULL: AUTO_EXECUTING] / [ADVISORY: PENDING_CONFIRM]
 
 #### B. 趋势跟踪策略
 
-3. **突破动量** - 突破关键阻力/支撑位
-
-2. **黄金交叉** - 短期均线上穿长期均线
+1. **突破动量** - 突破关键阻力/支撑位
 
 #### C. 多因子策略
 
-5. **Fama-French 三因子** - 市场/规模/价值因子
-2. **动量+质量** - ROE + 价格动量综合
+1. **Fama-French 三因子** - 市场/规模/价值因子
 
 #### D. 防御策略
 
-7. **低波动率** - 选择历史波动率最低的股票标的
-2. **~~尾部对冲~~** ⛔ _仅 OPTION 模式可用_
+1. **低波动率** - 选择历史波动率最低的股票标的
 
 #### E. 波动率策略（**仅参考，不执行**）
 
-9. **~~铁鹰期权~~** ⛔ _仅 OPTION 模式可用_
+1. **~~铁鹰期权~~** ⛔ _仅 OPTION 模式可用_
 
 2. **~~波动率套利~~** ⛔ _仅 OPTION 模式可用_
 
-#### F. 宏观对冲策略
+1### F. 宏观对冲策略
 
-11. **行业轮动** - 经济周期驱动的板块切换（用股票 ETF 实现）
+1. **行业轮动** - 经济周期驱动的板块切换（用股票 ETF 实现）
 2. **CTA 商品** - 商品 ETF 趋势跟踪
 
 **AI 自主策略调度**：
-
+1
 
 - 每日盘前 08:30 自动运行全部启用策略
 - 宏观风险高（≥ 70分）时，自动提升防御策略权重
 - 策略参数由 AdaptiveOptimizer 每日回测验证后自动更新
 
-### 4.4 组合决策（Portfolio-Level AI Decision）
+1## 4.4 组合决策（Portfolio-Level AI Decision）
 
 **V10 新增核心功能**：AI 不再逐个信号独立决策，而是**在组合层面统一决策**。
 
 **流程**：
+1
 
 ```
 当日信号池（N个候选标的）
     ↓
 
 AI 评分矩阵（技术 × 基本面 × 宏观 × 策略权重）
-    ↓
+1  ↓
 协方差矩阵计算（过去252日日线收益率）
     ↓
 Markowitz 最优化（最大化夏普，约束条件：VaR、仓位上限）
     ↓
-Kelly 仓位修正（以 Half-Kelly 保守压缩）
     ↓
 输出：最终执行标的列表 + 各标的仓位比例
 ```
@@ -658,7 +636,6 @@ Kelly 仓位修正（以 Half-Kelly 保守压缩）
 - 与基准（SPY）相关性 ≤ 0.9（防止纯 Beta 持仓）
 
 ### 4.5 风险门禁（Risk Gate—AI 自我约束）
-
 
 **定位**：AI 决策完成后、执行前的最后一道程序化护栏，不可配置关闭。
 
@@ -681,7 +658,6 @@ Kelly 仓位修正（以 Half-Kelly 保守压缩）
 
 ```
 新策略/参数变更
-    ↓
 自动触发 Walk-Forward 回测（最近2年日线，70/30 训练/测试集）
     ↓
 评估：Sharpe ≥ 1.0 AND 最大回撤 ≤ 20% AND 胜率 ≥ 50%？
@@ -693,7 +669,6 @@ Paper 账户运行30天  → 保留旧参数，记录失败原因
 ```
 
 **回测指标**：年化收益、最大回撤、Sharpe、Sortino、Calmar、胜率、盈亏比、Alpha vs SPY
-
 
 ### 4.7 Trading Copilot（人机协同接口）
 
@@ -717,9 +692,6 @@ Paper 账户运行30天  → 保留旧参数，记录失败原因
 
 ### 4.8 TWAP/VWAP 执行算法
 
-
-**AI 自动选择**（无需人工干预）：
-
 | 条件 | 选择算法 |
 |------|---------|
 | 订单金额 < 账户净值 1% | 市价单（立即执行） |
@@ -741,7 +713,6 @@ Paper 账户运行30天  → 保留旧参数，记录失败原因
 ```
 📊 AI Alpha 周报 (2026-WXX)
 
-📈 收益概览：本周 +2.3% vs SPY -0.5%（Alpha +2.8%）
 🤖 AI 决策质量：置信度均值 73 / 胜率 62% / 平均 R:R 1:2.4
 🎯 策略贡献：布林带 +1.1% / 低波动率 +0.8% / 突破动量 -0.3%
 ⚡ 执行质量：TWAP 滑点 0.06%（目标 < 0.1%）
@@ -878,7 +849,6 @@ Paper 账户运行30天  → 保留旧参数，记录失败原因
 ---
 
 ## 4.Y V10.3 新增功能详述——交易全链路可观测性（Full Trade Observability）
-
 
 > **设计哲学（华尔街顶级量化标准）**  
 > Citadel / Two Sigma 等机构核心教训：**AI 自主交易系统最大的风险不是决策错误，而是决策不透明**。当系统处于 FULL 自主模式时，人工唯一能做的是"观察并在边界处干预"——这要求系统以接近彭博终端级别的信息密度与实时性，将交易全链路的每一个状态节点暴露给审计者。V10.3 核心命题：**让 AI 的每一个动作都在玻璃墙后面运行**。
@@ -1252,7 +1222,6 @@ AI_LIGHTWEIGHT_MODEL=deepseek-chat    # 轻量决策
 AI_COMPLEX_MODEL=deepseek-reasoner    # 复杂分析
 ```
 
-
 ### 5.4 安全与合规
 
 - JWT 认证 + bcrypt 密码加密
@@ -1265,7 +1234,6 @@ AI_COMPLEX_MODEL=deepseek-reasoner    # 复杂分析
 
 ## 6. 成功标准
 
-
 ### 6.1 功能完整性
 
 - ✅ 11 阶段 AI 自主闭环全覆盖
@@ -1277,7 +1245,6 @@ AI_COMPLEX_MODEL=deepseek-reasoner    # 复杂分析
 - ✅ TWAP/VWAP 智能执行路由
 - ✅ AI 自动周报 + 日报
 - ✅ Trading Copilot 人机接口
-
 
 ### 6.2 用户体验
 
@@ -1293,12 +1260,10 @@ AI_COMPLEX_MODEL=deepseek-reasoner    # 复杂分析
 - Paper 策略验证通过率 ≥ 70%（胜率≥55%）
 - AI 决策平均置信度 ≥ 65
 - TWAP/VWAP 执行滑点 < 0.1%/单
-- 熔断触发率 < 5%/月
 
 ---
 
 ## 7. 路线图
-
 
 ### Phase 1–5: 已完成 ✅
 
@@ -1307,7 +1272,6 @@ AI_COMPLEX_MODEL=deepseek-reasoner    # 复杂分析
 ### Phase 6: 研究基础设施 🚀 V10 当前
 
 - **回测引擎**：事件驱动，Walk-Forward，支持10类股票策略
-- **DataHub**：Tiger → Polygon → yfinance 优先级路由
 - **Paper Trading 账户隔离**：独立 account_id，模拟/实盘双轨
 
 ### Phase 7: AI 自主闭环核心 🚀 V10 核心
@@ -1332,7 +1296,6 @@ AI_COMPLEX_MODEL=deepseek-reasoner    # 复杂分析
 - **TWAP/VWAP 自动路由**（AI 按订单大小自动选择）
 - **期权分析中心**（只读信息工具，不执行）：IV曲面、P/C Ratio、异常成交
 
-
 ### Phase 10: 标的扩展 🚀 V10.1 当前
 
 - **ETF 正式支持**（`STOCK,ETF` 模式）：行业轮动 + CTA 商品策略真正运行
@@ -1345,7 +1308,6 @@ AI_COMPLEX_MODEL=deepseek-reasoner    # 复杂分析
 - **Paper→Live 毕业自动化**：定时任务检测 + 自动升级
 - **Dashboard WebSocket**：实时增量推送，降低延迟至 5s
 
-
 ### Phase 11: 全链路可观测性 ✅ V10.3 完成
 
 - **Trade Lifecycle Center**：17阶段 PipelineKanban + DualFSM 双状态机可视化
@@ -1355,7 +1317,6 @@ AI_COMPLEX_MODEL=deepseek-reasoner    # 复杂分析
 - **执行幂等主键**：`autonomous_execution_intent` + 状态机（V10.3.2）
 - **信号数量语义统一**：`quantity_mode + quantity_value` 标准化（V10.3.2）
 
-
 ### Phase 12: AI可观测性 & 指挥室 → 稳定性治理 ✅ V10.3.3 ~ V10.3.4 已完成（归档）
 
 - **Execution Microscope**：Implementation Shortfall 四分解（迟延/市场冲击/机会/时机成本）
@@ -1364,7 +1325,6 @@ AI_COMPLEX_MODEL=deepseek-reasoner    # 复杂分析
 - **Multi-Agent Orchestration**：五专职 Agent 协作框架（市场/风险/执行/研究/总协调）
 - **AI Confidence Calibration**：Reliability Diagram + Brier/ECE + 自适应降评
 - **Adaptive Factor Framework**：Kalman Filter 在线权重更新 + 因子动量加成
-- **Decision Post-Mortem Engine**：事后剖析（反事实分析）+ 自动洞察反哺
 - **War Room Mode**：全屏六格指挥视图 + 实时 P&L Ticker + 键盘快捷键
 
 - **Intelligence Feed**：AI情报流（urgency 排序 + WebSocket 实时追加）
@@ -1375,36 +1335,32 @@ AI_COMPLEX_MODEL=deepseek-reasoner    # 复杂分析
 >
 > 详细规划见：[docs/archived/v10/v10.4/RELEASE_PLAN_V10.4.md](archived/v10/v10.4/RELEASE_PLAN_V10.4.md)
 
-
 - **M1 数据闭环治理**：`actual_return` 自动回填 Job + IC 真实化（移除 fallback）+ 因子快照自动化 + 2026 年事件日历 + LLM 调用 `LLMCallGuard`
 - **M2 UI 大清洗**：47 页 → ≤38 页，6 导航组 → 4 组，执行三页合并，双仪表盘合并，系统监控整合
-- **M3 Copilot 全局化**：全局浮窗（Cmd+K）+ 页面上下文注入 + 实时系统状态 System Prompt
 - **M4 自主循环稳定增强**：AutonomyHealthMonitor 自检 + JobWatchdog + Multi-Agent 真实并发 + WebSocket 重连
 - **M4.1 系统监控增强**：`/system` 补齐交易生命周期监测、主数据流链路监测、模块与细粒度服务状态树，形成统一运维视图
 - **M5 移动触达**：Dashboard/Alert/Copilot 三场景 375px 竖屏可用
 - **M6 文档重构**：PRODUCT.md 拆分为模块化多文件，主文件 ≤300 行
 
-
 ### Phase 14: V11.0.1 Capital Intelligence & Autonomous Evolution OS ✅ 已上线
 
 - **M1 Capital Velocity**：近命中信号摩擦跟踪、soft relief 判定、闲置资本感知与 capital velocity 解释链
 - **M2 Self-Perception**：MetaState Snapshot、False-Hold Alert、自知画像聚合与阻断状态可视化
-- **M3 Improvement Engine**：基于元状态自动生成结构化改进候选，供 Improvement Lab 与治理流程消费
 - **M4 Evolution Governance**：以 feature flag 为边界，为后续自进化与风格约束提供治理基座
 - **前端重点**：`/autonomy` 工作台统一展示 MetaState、rollout flags、摩擦积累信号、False-Hold 告警与 Improvement 候选
 
-### Phase 15: Trader Workbench Convergence & Architecture Simplification 🔜 V11.1.1 规划中
+### Phase 15: Trader Workbench Convergence & Architecture Simplification ✅ V11.1.1 当前实现已完成（代码版本）
 
-> 详细规划见：[docs/archived/v11/v11.1/RELEASE_PLAN_V11.1.1.md](archived/v11/v11.1/RELEASE_PLAN_V11.1.1.md)
+> 当前实现设计见：[docs/architecture/v11_1_1_implementation_design.md](architecture/v11_1_1_implementation_design.md)  
+> 历史规划见：[docs/archived/v11/v11.1/RELEASE_PLAN_V11.1.1.md](archived/v11/v11.1/RELEASE_PLAN_V11.1.1.md)
 
-- **M1 平台功能页面治理**：从顶尖量化平台产品、交易经理、交易员视角，收敛现有工作台为 Command Center、Research & Allocation、Execution & Lifecycle、Governance & Operations 四大域，减少页面重叠与跳转成本
-- **M2 前端架构治理**：围绕 `src/views / src/components / src/api / src/stores` 做 thin-view、shared shell、typed contract、legacy route/compat 收口，提升一致性、响应速度与可维护性
-- **M3 后端架构治理**：围绕 `app/services / app/routers / app/jobs` 建立 bounded context、read model、thin router 与单主编排路径纪律，减少平铺增长与兼容债务
-- **M4 代码质量与性能治理**：以高复用、低复杂度、清晰注释、明确预算为原则，统一 DTO / 状态映射 / 错误模型 / 日志口径，并把性能指标纳入版本验收
-- **版本原则**：不放宽 RiskGate、容量纪律和治理门槛；不做无边界重写；不再新增平行控制面或平行页面体系
+- **M1 平台功能页面治理（当前实现）**：`/dashboard`、`/order-book`、`/system-monitor` 三个主工作台统一共享壳层与解释条，`/task-management` 收口到系统监控 tasks Tab，减少页面跳转与重复摘要区。
+- **M2 前端架构治理（当前实现）**：以 `src/components/workbench` 为中心落地 shared shell、状态语言与 typed workbench contract；页面继续走 thin-view 路线，减少重复请求和重复 header/summary 结构。
+- **M3 后端架构治理（当前实现）**：以 `app/services/read_models/` 承接工作台聚合，新增 Dashboard / Order Book / System Monitor 三个 read model 路由；read model 改为依赖 public service API，而不是私有 helper。
+- **M4 代码质量与性能治理（当前实现）**：新增路由遵循 `Annotated` 依赖注入风格、显式 404 响应、前端路由标题字符串化、System Monitor workbench 取数复用，以及关键监控样式的可访问性修正。
+- **版本原则（保持不变）**：不放宽 RiskGate、容量纪律和治理门槛；不做无边界重写；不新增平行控制面或平行页面体系。
 
 ---
-
 
 ## 8. V10 新功能 API 速览
 
@@ -1418,11 +1374,11 @@ POST /api/v1/autonomy/resume            — 恢复 AI 自动交易
 
 GET  /api/v1/autonomy/audit-log         — 查询 AI 决策审计日志
 POST /api/v1/autonomy/revoke/{exec_id}  — 撤销 AI 执行（SEMI 模式，30分钟内）
-```
 
 ### 8.2 回测引擎
 
 ```
+
 POST /api/v1/backtest/run               — 提交回测任务（异步）
 GET  /api/v1/backtest/tasks             — 查询任务列表
 
@@ -1430,24 +1386,27 @@ GET  /api/v1/backtest/tasks/{id}        — 查询任务状态/进度
 GET  /api/v1/backtest/tasks/{id}/report — 获取完整报告
 GET  /api/v1/backtest/compare           — 多策略对比（最多5个）
 DELETE /api/v1/backtest/tasks/{id}      — 删除任务
+
 ```
 
 ### 8.3 投资组合优化
 
-
 ```
+
 POST /api/v1/portfolio/optimize          — 运行组合优化
 GET  /api/v1/portfolio/efficient-frontier — 有效前沿散点
 GET  /api/v1/portfolio/risk-contribution  — 各标的风险贡献
 POST /api/v1/portfolio/rebalance-plan    — 生成再平衡计划
-```
 
+```
 ### 8.4 压力测试
 
 ```
+
 POST /api/v1/stress-test/run             — 运行压力测试
 GET  /api/v1/stress-test/scenarios       — 获取情景库
 POST /api/v1/stress-test/custom          — 自定义情景
+
 ```
 
 ### 8.5 Trading Copilot
@@ -1460,20 +1419,23 @@ DELETE /api/v1/copilot/history           — 清空会话
 POST /api/v1/copilot/confirm/{action_id} — 确认指令操作
 GET  /api/v1/copilot/morning-brief       — 盘前摘要
 GET  /api/v1/copilot/daily-report        — 当日复盘
+
 ```
 
 ### 8.6 执行算法
 
 ```
+
 POST /api/v1/execution/algo/submit       — 提交 TWAP/VWAP 任务
 GET  /api/v1/execution/algo/tasks        — 查询任务列表
 GET  /api/v1/execution/algo/tasks/{id}   — 查询单任务状态
 DELETE /api/v1/execution/algo/tasks/{id} — 取消任务
-```
 
+```
 ### 8.7 期权分析中心（只读）
 
 ```
+
 GET  /api/v1/options/iv-surface/{symbol}     — IV 曲面数据
 GET  /api/v1/options/iv-rank/{symbol}        — IV Rank/Percentile
 
@@ -1481,105 +1443,132 @@ GET  /api/v1/options/unusual-activity        — 异常成交扫描
 GET  /api/v1/options/put-call-ratio/{symbol} — P/C Ratio
 GET  /api/v1/options/chain/{symbol}          — 期权链报价（只读）
 GET  /api/v1/options/expiry-calendar         — 到期日日历
+
 ```
 
 ### 8.8 Paper Trading
 
 ```
+
 GET  /api/v1/paper/status                    — Paper 账户状态
 POST /api/v1/paper/reset                     — 重置 Paper 账户
 GET  /api/v1/paper/performance               — Paper 账户绩效
 GET  /api/v1/paper/graduation-candidates     — 可升级 Live 的策略列表
 POST /api/v1/paper/graduate/{strategy_id}    — 手动升级策略到 Live
+
 ```
 
 ### 8.9 市场体制感知（V10.2-M1）
 
 ```
+
 GET  /api/v1/regime/current              — 查询当前体制及置信度
 
 GET  /api/v1/regime/history              — 历史体制记录（分页）
 GET  /api/v1/regime/strategy-weights     — 当前体制下各策略权重
 POST /api/v1/regime/override             — 人工覆写当前体制（管理员）
+
 ```
 
 ### 8.10 可观测性 2.0（V10.3.3 新增）
 
 ```
+
 # Execution Microscope — 执行质量
+
 GET  /api/v1/observability/execution-quality           — 聚合执行质量：IS分解/Fill Rate/vs VWAP偏差
 GET  /api/v1/observability/execution-quality/{intent_id} — 单笔 IS 四分解明细
 GET  /api/v1/observability/fill-heatmap                — 按时段×标的的成交率热力图数据
 
 # Signal Intelligence Observatory — 信号情报
+
 GET  /api/v1/observability/signal-intelligence         — 六维信号 IC 曲线、半衰期、拥挤度评分
 GET  /api/v1/observability/signal-correlation          — 六维信号相关矩阵（滚动60日）
 GET  /api/v1/observability/crowding-alerts             — 当前触发拥挤告警的信号维度
 
 # Risk Observability Cluster — 风险可观测
+
 GET  /api/v1/observability/risk-cluster                — 五因子敞口 + ES@97.5% + 组合内相关性均值
 GET  /api/v1/observability/factor-exposure             — 因子敞口历史快照（分页）
 GET  /api/v1/observability/correlation-alerts          — 相关性骤升事件历史
+
 ```
 
 ### 8.11 AI 中枢 2.0（V10.3.3 新增）
 
 ```
+
 # Multi-Agent Orchestration — 多智能体协作
+
 GET  /api/v1/ai-hub/agent-runs                         — Agent 协作运行记录（分页）
 GET  /api/v1/ai-hub/agent-runs/{run_id}                — 单次运行完整通信日志（AgentMessage 链）
 GET  /api/v1/ai-hub/agent-runs/{run_id}/challenge      — RiskChallengerAgent 反驳摘要
 
 # Confidence Calibration — 置信度校准
+
 GET  /api/v1/ai-hub/calibration                        — Reliability Diagram 数据 + Brier Score + ECE + 当前校准因子
 GET  /api/v1/ai-hub/calibration/history                — 校准指标历史趋势（按体制分组）
 
 # Adaptive Factor Framework — 自适应因子框架
+
 GET  /api/v1/ai-hub/factor-weights                     — 当前六维权重（含 Kalman 更新后的权重）
 GET  /api/v1/ai-hub/factor-weights/history             — 权重演变历史曲线
 GET  /api/v1/ai-hub/factor-momentum                    — 各因子近5/20/60日 IC 排名与动量加成状态
 
 # Decision Post-Mortem — 决策事后剖析
+
 GET  /api/v1/ai-hub/post-mortems                       — 所有已剖析交易列表（分页）
 GET  /api/v1/ai-hub/post-mortems/{trade_id}            — 单笔完整剖析报告（含反事实分析）
 GET  /api/v1/ai-hub/post-mortems/patterns              — 跨剖析归纳的重复模式摘要（AI 提炼）
+
 ```
 
 ### 8.12 指挥室（War Room）（V10.3.3 新增）
 
 ```
+
 # Real-time P&L Ticker
+
 GET  /api/v1/war-room/pnl-ticker                       — 实时 P&L 快照（total/1h变化/贡献最大/Alpha vs SPY）
 WS   /ws/pnl-ticker                                    — WebSocket 实时 P&L 推送（5s/帧）
 
 # Intelligence Feed — AI情报流
+
 GET  /api/v1/war-room/intelligence-feed                — 按 urgency_score 排序的情报事件列表（limit/offset）
 WS   /ws/intelligence-feed                             — WebSocket 实时追加新事件
 POST /api/v1/war-room/intelligence-feed/{event_id}/ack — 标记情报已读
 
 # Portfolio Exposure Center — 组合敞口
+
 GET  /api/v1/war-room/exposure                         — 行业敞口 + 五因子 z-score + 地理敞口 + 相关矩阵
 
 # Smart Alert Center — 智能告警
+
 GET  /api/v1/war-room/alerts                           — 分级告警列表（severity/category/status 筛选）
 PATCH /api/v1/war-room/alerts/{alert_id}               — 更新告警处理状态（READ/IGNORED/ACTION_TAKEN）
 GET  /api/v1/war-room/alerts/stats                     — 告警统计（按等级/类别/处理状态）
+
 ```
 
 ### 8.13 系统监控增强（V10.4.3 追加需求）
 
 ```
+
 # Lifecycle Monitor — 交易生命周期监控
+
 GET  /api/v1/system-monitor/lifecycle                  — 17阶段分布、Plan/Position FSM、stuck intents、异常阶段摘要
 GET  /api/v1/system-monitor/lifecycle/{intent_id}      — 单笔 intent 的阶段轨迹、最近异常、耗时明细
 
 # Data Flow Monitor — 关键数据流链路监控
+
 GET  /api/v1/system-monitor/data-flows                 — 主链路节点状态（heartbeat/lag/queue_depth/last_error）
 GET  /api/v1/system-monitor/data-flows/{flow_name}     — 单条数据流详情与最近失败样本
 
 # Service Topology Monitor — 模块与细粒度服务状态
+
 GET  /api/v1/system-monitor/services                   — 模块树状态（DB/Redis/Tiger/LLM/Scheduler/WebSocket/Autonomy/Observability）
 GET  /api/v1/system-monitor/services/{service_name}    — 单服务健康详情、24h 错误计数、降级与恢复时间线
+
 ```
 
 ---
