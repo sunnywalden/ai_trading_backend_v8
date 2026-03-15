@@ -57,7 +57,30 @@
 - 新增服务、数据模型、feature flags
 - 当前已上线 autonomy 端点与反馈回路
 
-### 6. LLM 原生量化平台设计提案
+### 6. V11.1.1 专题（已上线）
+
+- [v11_1_1_implementation_design.md](v11_1_1_implementation_design.md)
+
+包含：
+
+- Trader Workbench Convergence 实现文档
+- WorkbenchShell / ExplainabilityStrip / read model 设计
+- workbench 端点列表与 feature flag 策略
+
+### 7. V11.2.1 RBAC & Role Workbench 专题（已上线，当前生产基线）
+
+- [v11_2_1_rbac_workbench_design.md](v11_2_1_rbac_workbench_design.md)
+
+包含：
+
+- 六张 RBAC 核心表设计（roles / permissions / users / user_role_bindings / role_permission_grants / authorization_audit_logs）
+- JWT payload 扩展与 `/api/v1/auth/me` feature_flags 口径
+- `require_permission()` / `require_any_role()` FastAPI 依赖注入设计
+- 四类角色工作台首页（Researcher / Trader / Supervisor / Administrator）
+- 路由可见范围矩阵与后端路由守卫设计
+- feature flags 分类与 Admin API 设计
+
+### 8. LLM 原生量化平台设计提案
 
 - [llm-native-quant-os.md](llm-native-quant-os.md)
 
@@ -76,3 +99,5 @@
 - 当你关心“任务何时运行、谁驱动谁”，看任务编排。
 - 当你关心“为什么资金闲置、哪里被卡住、有哪些自动改进候选”，看 V11.0.1 专题设计。
 - 当你关心“如何从当前平台演进到大模型原生量化平台”，看 LLM 原生量化平台设计提案。
+- 当你在排查 RBAC 权限、角色工作台或路由守卫，看 V11.2.1 RBAC & Role Workbench 专题。
+- 当你在了解多账户规划或 BrokerAccountRegistry 设计，看 [v11_3_1_multi_account_design.md](v11_3_1_multi_account_design.md)（V11.3.1 规划，未上线）。

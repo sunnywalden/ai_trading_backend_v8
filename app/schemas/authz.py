@@ -5,18 +5,24 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.schemas.broker_account import AccessibleAccountView
+
 
 class AuthUserView(BaseModel):
     id: int | None = None
     username: str
     display_name: str | None = None
     role: str
-    permissions: list[str] = []
+    permissions: list[str] = Field(default_factory=list)
     permissions_version: int = 1
     status: str = "ACTIVE"
     is_system_seed: bool = False
     must_change_password: bool = False
-    feature_flags: dict[str, bool] = {}
+    feature_flags: dict[str, bool] = Field(default_factory=dict)
+    accessible_account_ids: list[str] = Field(default_factory=list)
+    default_account_id: str | None = None
+    account_grants: dict[str, str] = Field(default_factory=dict)
+    accessible_accounts: list[AccessibleAccountView] = Field(default_factory=list)
 
 
 class LoginResponse(BaseModel):
@@ -86,7 +92,7 @@ class AdminRoleListItem(BaseModel):
     name: str
     description: str | None = None
     is_system_builtin: bool = False
-    permissions: list[str] = []
+    permissions: list[str] = Field(default_factory=list)
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -131,7 +137,7 @@ class AdminAuditLogItem(BaseModel):
     reason: str | None = None
     target_type: str | None = None
     target_id: str | None = None
-    metadata: dict[str, Any] = {}
+    metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
 
 

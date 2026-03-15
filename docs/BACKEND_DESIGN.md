@@ -1,10 +1,12 @@
 # 后端架构设计文档
 
 > **AI量化交易闭环系统** - Backend Design  
-> 版本：V11.1.1（当前实现） | 更新日期：2026-03-15
-> 生产基线：V11.0.1（已上线）
+> 版本：V11.2.1（当前实现 & 生产基线，已上线） | 更新日期：2026-03-15  
+> 下一版本规划：V11.3.1 Multi-Account Support & Account-Scoped Data Governance | [Release Plan](archived/v11/v11.3/RELEASE_PLAN_V11.3.1.md) | [实现设计](architecture/v11_3_1_multi_account_design.md)
 >
-> **V11.1.1 当前实现摘要（Trader Workbench Convergence & Architecture Simplification）**：本轮实现不新增平行控制面，而是在现有 FastAPI + service-oriented 结构上补齐三类治理能力：1）围绕 `app/services/read_models/` 建立 Dashboard / Order Book / System Monitor 三个工作台聚合读模型；2）router 继续薄化，新 workbench 路由遵守 `Annotated` 依赖注入与显式响应约定；3）read model 通过 public service API 获取上下文，避免跨层调用私有 helper，降低后续扩展时的耦合与复杂度。
+> **V11.2.1 变更摘要（已上线 — RBAC & Role Workbench）**：在 V11.1.1 工作台收敛基线上建立正式用户—角色—权限模型：新增 `roles`、`permissions`、`users`（扩展）、`user_role_bindings`、`role_permission_grants`、`authorization_audit_logs` 六张 RBAC 核心表；`/api/v1/login` & `/api/v1/auth/me` 响应携带 `role / permissions / permissions_version / feature_flags / must_change_password / is_system_seed`；新增 `require_permission()` / `require_any_role()` FastAPI 依赖项，收口 quant-loop / governance / live-safety / ai-hub / autonomy / war-room 等敏感路由；四类角色工作台首页（Researcher / Trader / Supervisor / Administrator）；管理 API：`/api/v1/admin/users`、`/api/v1/admin/roles`、`/api/v1/admin/permissions`、`/api/v1/admin/audit/authz`；`POST /api/v1/auth/change-password` 强制改密闭环；迁移脚本 `scripts/migrations/upgrade_to_v11_2_1.py`。Feature flags：`RBAC_V1121_ENABLED`、`ROLE_HOME_V1121_ENABLED`、`ROLE_NAV_GATING_V1121_ENABLED`、`ROLE_ACTION_GATING_V1121_ENABLED`。
+>
+> **V11.1.1 变更摘要（已上线 — Trader Workbench Convergence & Architecture Simplification）**：本轮实现不新增平行控制面，而是在现有 FastAPI + service-oriented 结构上补齐三类治理能力：1）围绕 `app/services/read_models/` 建立 Dashboard / Order Book / System Monitor 三个工作台聚合读模型；2）router 继续薄化，新 workbench 路由遵守 `Annotated` 依赖注入与显式响应约定；3）read model 通过 public service API 获取上下文，避免跨层调用私有 helper，降低后续扩展时的耦合与复杂度。
 >
 > **V11.0.1 变更摘要（Capital Velocity & Autonomous Evolution OS）**：本版本在 V10.5.4 控制平面基线之上，新增 Capital Velocity、自感知、改进候选与进化治理预留四条主线：`ConvictionFrictionTracker` 跟踪近命中信号摩擦并支持 soft-relief 判定；`MetaStateSnapshotService` 聚合系统元状态快照；`ImprovementCandidateService` 自动生成结构化改进候选；`CapitalVelocityService` 为席位与资本利用率提供效率视角。所有能力继续受 feature flag、审计真源与 rollout discipline 约束。
 >
@@ -99,7 +101,7 @@ V11.0.1 不替代 V10.5.4 控制平面，而是在其之上增加“知道哪里
 - `EVOLUTION_GOVERNANCE_V1101_ENABLED`
 - `STYLE_ALIGNMENT_V1101_ENABLED`
 
-#### 1.2.5 V11.1.1 Workbench Read Model 治理切片
+#### 1.2.5 V11.1.1 Workbench Read Model 治理切片（已上线）
 
 V11.1.1 当前实现聚焦“工作台聚合读模型 + 薄路由 + 公共服务上下文”，而不是扩大交易主链：
 
@@ -110,21 +112,46 @@ V11.1.1 当前实现聚焦“工作台聚合读模型 + 薄路由 + 公共服务
 - `app/routers/order_book.py`：新增 `GET /api/v1/order-book/workbench`，并让 `/summary` 复用同一读模型摘要
 - `app/routers/system_monitor.py`：新增 `GET /api/v1/system-monitor/workbench`
 
-该切片的边界纪律：
+边界纪律：read model 只做查询聚合；router 保持单职责；read model 依赖 public service API；主链仍以 `AutonomousEngine.run_decision_cycle()` 为唯一编排入口。
 
-- workbench read model 只做查询聚合，不写业务状态；
-- router 只处理 request/response、认证与参数校验，不承载复杂拼装；
-- read model 依赖 public service API（例如 DashboardV2Service 的 workbench context），不跨层访问私有 helper；
-- 自动交易主链仍以 `AutonomousEngine.run_decision_cycle()` 为唯一生产编排入口。
+#### 1.2.6 V11.2.1 RBAC & Role Workbench 层（已上线）
+
+V11.2.1 在 V11.1.1 工作台基线上引入正式 RBAC 身份治理层，替代原来的单管理员模式：
+
+- `app/core/auth.py`：JWT payload 扩展为 `{ sub, role, permissions, permissions_version, display_name, must_change_password, is_system_seed }`；`/api/v1/auth/me` 同步返回 `feature_flags`
+- `app/core/auth_context.py`：`UserContext` dataclass（role / permissions / must_change_password / is_system_seed / legacy_mode）
+- `app/core/authz.py`：`require_permission(perm)` / `require_any_role(*roles)` FastAPI 依赖项，收口关键路由
+- `app/services/authorization_service.py`：RBAC 查询缓存（`permissions_version` 驱动 Redis 失效），权限变更自动广播版本递增
+- `app/routers/authz.py`：`/api/v1/admin/users`、`/api/v1/admin/roles`、`/api/v1/admin/permissions`、`/api/v1/admin/audit/authz`
+- `app/routers/auth.py`：新增 `POST /api/v1/auth/change-password`（首登强制改密闭环）
+- `scripts/migrations/upgrade_to_v11_2_1.py`：建表 + seed 默认角色 + 迁移原 admin 账户到 Administrator 角色
+
+V11.2.1 feature flags（随 `/api/v1/auth/me` 下发）：`RBAC_V1121_ENABLED`、`ROLE_HOME_V1121_ENABLED`、`ROLE_NAV_GATING_V1121_ENABLED`、`ROLE_ACTION_GATING_V1121_ENABLED`。角色可见范围（Supervisor 节选）：仅限 `/executive`、`/reports/*`、`/dashboard`、`/attribution`、`/portfolio`、`/copilot`；后端对 `/autonomy`、`/quant-loop`、`/war-room`、`/governance/pipeline`、`/ai-hub/*` 加 `require_any_role` 拦截。
+
+#### 1.2.7 V11.3.1 Multi-Account Support（规划定稿，未上线）
+
+> 详细规划：[Release Plan](archived/v11/v11.3/RELEASE_PLAN_V11.3.1.md) | 架构设计：[实现设计](architecture/v11_3_1_multi_account_design.md)
+
+V11.3.1 在 V11.2.1 RBAC 基础上引入多 Tiger 经纪账户支持与账户级数据隔离：
+
+- 新增 `broker_accounts`、`user_broker_account_grants`、`broker_account_credentials`（AES-256-GCM 加密）三张表
+- `BrokerAccountRegistry` 替代 `factory.py` 全局单例，按 `account_id` 路由 `TigerOptionClient` 实例
+- `UserContext` 扩展：`accessible_account_ids`、`default_account_id`、`account_grants`；新增 `require_account_access` 依赖项
+- 主要数据服务按 `account_id` 过滤，RiskGate 按账户独立上下文（不跨账户聚合）
+- Admin API：`/api/v1/admin/broker-accounts` CRUD + `/api/v1/admin/users/{id}/account-grants` CRUD
+- Feature flags：`MULTI_ACCOUNT_V1131_ENABLED`、`ACCOUNT_DATA_ISOLATION_V1131_ENABLED`、`BROKER_ACCOUNT_REGISTRY_V1131_ENABLED`
 
 ### 1.3 项目结构
 
 ```
 ├── app/
-│   ├── main.py                        # FastAPI 应用入口（V10.2: 注册 25 个路由组）
+│   ├── main.py                        # FastAPI 应用入口（V10.2: 注册 25 个路由组；V11.2.1: RBAC 路由组）
 │   ├── core/
-│   │   ├── config.py                  # V10.2-M1: 新增 4 个 REGIME_* 配置项
+│   │   ├── config.py                  # V10.2-M1: 新增 4 个 REGIME_* 配置项；V11.2.1: RBAC feature flags
 │   │   ├── event_bus.py               # V10.2-M1 新增：AsyncIO 异步事件总线
+│   │   ├── auth.py                    # V11.2.1 更新：JWT payload 扩展 role/permissions/feature_flags
+│   │   ├── auth_context.py            # V11.2.1 新增：UserContext（role/permissions/must_change_password）
+│   │   ├── authz.py                   # V11.2.1 新增：require_permission / require_any_role 依赖项
 │   │   ├── security.py                # JWT + bcrypt
 │   │   └── dependencies.py            # 依赖注入
 │   │

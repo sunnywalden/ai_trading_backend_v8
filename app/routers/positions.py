@@ -23,6 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.account_context import require_account_access
 from app.models.db import get_session
 from app.services.broker_order_sync_service import reconcile_stale_closing_positions
 from app.services.position_lifecycle_manager import PositionLifecycleManager
@@ -49,7 +50,7 @@ class ManualCloseRequest(BaseModel):
 
 @router.get("/", summary="活跃仓位列表")
 async def list_active_positions(
-    account_id: str = Query(..., description="账户 ID"),
+    account_id: str = Depends(require_account_access("ANALYZE")),
     db: AsyncSession = Depends(get_session),
 ) -> list[dict[str, Any]]:
     """返回账户下当前活跃仓位（生产读侧优先使用券商真实持仓）。"""
@@ -59,7 +60,7 @@ async def list_active_positions(
 
 @router.get("/exceptions", summary="异常仓位列表")
 async def list_exception_positions(
-    account_id: str = Query(..., description="账户 ID"),
+    account_id: str = Depends(require_account_access("ANALYZE")),
     db: AsyncSession = Depends(get_session),
 ) -> list[dict[str, Any]]:
     """返回处于 EXCEPTION 状态、需要人工处理的仓位。"""
@@ -69,7 +70,7 @@ async def list_exception_positions(
 
 @router.get("/stuck-slices", summary="卡单列表")
 async def list_stuck_slices(
-    account_id: str = Query(..., description="账户 ID"),
+    account_id: str = Depends(require_account_access("ANALYZE")),
     db: AsyncSession = Depends(get_session),
 ) -> list[dict[str, Any]]:
     """返回所有 STUCK 状态的执行切片。"""
@@ -79,7 +80,7 @@ async def list_stuck_slices(
 
 @router.get("/stats/closing-reasons", summary="平仓原因分布")
 async def closing_reason_stats(
-    account_id: str = Query(..., description="账户 ID"),
+    account_id: str = Depends(require_account_access("ANALYZE")),
     days: int = Query(30, ge=1, le=365, description="统计天数"),
     db: AsyncSession = Depends(get_session),
 ) -> dict[str, int]:
@@ -90,7 +91,7 @@ async def closing_reason_stats(
 
 @router.get("/portfolio-summary", summary="组合摘要")
 async def portfolio_summary(
-    account_id: str = Query(..., description="账户 ID"),
+    account_id: str = Depends(require_account_access("ANALYZE")),
     db: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """活跃仓位、异常仓位、卡单数量摘要，供仪表盘小组件使用。"""
@@ -107,8 +108,12 @@ async def portfolio_summary(
         "exception_positions": read_exception_positions,
         "active_positions_source": snapshot.get("source"),
         "broker_active_positions": int(snapshot.get("broker_active_positions") or 0),
-        "lifecycle_active_positions": int(snapshot.get("lifecycle_active_positions") or 0),
-        "lifecycle_exception_positions": int(lifecycle_summary.get("exception_positions") or 0),
+        "lifecycle_active_positions": int(
+            snapshot.get("lifecycle_active_positions") or 0
+        ),
+        "lifecycle_exception_positions": int(
+            lifecycle_summary.get("exception_positions") or 0
+        ),
         "mismatch_detected": bool(snapshot.get("mismatch_detected")),
         "mismatch_symbols": list(snapshot.get("mismatch_symbols") or []),
     }
@@ -116,7 +121,7 @@ async def portfolio_summary(
 
 @router.post("/reconcile-stale-closing", summary="手动收口卡在平仓中的仓位")
 async def reconcile_closing_positions(
-    account_id: str = Query(..., description="账户 ID"),
+    account_id: str = Depends(require_account_access("OPERATE")),
     db: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """将券商已无真实持仓、但 Position 仍停留在 CLOSING 的仓位手动收口到 CLOSED。"""
@@ -131,12 +136,15 @@ async def reconcile_closing_positions(
 @router.get("/{position_id}", summary="仓位详情")
 async def get_position(
     position_id: int,
+    account_id: str = Depends(require_account_access("ANALYZE")),
     db: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """仓位详情（含执行切片列表）。"""
     svc = PositionQueryService(db)
     result = await svc.get_position_detail(position_id)
     if result is None:
+        raise HTTPException(status_code=404, detail=f"Position {position_id} not found")
+    if str(result.get("account_id") or "") != str(account_id):
         raise HTTPException(status_code=404, detail=f"Position {position_id} not found")
     return result
 
@@ -145,20 +153,28 @@ async def get_position(
 async def get_position_timeline(
     position_id: int,
     limit: int = Query(100, ge=1, le=500),
+    account_id: str = Depends(require_account_access("ANALYZE")),
     db: AsyncSession = Depends(get_session),
 ) -> list[dict[str, Any]]:
     """倒序返回仓位生命周期事件（最多 500 条）。"""
     svc = PositionQueryService(db)
+    detail = await svc.get_position_detail(position_id)
+    if detail is None or str(detail.get("account_id") or "") != str(account_id):
+        raise HTTPException(status_code=404, detail=f"Position {position_id} not found")
     return await svc.get_position_timeline(position_id, limit)
 
 
 @router.get("/{position_id}/slices", summary="执行切片列表")
 async def get_position_slices(
     position_id: int,
+    account_id: str = Depends(require_account_access("ANALYZE")),
     db: AsyncSession = Depends(get_session),
 ) -> list[dict[str, Any]]:
     """返回仓位下所有执行切片。"""
     svc = PositionQueryService(db)
+    detail = await svc.get_position_detail(position_id)
+    if detail is None or str(detail.get("account_id") or "") != str(account_id):
+        raise HTTPException(status_code=404, detail=f"Position {position_id} not found")
     return await svc.get_position_slices(position_id)
 
 
@@ -166,11 +182,17 @@ async def get_position_slices(
 async def manual_close(
     position_id: int,
     body: ManualCloseRequest,
+    account_id: str = Depends(require_account_access("OPERATE")),
     db: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
     """触发人工平仓。创建 CLOSE ExecutionSlice，仓位状态切换至 CLOSING。"""
     plm = PositionLifecycleManager(db)
     try:
+        detail = await PositionQueryService(db).get_position_detail(position_id)
+        if detail is None or str(detail.get("account_id") or "") != str(account_id):
+            raise HTTPException(
+                status_code=404, detail=f"Position {position_id} not found"
+            )
         slc = await plm.manual_close(
             position_id=position_id,
             actor=body.actor,

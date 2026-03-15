@@ -360,6 +360,14 @@ class Settings(BaseSettings):
     EXECUTIVE_REPORTS_V1121_ENABLED: bool = False
     ADMIN_CONSOLE_V1121_ENABLED: bool = False
 
+    # ==================== V11.3.1: Multi-Account Support
+    # & Account-Scoped Data Governance ====================
+    MULTI_ACCOUNT_V1131_ENABLED: bool = False
+    BROKER_ACCOUNT_REGISTRY_V1131_ENABLED: bool = False
+    ACCOUNT_DATA_ISOLATION_V1131_ENABLED: bool = False
+    ACCOUNT_ADMIN_UI_V1131_ENABLED: bool = False
+    BROKER_CREDENTIAL_ENCRYPTION_KEY: str | None = None
+
     # M1.5.1 Conviction Friction Relief — 近命中区间配置
     CONVICTION_FRICTION_DELTA: int = 3  # 近命中区间：阈值 - Δ 以内算"近命中"
     CONVICTION_FRICTION_MIN_ROUNDS: int = 3  # 连续被拒达到此次数才认定为"摩擦状态"
@@ -418,7 +426,8 @@ class Settings(BaseSettings):
             has_seed_admin = bool((self.SEED_ADMIN_PASSWORD or "").strip())
             if not (has_legacy_admin or has_seed_admin):
                 raise ValueError(
-                    "Either ADMIN_PASSWORD or SEED_ADMIN_PASSWORD must be set when AUTH_ENABLED=true and RBAC_V1121_ENABLED=true"
+                    "Either ADMIN_PASSWORD or SEED_ADMIN_PASSWORD must be "
+                    "set when AUTH_ENABLED=true and RBAC_V1121_ENABLED=true"
                 )
         return self
 
