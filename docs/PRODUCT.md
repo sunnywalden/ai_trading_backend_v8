@@ -26,7 +26,7 @@
 > 历史版本：V10.0（2026-02-24）变更摘要见下方历史记录节  
 > 当前代码实现：**V11.1.1** | 实现设计：[V11.1.1 Implementation Design](architecture/v11_1_1_implementation_design.md)  
 > 生产已上线版本：**V11.0.1**（已发布） | 实现设计：[V11.0.1 Implementation Design](architecture/v11_0_1_implementation_design.md)  
-> 历史规划归档：[V11.1.1 Release Plan](archived/v11/v11.1/RELEASE_PLAN_V11.1.1.md) | [V11.0.1 Release Plan](archived/v11/v11.0/RELEASE_PLAN_V11.0.1.md) | [V10.5.4 Release Plan](archived/v10/v10.5/RELEASE_PLAN_V10.5.4.md)
+> 历史规划归档：[V11.2.1 Release Plan](archived/v11/v11.2/RELEASE_PLAN_V11.2.1.md) | [V11.1.1 Release Plan](archived/v11/v11.1/RELEASE_PLAN_V11.1.1.md) | [V11.0.1 Release Plan](archived/v11/v11.0/RELEASE_PLAN_V11.0.1.md) | [V10.5.4 Release Plan](archived/v10/v10.5/RELEASE_PLAN_V10.5.4.md)
 
 ---
 
@@ -1359,6 +1359,16 @@ AI_COMPLEX_MODEL=deepseek-reasoner    # 复杂分析
 - **M3 后端架构治理（当前实现）**：以 `app/services/read_models/` 承接工作台聚合，新增 Dashboard / Order Book / System Monitor 三个 read model 路由；read model 改为依赖 public service API，而不是私有 helper。
 - **M4 代码质量与性能治理（当前实现）**：新增路由遵循 `Annotated` 依赖注入风格、显式 404 响应、前端路由标题字符串化、System Monitor workbench 取数复用，以及关键监控样式的可访问性修正。
 - **版本原则（保持不变）**：不放宽 RiskGate、容量纪律和治理门槛；不做无边界重写；不新增平行控制面或平行页面体系。
+
+### Phase 16: Role-Based Workbench & Permission Governance 🚀 V11.2.1 规划中
+
+> 详细规划见：[docs/archived/v11/v11.2/RELEASE_PLAN_V11.2.1.md](archived/v11/v11.2/RELEASE_PLAN_V11.2.1.md)
+
+- **M1 身份与权限基建**：从当前单管理员登录与局部白名单判断，升级为正式的用户—角色—权限模型、JWT 角色声明与统一授权依赖。
+- **M2 角色化工作台体验**：为研究员、交易员、主管、管理员提供按职责裁剪的首页、导航、页面和按钮权限，降低认知噪声与误操作风险。
+- **M3 角色聚合读模型**：延续 V11.1.1 的 read model 路线，为 Research / Trading / Executive / Admin 四类角色提供专属聚合接口与轻量首页。
+- **M4 平台治理增强**：补齐用户管理、角色分配、权限审计、拒绝访问日志与管理员托管动作审计，确保平台治理可追踪、可回退、可灰度。
+- **版本原则（保持不变）**：权限系统不能绕过 `AutonomousEngine.run_decision_cycle()`、RiskGate、治理门与现有执行纪律；前端裁剪不等于安全边界，后端授权仍为真源。
 
 ---
 

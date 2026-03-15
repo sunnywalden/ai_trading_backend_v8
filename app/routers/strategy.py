@@ -10,10 +10,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
+from app.core.auth_context import make_legacy_admin_context
+from app.core.authz import ensure_permission_or_403
 from app.core.config import settings
 from app.jobs.scheduler import add_job
 from app.jobs.strategy_jobs import execute_strategy_run_job
-from app.models.db import get_session
+from app.models.db import SessionLocal, get_session
 from app.schemas.quick_trade import (
     BatchQuickTradeRequest,
     BatchQuickTradeResponse,
@@ -40,6 +42,7 @@ from app.schemas.strategy import (
     StrategyUpdateParamsRequest,
 )
 from app.services.quick_trade_service import QuickTradeService
+from app.services.rbac_service import rbac_service
 from app.services.strategy_export_service import StrategyExportService
 from app.services.strategy_service import StrategyRunService, StrategyService
 
@@ -47,8 +50,32 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-def _ensure_permission(current_user: str, action: str) -> None:
+async def _ensure_permission(current_user: str, action: str) -> None:
     if not settings.AUTH_ENABLED:
+        return
+    if settings.RBAC_V1121_ENABLED:
+        async with SessionLocal() as session:
+            context = await rbac_service.get_user_context_by_username(
+                session, current_user
+            )
+        if context is None and current_user == settings.ADMIN_USERNAME:
+            context = make_legacy_admin_context(current_user)
+        if context is None:
+            raise HTTPException(
+                status_code=401, detail="Could not resolve current user"
+            )
+        permission_map = {
+            "manage": "research.strategy.manage",
+            "execute": "research.strategy.execute",
+            "trade_execute": "trading.trade.execute",
+            "export": "research.export.read",
+        }
+        await ensure_permission_or_403(
+            context,
+            permission_map[action],
+            resource="strategy",
+            action=action,
+        )
         return
     allowed = (
         settings.STRATEGY_EXECUTE_USERS
@@ -200,7 +227,7 @@ async def create_strategy(
     session: AsyncSession = Depends(get_session),
     current_user: str = Depends(get_current_user),
 ):
-    _ensure_permission(current_user, "manage")
+    await _ensure_permission(current_user, "manage")
     svc = StrategyService(session)
     strategy = await svc.create_strategy(payload.model_dump(), owner_id=current_user)
     return StrategyDetailResponse(strategy=_to_detail(strategy))
@@ -213,7 +240,7 @@ async def update_strategy_params(
     session: AsyncSession = Depends(get_session),
     current_user: str = Depends(get_current_user),
 ):
-    _ensure_permission(current_user, "manage")
+    await _ensure_permission(current_user, "manage")
     svc = StrategyService(session)
     strategy = await svc.update_strategy_params(strategy_id, payload.default_params)
     if not strategy:
@@ -231,7 +258,7 @@ async def update_strategy_auto_scan_config(
     session: AsyncSession = Depends(get_session),
     current_user: str = Depends(get_current_user),
 ):
-    _ensure_permission(current_user, "manage")
+    await _ensure_permission(current_user, "manage")
     svc = StrategyService(session)
     strategy = await svc.update_auto_scan_config(
         strategy_id,
@@ -250,7 +277,7 @@ async def run_strategy(
     session: AsyncSession = Depends(get_session),
     current_user: str = Depends(get_current_user),
 ):
-    _ensure_permission(current_user, "execute")
+    await _ensure_permission(current_user, "execute")
     strategy_svc = StrategyService(session)
     strategy = await strategy_svc.get_strategy(strategy_id)
     if not strategy:
@@ -361,6 +388,7 @@ async def export_strategy_run(
     session: AsyncSession = Depends(get_session),
     current_user: str = Depends(get_current_user),
 ):
+    await _ensure_permission(current_user, "export")
     svc = StrategyRunService(session)
     run = await svc.get_run_by_id(run_id)
     if not run:
@@ -408,7 +436,7 @@ async def execute_quick_trade(
     current_user: str = Depends(get_current_user),
 ):
     """从策略结果快速创建并执行交易"""
-    _ensure_permission(current_user, "execute")
+    await _ensure_permission(current_user, "trade_execute")
     svc = QuickTradeService(session)
 
     try:
@@ -455,7 +483,7 @@ async def batch_quick_trade(
     current_user: str = Depends(get_current_user),
 ):
     """批量快捷交易"""
-    _ensure_permission(current_user, "execute")
+    await _ensure_permission(current_user, "trade_execute")
     svc = QuickTradeService(session)
 
     try:
@@ -492,7 +520,7 @@ async def toggle_strategy(
     current_user: str = Depends(get_current_user),
 ):
     """启用/禁用策略"""
-    _ensure_permission(current_user, "manage")
+    await _ensure_permission(current_user, "manage")
     svc = StrategyService(session)
     strategy = await svc.toggle_strategy(strategy_id, is_active)
     if not strategy:

@@ -147,6 +147,10 @@ class Settings(BaseSettings):
     # 用于签发 JWT token 的密钥，请在部署时设置为强随机值
     JWT_SECRET_KEY: str = "change-me-please"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    SEED_RESEARCHER_PASSWORD: str | None = None
+    SEED_TRADER_PASSWORD: str | None = None
+    SEED_SUPERVISOR_PASSWORD: str | None = None
+    SEED_ADMIN_PASSWORD: str | None = None
     STRATEGY_EXECUTE_USERS: Any = ["admin"]
     STRATEGY_MANAGE_USERS: Any = ["admin"]
     EXPORT_ROOT: str = "./exports"
@@ -348,6 +352,14 @@ class Settings(BaseSettings):
     # 主开关：控制个人交易风格约束层
     STYLE_ALIGNMENT_V1101_ENABLED: bool = False
 
+    # ==================== V11.2.1: Role-Based Workbench & Permission Governance ====================
+    RBAC_V1121_ENABLED: bool = False
+    ROLE_HOME_V1121_ENABLED: bool = False
+    ROLE_NAV_GATING_V1121_ENABLED: bool = False
+    ROLE_ACTION_GATING_V1121_ENABLED: bool = False
+    EXECUTIVE_REPORTS_V1121_ENABLED: bool = False
+    ADMIN_CONSOLE_V1121_ENABLED: bool = False
+
     # M1.5.1 Conviction Friction Relief — 近命中区间配置
     CONVICTION_FRICTION_DELTA: int = 3  # 近命中区间：阈值 - Δ 以内算"近命中"
     CONVICTION_FRICTION_MIN_ROUNDS: int = 3  # 连续被拒达到此次数才认定为"摩擦状态"
@@ -398,8 +410,16 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_auth_settings(self) -> "Settings":
-        if self.AUTH_ENABLED and not (self.ADMIN_PASSWORD or "").strip():
-            raise ValueError("ADMIN_PASSWORD must be set when AUTH_ENABLED=true")
+        if self.AUTH_ENABLED and not self.RBAC_V1121_ENABLED:
+            if not (self.ADMIN_PASSWORD or "").strip():
+                raise ValueError("ADMIN_PASSWORD must be set when AUTH_ENABLED=true")
+        elif self.AUTH_ENABLED:
+            has_legacy_admin = bool((self.ADMIN_PASSWORD or "").strip())
+            has_seed_admin = bool((self.SEED_ADMIN_PASSWORD or "").strip())
+            if not (has_legacy_admin or has_seed_admin):
+                raise ValueError(
+                    "Either ADMIN_PASSWORD or SEED_ADMIN_PASSWORD must be set when AUTH_ENABLED=true and RBAC_V1121_ENABLED=true"
+                )
         return self
 
 

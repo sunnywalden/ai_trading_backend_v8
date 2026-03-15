@@ -153,16 +153,22 @@ async def ensure_mysql_tables() -> None:
         "app.models.market_universe_symbol",
         "app.models.meta_state_snapshot",
         "app.models.notification",
+        "app.models.permission",
         "app.models.paper_account",
         "app.models.portfolio_snapshot",
         "app.models.position",
         "app.models.position_eval_task",
         "app.models.position_lifecycle_event",
         "app.models.price_alert",
+        "app.models.role",
+        "app.models.role_permission_grant",
         "app.models.task_config",
         "app.models.trade_journal",
         "app.models.trade_pnl_attribution",
         "app.models.trading_plan",
+        "app.models.user",
+        "app.models.user_role_binding",
+        "app.models.authorization_audit_log",
     ]
     for module_name in model_modules:
         import_module(module_name)
