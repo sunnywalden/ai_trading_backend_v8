@@ -7,7 +7,7 @@
 >
 > 注意：本文档已包含“API 监控（Rate Limit）”部分，原文件 `docs/API_Monitoring.md` 已合并（并标记为已合并/弃用）。
 >
-> **V11.0.1 文档对齐说明（2026-03-14）**：当前 API 已在 V10.5.4 控制平面基线之上补入 V11.0.1 的 Capital Intelligence 能力。已上线重点不是新增独立交易入口，而是补充系统自感知、摩擦追踪、 False-Hold 告警与 Improvement Lab 候选接口。本文档以当前 FastAPI 实现为准，未落地接口不得写成已上线。
+> **V11.1.1 当前实现对齐说明（2026-03-15）**：当前代码实现已在 V11.0.1 基线之上补入工作台收敛能力：新增 Dashboard / Order Book / System Monitor 三个 workbench read-model 接口，并让前端以 typed contract 直接消费聚合读模型。生产已上线基线仍为 V11.0.1；本文档会明确区分“当前实现”与“历史已上线基线”，未落地接口不得写成已上线。
 
 Base URL 以你的启动参数为准（示例：`http://localhost:8088`）。
 
@@ -410,6 +410,36 @@ Base URL 以你的启动参数为准（示例：`http://localhost:8088`）。
 - Query：`window_minutes?: int = 60`, `limit_failures?: int = 20`
 - 响应：`ServiceDetailResponse`
 
+### V11.1.1 Workbench Read Model 增量端点（当前实现）
+
+这些端点服务于统一工作台摘要，不改变交易主链，只负责高密度读模型聚合。
+
+#### GET `/api/v1/dashboard/v2/workbench-summary`
+
+- 用途：返回 Dashboard 工作台 explainability 所需摘要
+- 响应关键字段：
+  - `account_id`
+  - `summary{ total_equity, daily_pnl, active_plans_count, risk_level, pending_actions[] }`
+  - `capital_velocity{ score, turnover_rate, idle_cash_ratio, efficiency_grade, computed_at, is_idle_alert, details }`
+
+#### GET `/api/v1/order-book/workbench`
+
+- 用途：返回智能订单簿主工作台聚合读模型
+- 响应关键字段：
+  - `summary{ total_active, total_monitoring, total_completed_today, total_unrealized_pnl, avg_confidence }`
+  - 其余字段以当前 `get_order_book_workbench()` 返回为准
+- 说明：`GET /api/v1/order-book/summary` 当前直接复用该 read model 的 `summary` 子集
+
+#### GET `/api/v1/system-monitor/workbench`
+
+- 用途：返回系统监控 API Tab 所需的聚合读模型
+- Query：`time_range: day | hour | minute`（默认 `day`）
+- 响应关键字段：
+  - `monitoring_report`
+  - `api_stats[]`
+  - `time_range`
+- 说明：前端 `SystemMonitorPage` 通过该接口统一刷新 API 报告与 provider stats，减少重复请求
+
 #### DTO 约束（定稿）
 
 - 所有状态枚举统一为：`HEALTHY | WARN | CRITICAL | UNKNOWN`
@@ -801,6 +831,7 @@ CACHE_TTL_GEOPOLITICAL_HOURS=24
 - [Configuration.md](Configuration.md) - 系统配置说明
 - [Operations/Scheduler.md](Operations/Scheduler.md) - 调度器与运维
 - [architecture/v11_0_1_implementation_design.md](architecture/v11_0_1_implementation_design.md) - V11.0.1 当前实现设计
+- [architecture/v11_1_1_implementation_design.md](architecture/v11_1_1_implementation_design.md) - V11.1.1 当前实现设计（Workbench convergence / read models / shared shell）
 
 ---
 

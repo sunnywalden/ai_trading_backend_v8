@@ -2,66 +2,66 @@
 V10: 全新Dashboard聚合服务
 整合所有核心模块，提供全景式监控数据
 """
+
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
-from decimal import Decimal
-from typing import Optional, List, Dict, Any
 import asyncio
 import logging
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select, func, and_, desc, case
+from sqlalchemy import and_, case, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.broker.factory import make_option_broker_client
 from app.core.config import settings
 from app.models.equity_snapshot import EquitySnapshot
-from app.models.trading_plan import TradingPlan
-from app.models.trade_pnl_attribution import TradePnlAttribution
 from app.models.price_alert import AlertHistory, PriceAlert
-from app.models.trading_signal import TradingSignal, SignalStatus
 from app.models.strategy import StrategyRun
+from app.models.trade_pnl_attribution import TradePnlAttribution
+from app.models.trading_plan import TradingPlan
+from app.models.trading_signal import SignalStatus, TradingSignal
 from app.schemas.dashboard_v2 import (
-    DashboardV2Response,
-    DashboardQuickUpdate,
     AccountOverview,
-    PnLMetrics,
-    PnLAttribution,
-    RiskMetrics,
-    GreeksExposure,
-    RiskLevel,
-    TrendDirection,
-    MacroRiskAlert,
-    SignalSummary,
-    SignalPipeline,
-    PositionSummary,
-    TradingPlanSummary,
-    ExecutionStats,
     AIInsight,
-    StrategyPerformance,
     APIHealth,
+    DashboardQuickUpdate,
+    DashboardV2Response,
+    ExecutionStats,
+    GreeksExposure,
+    MacroRiskAlert,
     MarketHotspot,
-    TodoItem,
     PerformanceTrend,
+    PnLAttribution,
+    PnLMetrics,
+    PositionSummary,
+    RiskLevel,
+    RiskMetrics,
+    SignalPipeline,
+    SignalSummary,
+    StrategyPerformance,
+    TodoItem,
+    TradingPlanSummary,
+    TrendDirection,
 )
-from app.broker.factory import make_option_broker_client
-from app.services.option_exposure_service import OptionExposureService
 from app.services.account_service import AccountService
-
+from app.services.option_exposure_service import OptionExposureService
 
 logger = logging.getLogger(__name__)
 
 
 class DashboardV2Service:
     """V2 Dashboard服务 - 全景式数据聚合"""
-    
+
     def __init__(self, session: AsyncSession):
         self.session = session
         self.broker = make_option_broker_client()
-    
+
     async def get_full_dashboard(self, account_id: str) -> DashboardV2Response:
         """获取完整Dashboard数据"""
         now = datetime.utcnow()
-        
+
         # 顺序执行以避免 SQLAlchemy 会话并行冲突
         account = await self._get_account_overview(account_id)
         pnl, top_performers, top_losers = await self._get_pnl_metrics(account_id)
@@ -74,17 +74,17 @@ class DashboardV2Service:
         hotspots = await self._get_market_hotspots()
         todos = await self._get_todos(account_id)
         trend = await self._get_performance_trend(account_id, days=7)
-        
+
         # 计算衍生指标
         signal_notifications = len([s for s in pending_signals if s.confidence > 0.8])
         insights_unread = len([i for i in insights if i.priority == "high"])
         todos_high = len([t for t in todos if t.priority == "high"])
         system_alerts = len([a for a in api_health if a.status != "healthy"])
-        
+
         # 获取持仓数据
         positions_summary = await self._get_positions_summary(account_id)
         positions_count = len(positions_summary)
-        
+
         return DashboardV2Response(
             account_id=account_id,
             timestamp=now,
@@ -114,20 +114,20 @@ class DashboardV2Service:
             refresh_interval_seconds=30,
             last_refresh_at=now,
         )
-    
+
     async def get_quick_update(self, account_id: str) -> DashboardQuickUpdate:
         """获取快速更新（仅核心指标）"""
         equity = await self._get_current_equity(account_id)
         daily_pnl, daily_return = await self._get_daily_pnl(account_id)
         risk_level = await self._assess_risk_level(account_id)
-        
+
         # 并行获取计数
         counts = await asyncio.gather(
             self._count_pending_signals(account_id),
             self._count_todos(account_id),
             self._count_system_alerts(),
         )
-        
+
         return DashboardQuickUpdate(
             account_id=account_id,
             timestamp=datetime.utcnow(),
@@ -139,7 +139,28 @@ class DashboardV2Service:
             todos_count=counts[1],
             system_alerts_count=counts[2],
         )
-    
+
+    async def get_capital_velocity_context(self, account_id: str) -> Dict[str, Any]:
+        """Return capital-velocity inputs for workbench read models.
+
+        This keeps read-model composition on a stable public API instead of
+        reaching into private helpers.
+        """
+        positions_summary = await self._get_positions_summary(account_id)
+        current_equity = await self._get_current_equity(account_id)
+        positions = {
+            position.symbol: {
+                "qty": position.quantity,
+                "current_price": position.current_price,
+                "market_value": position.market_value,
+            }
+            for position in positions_summary
+        }
+        return {
+            "equity": float(current_equity or 0.0),
+            "positions": positions,
+        }
+
     # ============ 账户相关 ============
     async def _get_account_overview(self, account_id: str) -> AccountOverview:
         """获取账户概览"""
@@ -147,7 +168,7 @@ class DashboardV2Service:
             account_svc = AccountService(self.session, self.broker)
             acct_info = await account_svc.get_account_info(account_id)
             equity = await self.broker.get_account_equity(account_id)
-            
+
             return AccountOverview(
                 total_equity=float(equity or 0),
                 cash=acct_info.get("cash", 0.0),
@@ -159,7 +180,7 @@ class DashboardV2Service:
         except Exception as e:
             logger.error(f"获取账户概览失败: {e}")
             return AccountOverview()
-    
+
     async def _get_current_equity(self, account_id: str) -> float:
         """获取当前权益"""
         try:
@@ -167,23 +188,33 @@ class DashboardV2Service:
             return float(equity or 0)
         except:
             return 0.0
-    
+
     # ============ 盈亏相关 ============
-    async def _get_pnl_metrics(self, account_id: str) -> tuple[PnLMetrics, List[PnLAttribution], List[PnLAttribution]]:
+    async def _get_pnl_metrics(
+        self, account_id: str
+    ) -> tuple[PnLMetrics, List[PnLAttribution], List[PnLAttribution]]:
         """获取盈亏指标"""
         today = date.today()
-        
+
         # 获取各个时间段的收益率
         daily_pnl, daily_return = await self._get_daily_pnl(account_id)
-        weekly_pnl, weekly_return = await self._calc_period_pnl_and_return(account_id, today - timedelta(days=7), today)
-        mtd_pnl, mtd_return = await self._calc_period_pnl_and_return(account_id, today.replace(day=1), today)
-        ytd_pnl, ytd_return = await self._calc_period_pnl_and_return(account_id, today.replace(month=1, day=1), today)
-        
-        # 计算趋势
-        trend = TrendDirection.UP if daily_return > 0 else (
-            TrendDirection.DOWN if daily_return < 0 else TrendDirection.FLAT
+        weekly_pnl, weekly_return = await self._calc_period_pnl_and_return(
+            account_id, today - timedelta(days=7), today
         )
-        
+        mtd_pnl, mtd_return = await self._calc_period_pnl_and_return(
+            account_id, today.replace(day=1), today
+        )
+        ytd_pnl, ytd_return = await self._calc_period_pnl_and_return(
+            account_id, today.replace(month=1, day=1), today
+        )
+
+        # 计算趋势
+        trend = (
+            TrendDirection.UP
+            if daily_return > 0
+            else (TrendDirection.DOWN if daily_return < 0 else TrendDirection.FLAT)
+        )
+
         pnl = PnLMetrics(
             daily_pnl=daily_pnl,
             daily_return_pct=daily_return,
@@ -195,29 +226,34 @@ class DashboardV2Service:
             ytd_return_pct=ytd_return,
             trend=trend,
         )
-        
+
         # 获取盈亏归因
         performers, losers = await self._get_pnl_attribution(account_id)
-        
+
         return pnl, performers, losers
-    
+
     async def _get_daily_pnl(self, account_id: str) -> tuple[float, float]:
         """获取今日盈亏"""
         today = date.today()
         yesterday = today - timedelta(days=1)
-        
+
         # 优先使用实时权益对比昨日快照
         curr_eq = await self._get_current_equity(account_id)
         yesterday_snap = await self._get_snapshot(account_id, yesterday)
-        
+
         # 如果没有昨日快照，找最近一个早于今天的快照
         if not yesterday_snap:
-            stmt = select(EquitySnapshot).where(
-                and_(
-                    EquitySnapshot.account_id == account_id,
-                    EquitySnapshot.snapshot_date < today
+            stmt = (
+                select(EquitySnapshot)
+                .where(
+                    and_(
+                        EquitySnapshot.account_id == account_id,
+                        EquitySnapshot.snapshot_date < today,
+                    )
                 )
-            ).order_by(desc(EquitySnapshot.snapshot_date)).limit(1)
+                .order_by(desc(EquitySnapshot.snapshot_date))
+                .limit(1)
+            )
             result = await self.session.execute(stmt)
             yesterday_snap = result.scalar()
 
@@ -226,36 +262,46 @@ class DashboardV2Service:
             if prev_eq > 0:
                 pnl = curr_eq - prev_eq
                 return pnl, (pnl / prev_eq * 100)
-        
+
         return 0.0, 0.0
-    
-    async def _calc_period_pnl_and_return(self, account_id: str, start: date, end: date) -> tuple[float, float]:
+
+    async def _calc_period_pnl_and_return(
+        self, account_id: str, start: date, end: date
+    ) -> tuple[float, float]:
         """计算期间盈亏金额和收益率"""
         # 1. 寻起始点：找 <= start 的最晚一条快照作为基准
-        stmt_first = select(EquitySnapshot).where(
-            and_(
-                EquitySnapshot.account_id == account_id,
-                EquitySnapshot.snapshot_date <= start
+        stmt_first = (
+            select(EquitySnapshot)
+            .where(
+                and_(
+                    EquitySnapshot.account_id == account_id,
+                    EquitySnapshot.snapshot_date <= start,
+                )
             )
-        ).order_by(desc(EquitySnapshot.snapshot_date)).limit(1)
-        
+            .order_by(desc(EquitySnapshot.snapshot_date))
+            .limit(1)
+        )
+
         # 2. 寻范围内快照：用于备份
-        stmt_range = select(EquitySnapshot).where(
-            and_(
-                EquitySnapshot.account_id == account_id,
-                EquitySnapshot.snapshot_date >= start,
-                EquitySnapshot.snapshot_date <= end,
+        stmt_range = (
+            select(EquitySnapshot)
+            .where(
+                and_(
+                    EquitySnapshot.account_id == account_id,
+                    EquitySnapshot.snapshot_date >= start,
+                    EquitySnapshot.snapshot_date <= end,
+                )
             )
-        ).order_by(EquitySnapshot.snapshot_date)
+            .order_by(EquitySnapshot.snapshot_date)
+        )
 
         res_first, res_range = await asyncio.gather(
-            self.session.execute(stmt_first),
-            self.session.execute(stmt_range)
+            self.session.execute(stmt_first), self.session.execute(stmt_range)
         )
-        
+
         snap_first = res_first.scalar()
         snaps_in_range = list(res_range.scalars().all())
-        
+
         # 确定起始权益
         if snap_first:
             first_eq = float(snap_first.total_equity)
@@ -263,7 +309,7 @@ class DashboardV2Service:
             first_eq = float(snaps_in_range[0].total_equity)
         else:
             return 0.0, 0.0
-            
+
         # 确定结束权益
         curr_eq = await self._get_current_equity(account_id)
         if end >= date.today() and curr_eq > 0:
@@ -278,55 +324,66 @@ class DashboardV2Service:
 
         if first_eq <= 0 or (last_eq == first_eq and not snaps_in_range):
             return 0.0, 0.0
-        
+
         pnl = last_eq - first_eq
         return pnl, (pnl / first_eq * 100)
-    
+
     async def _get_snapshot(self, account_id: str, d: date) -> Optional[EquitySnapshot]:
         """获取快照"""
         stmt = select(EquitySnapshot).where(
-            and_(EquitySnapshot.account_id == account_id, EquitySnapshot.snapshot_date == d)
+            and_(
+                EquitySnapshot.account_id == account_id,
+                EquitySnapshot.snapshot_date == d,
+            )
         )
         result = await self.session.execute(stmt)
         return result.scalars().first()
-    
-    async def _get_pnl_attribution(self, account_id: str) -> tuple[List[PnLAttribution], List[PnLAttribution]]:
+
+    async def _get_pnl_attribution(
+        self, account_id: str
+    ) -> tuple[List[PnLAttribution], List[PnLAttribution]]:
         """获取盈亏归因（Top贡献者和亏损者）"""
         try:
             # 获取当前持仓的未实现盈亏作为归因参考
             stk_positions = await self.broker.list_underlying_positions(account_id)
             opt_positions = await self.broker.list_option_positions(account_id)
-            
+
             all_attrs = []
             for p in stk_positions:
-                all_attrs.append(PnLAttribution(
-                    symbol=p.symbol,
-                    contribution=float(p.unrealized_pnl),
-                    contribution_pct=float(p.unrealized_pnl_pct),
-                    position_size=float(p.market_value),
-                ))
-            
+                all_attrs.append(
+                    PnLAttribution(
+                        symbol=p.symbol,
+                        contribution=float(p.unrealized_pnl),
+                        contribution_pct=float(p.unrealized_pnl_pct),
+                        position_size=float(p.market_value),
+                    )
+                )
+
             for p in opt_positions:
-                all_attrs.append(PnLAttribution(
-                    symbol=p.contract.broker_symbol,
-                    contribution=float(p.unrealized_pnl or 0),
-                    contribution_pct=float(p.unrealized_pnl_pct),
-                    position_size=float(p.market_value or 0),
-                ))
-                
+                all_attrs.append(
+                    PnLAttribution(
+                        symbol=p.contract.broker_symbol,
+                        contribution=float(p.unrealized_pnl or 0),
+                        contribution_pct=float(p.unrealized_pnl_pct),
+                        position_size=float(p.market_value or 0),
+                    )
+                )
+
             # 分离盈利和亏损
             performers = [a for a in all_attrs if a.contribution > 0]
             losers = [a for a in all_attrs if a.contribution < 0]
-            
+
             # 排序并取Top5
-            performers = sorted(performers, key=lambda x: x.contribution, reverse=True)[:5]
+            performers = sorted(performers, key=lambda x: x.contribution, reverse=True)[
+                :5
+            ]
             losers = sorted(losers, key=lambda x: x.contribution)[:5]
-            
+
             return performers, losers
         except Exception as e:
             logger.error(f"获取盈亏归因失败: {e}")
             return [], []
-    
+
     # ============ 风险相关 ============
     async def _get_risk_metrics(self, account_id: str) -> RiskMetrics:
         """获取风险指标"""
@@ -335,7 +392,7 @@ class DashboardV2Service:
             expo_svc = OptionExposureService(self.session, self.broker)
             expo = await expo_svc.get_account_exposure(account_id)
             eq = expo.equity_usd or 1.0
-            
+
             greeks = GreeksExposure(
                 delta=expo.total_delta_notional_usd,
                 delta_pct=expo.total_delta_notional_usd / eq * 100,
@@ -346,10 +403,14 @@ class DashboardV2Service:
                 theta=expo.total_theta_usd,
                 theta_pct=expo.total_theta_usd / eq * 100,
             )
-            
+
             # 评估风险等级
-            max_pct = max(abs(greeks.delta_pct), abs(greeks.gamma_pct), 
-                         abs(greeks.vega_pct), abs(greeks.theta_pct))
+            max_pct = max(
+                abs(greeks.delta_pct),
+                abs(greeks.gamma_pct),
+                abs(greeks.vega_pct),
+                abs(greeks.theta_pct),
+            )
             if max_pct > 80:
                 risk_level = RiskLevel.EXTREME
             elif max_pct > 60:
@@ -358,21 +419,24 @@ class DashboardV2Service:
                 risk_level = RiskLevel.MEDIUM
             else:
                 risk_level = RiskLevel.LOW
-            
+
             # 通过 VaRCalculator 获取实时风险指标
             var_data: dict = {}
             try:
                 from app.services.var_calculator import VaRCalculator
-                var_data = await VaRCalculator(self.session).calculate_var_cvar(account_id, eq)
+
+                var_data = await VaRCalculator(self.session).calculate_var_cvar(
+                    account_id, eq
+                )
             except Exception as _ve:
                 logger.error(f"VaR calculation failed: {_ve}")
 
-            var_1d   = abs(float(var_data.get("var_95_pct", 0.0))) * 100  # 转为百分比
-            var_5d   = abs(float(var_data.get("var_99_pct", 0.0))) * 100
-            max_dd   = abs(float(var_data.get("max_drawdown_pct", 0.0))) * 100
-            sharpe   = float(var_data.get("sharpe_ratio", 0.0))
+            var_1d = abs(float(var_data.get("var_95_pct", 0.0))) * 100  # 转为百分比
+            var_5d = abs(float(var_data.get("var_99_pct", 0.0))) * 100
+            max_dd = abs(float(var_data.get("max_drawdown_pct", 0.0))) * 100
+            sharpe = float(var_data.get("sharpe_ratio", 0.0))
             beta_val = float(var_data.get("beta", 0.0))
-            
+
             # 计算集中度风险
             conc_risk = 0.0
             stk_positions = await self.broker.list_underlying_positions(account_id)
@@ -393,7 +457,7 @@ class DashboardV2Service:
         except Exception as e:
             logger.error(f"获取风险指标失败: {e}")
             return RiskMetrics()
-    
+
     async def _assess_risk_level(self, account_id: str) -> RiskLevel:
         """评估风险等级"""
         try:
@@ -401,11 +465,12 @@ class DashboardV2Service:
             return risk.risk_level
         except:
             return RiskLevel.LOW
-    
+
     async def _get_macro_risks(self) -> List[MacroRiskAlert]:
         """获取宏观风险告警（通过 MacroRiskScoringService 实时生成）"""
         try:
             from app.services.macro_risk_scoring_service import MacroRiskScoringService
+
             alerts_raw = await MacroRiskScoringService().generate_risk_alerts()
             now = datetime.utcnow()
             return [
@@ -422,30 +487,34 @@ class DashboardV2Service:
         except Exception as e:
             logger.warning(f"MacroRisk alerts failed: {e}")
             return []
-    
+
     # ============ 信号相关 ============
-    async def _get_signal_pipeline(self, account_id: str) -> tuple[SignalPipeline, List[SignalSummary]]:
+    async def _get_signal_pipeline(
+        self, account_id: str
+    ) -> tuple[SignalPipeline, List[SignalSummary]]:
         """获取信号管道统计"""
         try:
             # 统计各状态信号数量
-            stmt = select(
-                TradingSignal.status, func.count(TradingSignal.signal_id)
-            ).where(
-                TradingSignal.account_id == account_id
-            ).group_by(TradingSignal.status)
+            stmt = (
+                select(TradingSignal.status, func.count(TradingSignal.signal_id))
+                .where(TradingSignal.account_id == account_id)
+                .group_by(TradingSignal.status)
+            )
             result = await self.session.execute(stmt)
             rows = result.all()
-            status_counts: Dict[SignalStatus, int] = {row[0]: int(row[1]) for row in rows}
-            
+            status_counts: Dict[SignalStatus, int] = {
+                row[0]: int(row[1]) for row in rows
+            }
+
             generated = status_counts.get(SignalStatus.GENERATED, 0)
             validated = status_counts.get(SignalStatus.VALIDATED, 0)
             executed = status_counts.get(SignalStatus.EXECUTED, 0)
             skipped = status_counts.get(SignalStatus.SKIPPED, 0)
             rejected = status_counts.get(SignalStatus.REJECTED, 0)
-            
+
             total = generated + validated + executed + skipped + rejected
             success_rate = (executed / total * 100) if total > 0 else 0.0
-            
+
             pipeline = SignalPipeline(
                 generated_count=generated,
                 validated_count=validated,
@@ -454,17 +523,22 @@ class DashboardV2Service:
                 rejected_count=rejected,
                 success_rate=success_rate,
             )
-            
+
             # 获取待执行信号
-            stmt = select(TradingSignal).where(
-                and_(
-                    TradingSignal.account_id == account_id,
-                    TradingSignal.status == SignalStatus.VALIDATED,
+            stmt = (
+                select(TradingSignal)
+                .where(
+                    and_(
+                        TradingSignal.account_id == account_id,
+                        TradingSignal.status == SignalStatus.VALIDATED,
+                    )
                 )
-            ).order_by(desc(TradingSignal.confidence)).limit(10)
+                .order_by(desc(TradingSignal.confidence))
+                .limit(10)
+            )
             result = await self.session.execute(stmt)
             signals = result.scalars().all()
-            
+
             signal_summaries = [
                 SignalSummary(
                     signal_id=str(s.signal_id),
@@ -472,18 +546,22 @@ class DashboardV2Service:
                     signal_type=str(s.signal_type),
                     direction=str(s.direction),
                     confidence=float(s.confidence) if s.confidence is not None else 0.0,
-                    expected_return=float(s.expected_return) if s.expected_return is not None else 0.0,
+                    expected_return=(
+                        float(s.expected_return)
+                        if s.expected_return is not None
+                        else 0.0
+                    ),
                     risk_score=float(s.risk_score) if s.risk_score is not None else 0.0,
                     timestamp=s.generated_at,
                 )
                 for s in signals
             ]
-            
+
             return pipeline, signal_summaries
         except Exception as e:
             logger.error(f"获取信号管道失败: {e}")
             return SignalPipeline(), []
-    
+
     async def _count_pending_signals(self, account_id: str) -> int:
         """统计待执行信号数量"""
         stmt = select(func.count(TradingSignal.signal_id)).where(
@@ -494,7 +572,7 @@ class DashboardV2Service:
         )
         result = await self.session.execute(stmt)
         return result.scalar() or 0
-    
+
     # ============ 持仓相关 ============
     async def _get_positions_summary(self, account_id: str) -> List[PositionSummary]:
         """获取持仓摘要"""
@@ -503,12 +581,12 @@ class DashboardV2Service:
             stk_positions = await self.broker.list_underlying_positions(account_id)
             # 2. 获取期权持仓
             opt_positions = await self.broker.list_option_positions(account_id)
-            
+
             # 获取总权益用于计算权重
             total_equity = await self._get_current_equity(account_id) or 1.0
-            
+
             results = []
-            
+
             # 处理股票
             for p in stk_positions:
                 quantity = float(p.quantity)
@@ -516,23 +594,27 @@ class DashboardV2Service:
                 avg_price = float(p.avg_price or 0)
                 market_value = last_price * quantity
                 unrealized_pnl = (last_price - avg_price) * quantity
-                unrealized_pnl_pct = (last_price / avg_price - 1) * 100 if avg_price != 0 else 0.0
-                
-                results.append(PositionSummary(
-                    symbol=p.symbol,
-                    name=p.name or p.symbol,
-                    quantity=quantity,
-                    avg_cost=avg_price,
-                    current_price=last_price,
-                    market_value=market_value,
-                    unrealized_pnl=unrealized_pnl,
-                    unrealized_pnl_pct=unrealized_pnl_pct,
-                    weight=abs(market_value) / total_equity * 100,
-                    risk_score=0.0,
-                    technical_score=0.0,
-                    fundamental_score=0.0,
-                ))
-            
+                unrealized_pnl_pct = (
+                    (last_price / avg_price - 1) * 100 if avg_price != 0 else 0.0
+                )
+
+                results.append(
+                    PositionSummary(
+                        symbol=p.symbol,
+                        name=p.name or p.symbol,
+                        quantity=quantity,
+                        avg_cost=avg_price,
+                        current_price=last_price,
+                        market_value=market_value,
+                        unrealized_pnl=unrealized_pnl,
+                        unrealized_pnl_pct=unrealized_pnl_pct,
+                        weight=abs(market_value) / total_equity * 100,
+                        risk_score=0.0,
+                        technical_score=0.0,
+                        fundamental_score=0.0,
+                    )
+                )
+
             # 处理期权
             for p in opt_positions:
                 quantity = float(p.quantity)
@@ -541,30 +623,36 @@ class DashboardV2Service:
                 # 计算期权代码 (e.g. AAPL 240621C165)
                 full_symbol = p.contract.broker_symbol
                 market_value = last_price * quantity * p.contract.multiplier
-                unrealized_pnl = (last_price - avg_price) * quantity * p.contract.multiplier
-                unrealized_pnl_pct = (last_price / avg_price - 1) * 100 if avg_price != 0 else 0.0
-                
-                results.append(PositionSummary(
-                    symbol=full_symbol,
-                    name=full_symbol,
-                    quantity=quantity,
-                    avg_cost=avg_price,
-                    current_price=last_price,
-                    market_value=market_value,
-                    unrealized_pnl=unrealized_pnl,
-                    unrealized_pnl_pct=unrealized_pnl_pct,
-                    weight=abs(market_value) / total_equity * 100,
-                    risk_score=0.0,
-                    technical_score=0.0,
-                    fundamental_score=0.0,
-                ))
-            
+                unrealized_pnl = (
+                    (last_price - avg_price) * quantity * p.contract.multiplier
+                )
+                unrealized_pnl_pct = (
+                    (last_price / avg_price - 1) * 100 if avg_price != 0 else 0.0
+                )
+
+                results.append(
+                    PositionSummary(
+                        symbol=full_symbol,
+                        name=full_symbol,
+                        quantity=quantity,
+                        avg_cost=avg_price,
+                        current_price=last_price,
+                        market_value=market_value,
+                        unrealized_pnl=unrealized_pnl,
+                        unrealized_pnl_pct=unrealized_pnl_pct,
+                        weight=abs(market_value) / total_equity * 100,
+                        risk_score=0.0,
+                        technical_score=0.0,
+                        fundamental_score=0.0,
+                    )
+                )
+
             # 按市值排序显示前10
             return sorted(results, key=lambda x: abs(x.market_value), reverse=True)
         except Exception as e:
             logger.error(f"获取持仓摘要失败: {e}", exc_info=True)
             return []
-    
+
     async def _calc_concentration_top5(self, positions: List[PositionSummary]) -> float:
         """计算Top5集中度"""
         if not positions:
@@ -573,13 +661,13 @@ class DashboardV2Service:
         if total_mv == 0:
             return 0.0
         top5_mv = sum(abs(p.market_value) for p in positions[:5])
-        return (top5_mv / total_mv * 100)
-    
+        return top5_mv / total_mv * 100
+
     # ============ 交易计划相关 ============
     async def _get_execution_stats(self, account_id: str) -> ExecutionStats:
         """获取执行统计"""
         today = date.today()
-        
+
         # 活跃计划数（包含自主交易状态）
         stmt = select(func.count(TradingPlan.id)).where(
             and_(
@@ -589,7 +677,7 @@ class DashboardV2Service:
         )
         result = await self.session.execute(stmt)
         active = result.scalar() or 0
-        
+
         # 今日执行数
         stmt = select(func.count(TradingPlan.id)).where(
             and_(
@@ -600,7 +688,7 @@ class DashboardV2Service:
         )
         result = await self.session.execute(stmt)
         executed = result.scalar() or 0
-        
+
         # 今日取消数
         stmt = select(func.count(TradingPlan.id)).where(
             and_(
@@ -619,12 +707,17 @@ class DashboardV2Service:
         avg_slippage = 0.0
         try:
             from app.models.trade_pnl_attribution import TradePnlAttribution
+
             slip_stmt = select(
                 func.avg(
                     func.abs(
-                        (TradePnlAttribution.exit_price - TradePnlAttribution.entry_price)
+                        (
+                            TradePnlAttribution.exit_price
+                            - TradePnlAttribution.entry_price
+                        )
                         / TradePnlAttribution.entry_price
-                    ) * 100
+                    )
+                    * 100
                 )
             ).where(
                 and_(
@@ -645,131 +738,157 @@ class DashboardV2Service:
             execution_rate=exec_rate,
             avg_slippage=avg_slippage,
         )
-    
+
     async def _get_active_plans(self, account_id: str) -> List[TradingPlanSummary]:
         """获取活跃计划（包含自主交易状态）"""
-        stmt = select(TradingPlan).where(
-            and_(
-                TradingPlan.account_id == account_id,
-                TradingPlan.plan_status.in_(["ACTIVE", "AUTO_EXECUTING"]),
+        stmt = (
+            select(TradingPlan)
+            .where(
+                and_(
+                    TradingPlan.account_id == account_id,
+                    TradingPlan.plan_status.in_(["ACTIVE", "AUTO_EXECUTING"]),
+                )
             )
-        ).order_by(desc(TradingPlan.created_at)).limit(10)
+            .order_by(desc(TradingPlan.created_at))
+            .limit(10)
+        )
         result = await self.session.execute(stmt)
         plans = list(result.scalars().all())
 
         # 兜底：若当前无活跃计划，展示“今日已结束的自主计划”，避免前端空白看不到刚完成的交易轨迹
         if not plans:
             today = date.today()
-            fallback_stmt = select(TradingPlan).where(
-                and_(
-                    TradingPlan.account_id == account_id,
-                    TradingPlan.source == "AI_AUTONOMOUS",
-                    TradingPlan.plan_status.in_(["EXECUTED", "REVOKED", "FAILED", "CANCELLED", "EXPIRED"]),
-                    func.date(TradingPlan.updated_at) == today,
+            fallback_stmt = (
+                select(TradingPlan)
+                .where(
+                    and_(
+                        TradingPlan.account_id == account_id,
+                        TradingPlan.source == "AI_AUTONOMOUS",
+                        TradingPlan.plan_status.in_(
+                            ["EXECUTED", "REVOKED", "FAILED", "CANCELLED", "EXPIRED"]
+                        ),
+                        func.date(TradingPlan.updated_at) == today,
+                    )
                 )
-            ).order_by(desc(TradingPlan.updated_at)).limit(10)
+                .order_by(desc(TradingPlan.updated_at))
+                .limit(10)
+            )
             fallback_result = await self.session.execute(fallback_stmt)
             plans = list(fallback_result.scalars().all())
-        
+
         return [
             TradingPlanSummary(
                 plan_id=str(p.id),
                 symbol=str(p.symbol),
                 plan_type=str(p.plan_type),
                 status=str(p.plan_status),
-                target_price=float(p.take_profit) if p.take_profit is not None else None,
+                target_price=(
+                    float(p.take_profit) if p.take_profit is not None else None
+                ),
                 quantity=0.0,
                 created_at=p.created_at,
                 expires_at=p.valid_until,
             )
             for p in plans
         ]
-    
+
     # ============ AI洞察相关 ============
     async def _get_ai_insights(self, account_id: str) -> List[AIInsight]:
         """获取AI洞察 (基准规则引擎版)"""
         insights = []
         now = datetime.utcnow()
-        
+
         try:
             # 1. 检查集中度
             positions = await self._get_positions_summary(account_id)
             if positions:
                 top1 = positions[0]
                 if top1.weight > 40:
-                    insights.append(AIInsight(
-                        insight_id="risk_concentration",
-                        insight_type="risk",
-                        priority="high",
-                        title="高仓位集中度警告",
-                        content=f"单一标的 {top1.symbol} 权重达 {top1.weight:.1f}%，超出 40% 安全阈值。建议考虑减仓或对冲。",
-                        action_label="查看详情",
-                        action_link="/quant-loop",
-                        created_at=now
-                    ))
-            
+                    insights.append(
+                        AIInsight(
+                            insight_id="risk_concentration",
+                            insight_type="risk",
+                            priority="high",
+                            title="高仓位集中度警告",
+                            content=f"单一标的 {top1.symbol} 权重达 {top1.weight:.1f}%，超出 40% 安全阈值。建议考虑减仓或对冲。",
+                            action_label="查看详情",
+                            action_link="/quant-loop",
+                            created_at=now,
+                        )
+                    )
+
             # 2. 检查待执行信号
             pipeline, pending = await self._get_signal_pipeline(account_id)
             if pending:
                 high_conf = [s for s in pending if s.confidence > 0.8]
                 if high_conf:
-                    insights.append(AIInsight(
-                        insight_id="opportunity_signals",
-                        insight_type="opportunity",
-                        priority="medium",
-                        title="高置信度交易机会",
-                        content=f"发现 {len(high_conf)} 个置信度高于 80% 的交易信号（如 {high_conf[0].symbol}），建议尽快审核执行。",
-                        action_label="去执行",
-                        action_link="/quant-loop",
-                        created_at=now
-                    ))
+                    insights.append(
+                        AIInsight(
+                            insight_id="opportunity_signals",
+                            insight_type="opportunity",
+                            priority="medium",
+                            title="高置信度交易机会",
+                            content=f"发现 {len(high_conf)} 个置信度高于 80% 的交易信号（如 {high_conf[0].symbol}），建议尽快审核执行。",
+                            action_label="去执行",
+                            action_link="/quant-loop",
+                            created_at=now,
+                        )
+                    )
 
             # 3. 总体状态
             if not insights:
-                insights.append(AIInsight(
-                    insight_id="status_normal",
-                    insight_type="info",
-                    priority="low",
-                    title="组合状态良好",
-                    content="当前账户风险指标均在正常范围内，暂时没有需要处理的紧急事项。行情波动平稳。",
-                    action_label="查看风控",
-                    action_link="/quant-loop",
-                    created_at=now
-                ))
-            
+                insights.append(
+                    AIInsight(
+                        insight_id="status_normal",
+                        insight_type="info",
+                        priority="low",
+                        title="组合状态良好",
+                        content="当前账户风险指标均在正常范围内，暂时没有需要处理的紧急事项。行情波动平稳。",
+                        action_label="查看风控",
+                        action_link="/quant-loop",
+                        created_at=now,
+                    )
+                )
+
             # 4. 权益趋势
             trend = await self._get_performance_trend(account_id, days=7)
             if len(trend) >= 2:
                 ret_7d = (trend[-1].equity / trend[0].equity - 1) * 100
                 if ret_7d > 5:
-                    insights.append(AIInsight(
-                        insight_id="perf_good",
-                        insight_type="advice",
-                        priority="medium",
-                        title="近期业绩优异",
-                        content=f"过去 7 天组合收益率达 {ret_7d:.1f}%。建议锁住部分利润，或对现有盈利持仓上移止盈位。",
-                        action_label="调整计划",
-                        action_link="/plans",
-                        created_at=now
-                    ))
+                    insights.append(
+                        AIInsight(
+                            insight_id="perf_good",
+                            insight_type="advice",
+                            priority="medium",
+                            title="近期业绩优异",
+                            content=f"过去 7 天组合收益率达 {ret_7d:.1f}%。建议锁住部分利润，或对现有盈利持仓上移止盈位。",
+                            action_label="调整计划",
+                            action_link="/plans",
+                            created_at=now,
+                        )
+                    )
 
         except Exception as e:
             logger.error(f"生成AI洞察失败: {e}")
-            insights.append(AIInsight(
-                insight_id="error",
-                insight_type="info",
-                priority="low",
-                title="AI 洞察初始化中",
-                content="正在分析您的账户数据，请稍后刷新...",
-                action_label="刷新",
-                action_link="/dashboard",
-                created_at=now
-            ))
-            
+            insights.append(
+                AIInsight(
+                    insight_id="error",
+                    insight_type="info",
+                    priority="low",
+                    title="AI 洞察初始化中",
+                    content="正在分析您的账户数据，请稍后刷新...",
+                    action_label="刷新",
+                    action_link="/dashboard",
+                    created_at=now,
+                )
+            )
+
         return insights
-    
+
     # ============ 策略相关 ============
-    async def _get_strategy_performance(self, account_id: str) -> List[StrategyPerformance]:
+    async def _get_strategy_performance(
+        self, account_id: str
+    ) -> List[StrategyPerformance]:
         """
         聚合策略绩效，优先级：
         1. signal_performance 表（已预聚合：dimension_type='strategy'）
@@ -778,8 +897,11 @@ class DashboardV2Service:
         4. 仅有 strategy_runs 元数据时指标显示为 0
         """
         try:
-            from app.models.strategy import StrategyRun as SR, Strategy as Strat, StrategyRunAsset as SRA
-            from app.models.trading_signal import TradingSignal as TS, SignalPerformance as SP
+            from app.models.strategy import Strategy as Strat
+            from app.models.strategy import StrategyRun as SR
+            from app.models.strategy import StrategyRunAsset as SRA
+            from app.models.trading_signal import SignalPerformance as SP
+            from app.models.trading_signal import TradingSignal as TS
 
             # ── 步骤 1：strategy 维度的预聚合结果（最新一条） ─────────────────
             sp_stmt = (
@@ -810,8 +932,20 @@ class DashboardV2Service:
                         func.count(TS.id).label("total"),
                         func.avg(
                             case(
-                                (and_(TS.actual_return.isnot(None), TS.actual_return > 0), 1),
-                                (and_(TS.actual_return.isnot(None), TS.actual_return <= 0), 0),
+                                (
+                                    and_(
+                                        TS.actual_return.isnot(None),
+                                        TS.actual_return > 0,
+                                    ),
+                                    1,
+                                ),
+                                (
+                                    and_(
+                                        TS.actual_return.isnot(None),
+                                        TS.actual_return <= 0,
+                                    ),
+                                    0,
+                                ),
                                 else_=None,
                             )
                         ).label("win_rate"),
@@ -860,31 +994,47 @@ class DashboardV2Service:
 
                     if strat_assets:
                         # 获取 broker 实时持仓的未实现收益率
-                        live_pos = await self.broker.list_underlying_positions(account_id)
+                        live_pos = await self.broker.list_underlying_positions(
+                            account_id
+                        )
                         pnl_map_live: dict[str, float] = {
-                            p.symbol: float(p.unrealized_pnl_pct)
-                            for p in live_pos
+                            p.symbol: float(p.unrealized_pnl_pct) for p in live_pos
                         }
                         for sid, assets in strat_assets.items():
-                            matched = {sym: pnl_map_live[sym] for sym in assets if sym in pnl_map_live}
+                            matched = {
+                                sym: pnl_map_live[sym]
+                                for sym in assets
+                                if sym in pnl_map_live
+                            }
                             if not matched:
                                 continue
                             total_weight = sum(assets[sym] for sym in matched)
                             if total_weight <= 0:
                                 avg_ret = sum(matched.values()) / len(matched)
                             else:
-                                avg_ret = sum(matched[sym] * assets[sym] for sym in matched) / total_weight
+                                avg_ret = (
+                                    sum(matched[sym] * assets[sym] for sym in matched)
+                                    / total_weight
+                                )
                             # unrealized_pnl_pct 通常已是百分比，转为小数
                             avg_ret_dec = avg_ret / 100.0
-                            win_rate = sum(1 for v in matched.values() if v > 0) / len(matched)
-                            sp_map[sid] = type("_Row", (), {  # type: ignore[assignment]
-                                "win_rate": win_rate,
-                                "avg_return": avg_ret_dec,
-                                "return_std": None,
-                                "total": len(assets),
-                            })()
+                            win_rate = sum(1 for v in matched.values() if v > 0) / len(
+                                matched
+                            )
+                            sp_map[sid] = type(
+                                "_Row",
+                                (),
+                                {  # type: ignore[assignment]
+                                    "win_rate": win_rate,
+                                    "avg_return": avg_ret_dec,
+                                    "return_std": None,
+                                    "total": len(assets),
+                                },
+                            )()
                 except Exception as _fe:
-                    logger.debug(f"Broker-position fallback for strategy perf skipped: {_fe}")
+                    logger.debug(
+                        f"Broker-position fallback for strategy perf skipped: {_fe}"
+                    )
             meta_stmt = (
                 select(
                     Strat.id.label("strategy_id"),
@@ -894,7 +1044,9 @@ class DashboardV2Service:
                     func.max(SR.finished_at).label("last_run_at"),
                 )
                 .select_from(Strat)
-                .outerjoin(SR, and_(SR.strategy_id == Strat.id, SR.account_id == account_id))
+                .outerjoin(
+                    SR, and_(SR.strategy_id == Strat.id, SR.account_id == account_id)
+                )
                 .group_by(Strat.id, Strat.name, Strat.last_run_status)
                 .order_by(desc(func.max(SR.finished_at)))
                 .limit(10)
@@ -943,7 +1095,11 @@ class DashboardV2Service:
                 else:
                     std = float(getattr(perf, "return_std", None) or 0)
                     sharpe = round(avg_return / std, 2) if std > 1e-9 else 0.0
-                total = int(getattr(perf, "total_signals", None) or getattr(perf, "total", None) or 0)
+                total = int(
+                    getattr(perf, "total_signals", None)
+                    or getattr(perf, "total", None)
+                    or 0
+                )
                 results.append(
                     StrategyPerformance(
                         strategy_id=sid,
@@ -963,7 +1119,7 @@ class DashboardV2Service:
         except Exception as e:
             logger.warning(f"Strategy performance query failed: {e}")
             return []
-    
+
     # ============ 系统健康相关 ============
     async def _get_api_health(self) -> List[APIHealth]:
         """运行时探针检测 Tiger SDK 和 yfinance 可用性"""
@@ -973,8 +1129,10 @@ class DashboardV2Service:
         tiger_status = "degraded"
         tiger_latency = 9999.0
         try:
-            from app.broker.factory import get_tiger_client
             import time
+
+            from app.broker.factory import get_tiger_client
+
             tc = get_tiger_client()
             if tc is not None:
                 t0 = time.monotonic()
@@ -989,20 +1147,25 @@ class DashboardV2Service:
                 tiger_status = "down"
         except Exception:
             tiger_status = "degraded"
-        results.append(APIHealth(
-            provider="Tiger OpenAPI",
-            status=tiger_status,
-            success_rate=1.0 if tiger_status == "healthy" else 0.0,
-            avg_latency_ms=tiger_latency if tiger_status == "healthy" else 0.0,
-            rate_limit_remaining=999,
-            rate_limit_reset_at=None,
-        ))
+        results.append(
+            APIHealth(
+                provider="Tiger OpenAPI",
+                status=tiger_status,
+                success_rate=1.0 if tiger_status == "healthy" else 0.0,
+                avg_latency_ms=tiger_latency if tiger_status == "healthy" else 0.0,
+                rate_limit_remaining=999,
+                rate_limit_reset_at=None,
+            )
+        )
 
         # yfinance 探针
         yf_status = "degraded"
         yf_latency = 9999.0
         try:
-            import time, yfinance as yf
+            import time
+
+            import yfinance as yf
+
             t0 = time.monotonic()
             info = await asyncio.wait_for(
                 asyncio.to_thread(lambda: yf.Ticker("SPY").fast_info.last_price),
@@ -1012,21 +1175,24 @@ class DashboardV2Service:
             yf_status = "healthy" if info else "degraded"
         except Exception:
             yf_status = "degraded"
-        results.append(APIHealth(
-            provider="yfinance",
-            status=yf_status,
-            success_rate=1.0 if yf_status == "healthy" else 0.0,
-            avg_latency_ms=yf_latency if yf_status == "healthy" else 0.0,
-            rate_limit_remaining=9999,
-            rate_limit_reset_at=None,
-        ))
+        results.append(
+            APIHealth(
+                provider="yfinance",
+                status=yf_status,
+                success_rate=1.0 if yf_status == "healthy" else 0.0,
+                avg_latency_ms=yf_latency if yf_status == "healthy" else 0.0,
+                rate_limit_remaining=9999,
+                rate_limit_reset_at=None,
+            )
+        )
 
         return results
-    
+
     async def _count_system_alerts(self) -> int:
         """统计过去 24 小时内 FAILED 的策略运行数作为系统告警数"""
         try:
             from app.models.strategy import StrategyRun as SR
+
             cutoff = datetime.utcnow() - timedelta(hours=24)
             stmt = select(func.count(SR.id)).where(
                 and_(SR.status == "FAILED", SR.started_at >= cutoff)
@@ -1036,7 +1202,7 @@ class DashboardV2Service:
         except Exception as e:
             logger.debug(f"count_system_alerts failed: {e}")
             return 0
-    
+
     # ============ 市场热点相关 ============
     async def _get_market_hotspots(self) -> List[MarketHotspot]:
         """聚合近 7 天 TradingSignal 最活跃的标的作为市场热点"""
@@ -1067,32 +1233,39 @@ class DashboardV2Service:
         except Exception as e:
             logger.debug(f"market_hotspots query failed: {e}")
             return []
-    
+
     # ============ 待办事项相关 ============
     async def _get_todos(self, account_id: str) -> List[TodoItem]:
         """获取待办事项"""
         todos = []
         now = datetime.utcnow()
-        
+
         # 1. 价格告警
-        stmt = select(AlertHistory).where(
-            AlertHistory.account_id == account_id
-        ).order_by(desc(AlertHistory.trigger_time)).limit(5)
+        stmt = (
+            select(AlertHistory)
+            .where(AlertHistory.account_id == account_id)
+            .order_by(desc(AlertHistory.trigger_time))
+            .limit(5)
+        )
         result = await self.session.execute(stmt)
         alerts = result.scalars().all()
-        
+
         for alert in alerts:
-            trigger_price = float(alert.trigger_price) if alert.trigger_price is not None else 0.0
-            todos.append(TodoItem(
-                todo_type="alert",
-                priority="high",
-                title=f"{str(alert.symbol)} 价格告警",
-                description=f"价格触及 ${trigger_price:.2f}",
-                action_link=f"/alerts",
-                due_at=None,
-                created_at=alert.trigger_time,
-            ))
-        
+            trigger_price = (
+                float(alert.trigger_price) if alert.trigger_price is not None else 0.0
+            )
+            todos.append(
+                TodoItem(
+                    todo_type="alert",
+                    priority="high",
+                    title=f"{str(alert.symbol)} 价格告警",
+                    description=f"价格触及 ${trigger_price:.2f}",
+                    action_link=f"/alerts",
+                    due_at=None,
+                    created_at=alert.trigger_time,
+                )
+            )
+
         # 2. 到期计划
         today = date.today()
         stmt = select(TradingPlan).where(
@@ -1105,40 +1278,46 @@ class DashboardV2Service:
         )
         result = await self.session.execute(stmt)
         expiring_plans = list(result.scalars().all())
-        
+
         if expiring_plans:
-            todos.append(TodoItem(
-                todo_type="plan_expiring",
-                priority="high",
-                title=f"{len(expiring_plans)} 个计划今日到期",
-                description="请及时处理即将到期的交易计划",
-                action_link="/plans",
-                due_at=datetime.combine(today, datetime.max.time()),
-                created_at=now,
-            ))
-        
+            todos.append(
+                TodoItem(
+                    todo_type="plan_expiring",
+                    priority="high",
+                    title=f"{len(expiring_plans)} 个计划今日到期",
+                    description="请及时处理即将到期的交易计划",
+                    action_link="/plans",
+                    due_at=datetime.combine(today, datetime.max.time()),
+                    created_at=now,
+                )
+            )
+
         # 3. 待执行信号
         signal_count = await self._count_pending_signals(account_id)
         if signal_count > 0:
-            todos.append(TodoItem(
-                todo_type="signal_pending",
-                priority="medium",
-                title=f"{signal_count} 个信号待执行",
-                description="请审核并执行交易信号",
-                action_link="/quant-loop",
-                due_at=None,
-                created_at=now,
-            ))
-        
+            todos.append(
+                TodoItem(
+                    todo_type="signal_pending",
+                    priority="medium",
+                    title=f"{signal_count} 个信号待执行",
+                    description="请审核并执行交易信号",
+                    action_link="/quant-loop",
+                    due_at=None,
+                    created_at=now,
+                )
+            )
+
         return todos
-    
+
     async def _count_todos(self, account_id: str) -> int:
         """统计待办数量"""
         todos = await self._get_todos(account_id)
         return len(todos)
-    
+
     # ============ 性能趋势相关 ============
-    async def _get_performance_trend(self, account_id: str, days: int = 30) -> List[PerformanceTrend]:
+    async def _get_performance_trend(
+        self, account_id: str, days: int = 30
+    ) -> List[PerformanceTrend]:
         """获取性能趋势"""
         end_date = date.today()
         points = max(2, int(days))
@@ -1147,13 +1326,17 @@ class DashboardV2Service:
 
         # 读取窗口前一定范围内快照：用于窗口内命中 + 窗口外锚点（carry-forward）
         anchor_start = start_date - timedelta(days=60)
-        snap_stmt = select(EquitySnapshot).where(
-            and_(
-                EquitySnapshot.account_id == account_id,
-                EquitySnapshot.snapshot_date >= anchor_start,
-                EquitySnapshot.snapshot_date <= end_date,
+        snap_stmt = (
+            select(EquitySnapshot)
+            .where(
+                and_(
+                    EquitySnapshot.account_id == account_id,
+                    EquitySnapshot.snapshot_date >= anchor_start,
+                    EquitySnapshot.snapshot_date <= end_date,
+                )
             )
-        ).order_by(EquitySnapshot.snapshot_date)
+            .order_by(EquitySnapshot.snapshot_date)
+        )
         snap_result = await self.session.execute(snap_stmt)
         snapshots = list(snap_result.scalars().all())
 
@@ -1241,7 +1424,7 @@ class DashboardV2Service:
             prev_eq = eq
 
         return trend
-    
+
     # ============ 错误处理 ============
     def _get_fallback(self, index: int) -> Any:
         """获取错误回退值"""

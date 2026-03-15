@@ -1,7 +1,10 @@
 # 后端架构设计文档
 
 > **AI量化交易闭环系统** - Backend Design  
-> 版本：V11.0.1（已上线） | 更新日期：2026-03-14
+> 版本：V11.1.1（当前实现） | 更新日期：2026-03-15
+> 生产基线：V11.0.1（已上线）
+>
+> **V11.1.1 当前实现摘要（Trader Workbench Convergence & Architecture Simplification）**：本轮实现不新增平行控制面，而是在现有 FastAPI + service-oriented 结构上补齐三类治理能力：1）围绕 `app/services/read_models/` 建立 Dashboard / Order Book / System Monitor 三个工作台聚合读模型；2）router 继续薄化，新 workbench 路由遵守 `Annotated` 依赖注入与显式响应约定；3）read model 通过 public service API 获取上下文，避免跨层调用私有 helper，降低后续扩展时的耦合与复杂度。
 >
 > **V11.0.1 变更摘要（Capital Velocity & Autonomous Evolution OS）**：本版本在 V10.5.4 控制平面基线之上，新增 Capital Velocity、自感知、改进候选与进化治理预留四条主线：`ConvictionFrictionTracker` 跟踪近命中信号摩擦并支持 soft-relief 判定；`MetaStateSnapshotService` 聚合系统元状态快照；`ImprovementCandidateService` 自动生成结构化改进候选；`CapitalVelocityService` 为席位与资本利用率提供效率视角。所有能力继续受 feature flag、审计真源与 rollout discipline 约束。
 >
@@ -96,6 +99,24 @@ V11.0.1 不替代 V10.5.4 控制平面，而是在其之上增加“知道哪里
 - `EVOLUTION_GOVERNANCE_V1101_ENABLED`
 - `STYLE_ALIGNMENT_V1101_ENABLED`
 
+#### 1.2.5 V11.1.1 Workbench Read Model 治理切片
+
+V11.1.1 当前实现聚焦“工作台聚合读模型 + 薄路由 + 公共服务上下文”，而不是扩大交易主链：
+
+- `app/services/read_models/dashboard_summary.py`：聚合账户摘要与 capital velocity explainability
+- `app/services/read_models/order_book_workbench.py`：聚合智能订单簿主视图摘要
+- `app/services/read_models/system_monitor_workbench.py`：聚合 API 监控工作台读模型
+- `app/routers/dashboard_v2.py`：新增 `GET /dashboard/v2/workbench-summary`
+- `app/routers/order_book.py`：新增 `GET /api/v1/order-book/workbench`，并让 `/summary` 复用同一读模型摘要
+- `app/routers/system_monitor.py`：新增 `GET /api/v1/system-monitor/workbench`
+
+该切片的边界纪律：
+
+- workbench read model 只做查询聚合，不写业务状态；
+- router 只处理 request/response、认证与参数校验，不承载复杂拼装；
+- read model 依赖 public service API（例如 DashboardV2Service 的 workbench context），不跨层访问私有 helper；
+- 自动交易主链仍以 `AutonomousEngine.run_decision_cycle()` 为唯一生产编排入口。
+
 ### 1.3 项目结构
 
 ```
@@ -145,6 +166,7 @@ V11.0.1 不替代 V10.5.4 控制平面，而是在其之上增加“知道哪里
 │   │   ├── trade_attribution_engine.py # V10.2-M5 新增：三层归因（Alpha源/执行/仓位管理）
 │   │   ├── insight_service.py         # V10.2-M6 新增：InsightService + WeeklyInsightGenerator + ABTestEngine
 │   │   └── copilot_partner_service.py # V10.2-M7 新增：ProactiveIntelligence + DeepResearchEngine
+│   │   └── read_models/               # V11.1.1 当前实现：工作台聚合读模型
 │   │
 │   ├── engine/                        # 核心引擎
 │   │   ├── signal_engine.py

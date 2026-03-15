@@ -282,5 +282,6 @@ GET  /api/v1/autonomy/improvement-candidates    — Improvement Lab 候选列表
 - API.md - 接口文档（已对齐 V11.0.1 autonomy 端点）
 - BACKEND_DESIGN.md - 后端架构设计（已对齐 V11.0.1）
 - FRONTEND_DESIGN.md - 前端 UI/UX 设计（已对齐 V11.0.1 Autonomy 视图）
+- docs/architecture/v11_1_1_implementation_design.md - V11.1.1 当前实现设计（Workbench convergence / read models）
 - docs/architecture/v11_0_1_implementation_design.md - V11.0.1 当前实现设计
 - docs/archived/v11/v11.0/RELEASE_PLAN_V11.0.1.md - V11.0.1 历史规划归档

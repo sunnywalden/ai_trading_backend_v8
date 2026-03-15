@@ -110,11 +110,13 @@
 - **M4 Evolution Governance**：为后续进化治理与风格约束提供 flag-gated 基座
 - **前端重点**：Autonomy 工作台统一显示 MetaState / rollout flags / improvement 候选
 
-### Phase 17: Trader Workbench Convergence & Architecture Simplification 🔜 V11.1.1 规划中
+### Phase 17: Trader Workbench Convergence & Architecture Simplification ✅ V11.1.1 当前实现已对齐（代码版本）
 
-> 详细规划见：[docs/archived/v11/v11.1/RELEASE_PLAN_V11.1.1.md](../archived/v11/v11.1/RELEASE_PLAN_V11.1.1.md)
+> 当前实现设计见：[docs/architecture/v11_1_1_implementation_design.md](../architecture/v11_1_1_implementation_design.md)  
+> 历史规划见：[docs/archived/v11/v11.1/RELEASE_PLAN_V11.1.1.md](../archived/v11/v11.1/RELEASE_PLAN_V11.1.1.md)
 
-- **M1 平台功能页面治理**：以顶尖量化平台产品、交易经理、交易员视角收敛工作台，统一问题主入口、解释链与行动路径
-- **M2 前端架构治理**：thin-view、shared shell、typed contract、legacy alias/compat sunset，减少页面碎片与状态重复
-- **M3 后端架构治理**：bounded context、read model、thin router、单主编排路径，提升结构清晰度与可维护性
-- **M4 代码质量与性能治理**：统一 DTO、错误模型、注释边界、日志口径和性能预算，让新增功能默认符合最佳实践
+- **M1 平台功能页面治理（当前实现）**：`/dashboard`、`/order-book`、`/system-monitor` 完成统一壳层与解释条接入；`/task-management` 收口为系统监控 tasks Tab
+- **M2 前端架构治理（当前实现）**：落地 `src/components/workbench/*` 共享壳层与 typed workbench contract，减少页面重复摘要与重复取数
+- **M3 后端架构治理（当前实现）**：落地 Dashboard / Order Book / System Monitor 三个 read-model 路由，保持 thin-router 与单主编排路径纪律
+- **M4 代码质量与性能治理（当前实现）**：read model 改为依赖 public service API，FastAPI 新路由对齐 `Annotated` 依赖注入与显式响应，前端收紧类型与状态复用
+- **说明**：当前代码实现已对齐 V11.1.1 的首批工作台收敛目标；生产已上线基线仍为 V11.0.1

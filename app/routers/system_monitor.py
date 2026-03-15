@@ -25,33 +25,45 @@ from app.models.trading_plan import TradingPlan
 from app.models.trading_signal import TradingSignal
 from app.routers.api_monitoring import monitoring_health_check
 from app.schemas.lifecycle import PIPELINE_P50_BENCHMARKS, PIPELINE_STAGE_NAMES
-from app.schemas.system_monitor import (DataFlowDetailResponse,
-                                        DataFlowFailureSample,
-                                        DataFlowNodeStatus,
-                                        DataFlowOverviewResponse,
-                                        DataFlowSummary,
-                                        LifecycleExceptionItem,
-                                        LifecycleFsmStateMetric,
-                                        LifecycleHeadlineMetrics,
-                                        LifecycleIntentDetailResponse,
-                                        LifecycleOverviewResponse,
-                                        LifecycleStageMetric,
-                                        LifecycleTimelineEvent,
-                                        MonitorResponseMeta,
-                                        ServiceDetailResponse,
-                                        ServiceHealthItem,
-                                        ServiceHealthTimelineEvent,
-                                        ServiceModuleSummary,
-                                        ServiceOverviewResponse)
+from app.schemas.system_monitor import (
+    DataFlowDetailResponse,
+    DataFlowFailureSample,
+    DataFlowNodeStatus,
+    DataFlowOverviewResponse,
+    DataFlowSummary,
+    LifecycleExceptionItem,
+    LifecycleFsmStateMetric,
+    LifecycleHeadlineMetrics,
+    LifecycleIntentDetailResponse,
+    LifecycleOverviewResponse,
+    LifecycleStageMetric,
+    LifecycleTimelineEvent,
+    MonitorResponseMeta,
+    ServiceDetailResponse,
+    ServiceHealthItem,
+    ServiceHealthTimelineEvent,
+    ServiceModuleSummary,
+    ServiceOverviewResponse,
+)
 from app.services.api_monitoring_service import api_monitor
 from app.services.autonomy_health_monitor import autonomy_health_monitor
 from app.services.lifecycle_service import lifecycle_service
 from app.services.non_realtime_data_policy import NonRealtimeDataPolicyService
 from app.services.position_query_service import ACTIVE_POSITION_STATUSES
-from app.services.situational_awareness_service import \
-    situational_awareness_service
+from app.services.read_models import get_system_monitor_workbench
+from app.services.situational_awareness_service import situational_awareness_service
 
 router = APIRouter(prefix="/api/v1/system-monitor", tags=["V10.4.3 System Monitor"])
+
+
+@router.get("/workbench", summary="V11.1.1 System Monitor 工作台聚合")
+async def get_workbench_payload(
+    time_range: str = Query("day", description="day / hour / minute"),
+    db: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """返回系统监控 API Tab 所需的聚合读模型。"""
+    return await get_system_monitor_workbench(db, time_range=time_range)
+
 
 _STAGE_DEFAULT_THRESHOLDS: dict[int, tuple[float, float]] = {
     9: (6 * 3600.0, 24 * 3600.0),
@@ -176,7 +188,10 @@ def _classify_source_status(
 
 
 def _stage_thresholds(stage_id: int) -> tuple[float | None, float | None]:
-    if stage_id in PIPELINE_P50_BENCHMARKS and PIPELINE_P50_BENCHMARKS[stage_id] is None:
+    if (
+        stage_id in PIPELINE_P50_BENCHMARKS
+        and PIPELINE_P50_BENCHMARKS[stage_id] is None
+    ):
         return None, None
     p50 = PIPELINE_P50_BENCHMARKS.get(stage_id)
     if p50 is not None:
@@ -1104,9 +1119,11 @@ async def _build_service_payload(db: AsyncSession, window_minutes: int) -> tuple
             status=status,
             degraded=status != "HEALTHY",
             latency_ms=None,
-            p95_latency_ms=(overview.headline.p95_stage_seconds * 1000)
-            if overview.headline.p95_stage_seconds is not None
-            else None,
+            p95_latency_ms=(
+                (overview.headline.p95_stage_seconds * 1000)
+                if overview.headline.p95_stage_seconds is not None
+                else None
+            ),
             error_count_1h=overview.headline.exception_count,
             error_count_24h=overview.headline.exception_count,
             last_heartbeat_at=overview.meta.generated_at,
@@ -1236,9 +1253,9 @@ async def _build_service_payload(db: AsyncSession, window_minutes: int) -> tuple
         cooling_down = bool(runtime.get("cooling_down"))
         reason = str(runtime.get("reason") or "")
         status = (
-            "CRITICAL" if reason == "permission-denied"
-            else "WARN" if cooling_down
-            else "HEALTHY"
+            "CRITICAL"
+            if reason == "permission-denied"
+            else "WARN" if cooling_down else "HEALTHY"
         )
         remaining_seconds = int(runtime.get("remaining_seconds") or 0)
         last_error_message = str(runtime.get("message") or "")
@@ -1264,9 +1281,7 @@ async def _build_service_payload(db: AsyncSession, window_minutes: int) -> tuple
             last_error_code=(
                 "TIGER_OHLCV_PERMISSION_DENIED"
                 if reason == "permission-denied"
-                else "TIGER_OHLCV_RATE_LIMIT"
-                if reason == "rate-limit"
-                else None
+                else "TIGER_OHLCV_RATE_LIMIT" if reason == "rate-limit" else None
             ),
             last_error_message=last_error_message if cooling_down else None,
             last_recovered_at=runtime.get("last_recovered_at"),
@@ -1276,7 +1291,11 @@ async def _build_service_payload(db: AsyncSession, window_minutes: int) -> tuple
                 "external",
                 "broker",
                 "ohlcv",
-                *( ["cooldown", reason, f"remaining:{remaining_seconds}s"] if cooling_down else ["healthy"] ),
+                *(
+                    ["cooldown", reason, f"remaining:{remaining_seconds}s"]
+                    if cooling_down
+                    else ["healthy"]
+                ),
             ],
         )
 
@@ -1286,7 +1305,9 @@ async def _build_service_payload(db: AsyncSession, window_minutes: int) -> tuple
         runtime_advisory = runtime.get("runtime_advisory") or {}
         jobs = runtime.get("jobs") or {}
 
-        policy_safe = bool(runtime_signal.get("historical_cache_only")) and bool(runtime_advisory.get("historical_cache_only"))
+        policy_safe = bool(runtime_signal.get("historical_cache_only")) and bool(
+            runtime_advisory.get("historical_cache_only")
+        )
         last_runs: list[datetime] = []
         job_failures = 0
         job_messages: list[str] = []
@@ -1306,7 +1327,9 @@ async def _build_service_payload(db: AsyncSession, window_minutes: int) -> tuple
             )
 
         latest_run = max(last_runs) if last_runs else None
-        stale = latest_run is None or ((_now() - latest_run).total_seconds() > 24 * 3600)
+        stale = latest_run is None or (
+            (_now() - latest_run).total_seconds() > 24 * 3600
+        )
         if job_failures > 0 or stale:
             status = "WARN" if policy_safe else "CRITICAL"
         else:
@@ -1325,7 +1348,11 @@ async def _build_service_payload(db: AsyncSession, window_minutes: int) -> tuple
             error_count_24h=job_failures,
             last_heartbeat_at=latest_run or now,
             last_success_at=(latest_run if job_failures == 0 else None),
-            last_error_code=("NON_REALTIME_REFRESH_STALE" if stale else "NON_REALTIME_REFRESH_FAILED" if job_failures else None),
+            last_error_code=(
+                "NON_REALTIME_REFRESH_STALE"
+                if stale
+                else "NON_REALTIME_REFRESH_FAILED" if job_failures else None
+            ),
             last_error_message=(
                 "; ".join(job_messages)
                 if job_messages and (job_failures or stale or not policy_safe)
