@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.account_context import require_account_access
 from app.models.db import get_session
 from app.schemas.order_book import (
     OrderBookFilter,
@@ -48,8 +49,14 @@ DbSession = Annotated[AsyncSession, Depends(get_session)]
 @router.get("", response_model=OrderBookResponse, summary="全量订单视图")
 async def list_orders(
     db: DbSession,
-    direction: Annotated[Optional[str], Query(description="BUY / SELL")] = None,
-    account_id: Annotated[Optional[str], Query()] = None,
+    resolved_account_id: Annotated[
+        str,
+        Depends(require_account_access("ANALYZE")),
+    ],
+    direction: Annotated[
+        Optional[str],
+        Query(description="BUY / SELL"),
+    ] = None,
     market: Annotated[Optional[str], Query(description="US / HK / CN")] = None,
     plan_type: Annotated[Optional[str], Query()] = None,
     stage_min: Annotated[Optional[int], Query(ge=0, le=16)] = None,
@@ -64,7 +71,7 @@ async def list_orders(
     """
     filters = OrderBookFilter(
         direction=direction,
-        account_id=account_id,
+        account_id=resolved_account_id,
         market=market,
         plan_type=plan_type,
         stage_min=stage_min,
@@ -79,18 +86,20 @@ async def list_orders(
 @router.get("/summary", response_model=OrderBookSummary, summary="订单簿聚合汇总")
 async def get_summary(
     db: DbSession,
+    account_id: Annotated[str, Depends(require_account_access("ANALYZE"))],
 ):
     """返回各状态计数、PnL 汇总、平均置信度等。"""
-    workbench = await get_order_book_workbench(db)
+    workbench = await get_order_book_workbench(db, account_id)
     return workbench["summary"]
 
 
 @router.get("/workbench", summary="V11.1.1 智能订单簿工作台聚合")
 async def get_workbench(
     db: DbSession,
+    account_id: Annotated[str, Depends(require_account_access("ANALYZE"))],
 ) -> dict[str, Any]:
     """返回订单簿主工作台所需的聚合读模型。"""
-    return await get_order_book_workbench(db)
+    return await get_order_book_workbench(db, account_id)
 
 
 @router.get(
@@ -102,9 +111,10 @@ async def get_workbench(
 async def get_order_detail(
     plan_id: int,
     db: DbSession,
+    account_id: Annotated[str, Depends(require_account_access("ANALYZE"))],
 ):
     """返回单笔订单完整详情，包含 provenance_snapshot。"""
-    row = await order_book_service.get_order_detail(db, plan_id)
+    row = await order_book_service.get_order_detail(db, plan_id, account_id)
     if not row:
         raise HTTPException(
             status_code=404,
@@ -123,10 +133,15 @@ async def update_stop_loss(
     plan_id: int,
     body: StopLossUpdateRequest,
     db: DbSession,
+    account_id: Annotated[str, Depends(require_account_access("OPERATE"))],
 ):
     """修改指定订单的止损价，同时写入 FSM 转换日志。"""
     result = await order_book_service.update_stop_loss(
-        db, plan_id, body.new_stop_loss, body.reason
+        db,
+        plan_id,
+        body.new_stop_loss,
+        body.reason,
+        account_id,
     )
     if not result:
         raise HTTPException(
@@ -143,8 +158,10 @@ async def update_stop_loss(
 )
 async def get_situational_awareness(
     db: DbSession,
+    account_id: Annotated[str, Depends(require_account_access("ANALYZE"))],
 ):
     """REST 轮询备用接口（推荐使用 WebSocket /api/v1/ws/situational-awareness）。"""
+    del account_id
     try:
         return await asyncio.wait_for(
             situational_awareness_service.get_snapshot(db),
@@ -163,7 +180,10 @@ async def get_situational_awareness(
         OSError,
         SQLAlchemyError,
     ) as exc:
-        logger.warning("[OrderBook] situational-awareness snapshot failed: %s", exc)
+        logger.warning(
+            "[OrderBook] situational-awareness snapshot failed: %s",
+            exc,
+        )
 
     return SituationalAwarenessSnapshot(
         regime=RegimeBlock(),

@@ -140,6 +140,8 @@ async def ensure_mysql_tables() -> None:
     model_modules = [
         "app.models.algo_execution_task",
         "app.models.audit_log",
+        "app.models.broker_account",
+        "app.models.broker_account_credential",
         "app.models.autonomy_audit_log",
         "app.models.backtest_task",
         "app.models.copilot_message",
@@ -167,6 +169,7 @@ async def ensure_mysql_tables() -> None:
         "app.models.trade_pnl_attribution",
         "app.models.trading_plan",
         "app.models.user",
+        "app.models.user_broker_account_grant",
         "app.models.user_role_binding",
         "app.models.authorization_audit_log",
     ]

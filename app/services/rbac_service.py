@@ -13,11 +13,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.auth_context import UserContext
+from app.core.config import settings
 from app.models.authorization_audit_log import AuthorizationAuditLog
+from app.models.broker_account import BrokerAccount
 from app.models.permission import Permission
 from app.models.role import Role
 from app.models.role_permission_grant import RolePermissionGrant
 from app.models.user import User
+from app.models.user_broker_account_grant import UserBrokerAccountGrant
 from app.models.user_role_binding import UserRoleBinding
 
 ROLE_RESEARCHER = "RESEARCHER"
@@ -297,6 +300,14 @@ BUILTIN_PERMISSIONS: list[dict[str, str]] = [
         "description": "查看系统监控",
     },
     {
+        "code": "admin.broker_account.manage",
+        "resource": "admin",
+        "action": "broker_account.manage",
+        "scope": "global",
+        "access_mode": "write",
+        "description": "管理经纪账户与账户授权",
+    },
+    {
         "code": "common.dashboard.read",
         "resource": "common",
         "action": "dashboard.read",
@@ -560,6 +571,9 @@ class RbacService:
                 .selectinload(UserRoleBinding.role)
                 .selectinload(Role.permission_grants)
                 .selectinload(RolePermissionGrant.permission),
+                selectinload(User.account_grants).selectinload(
+                    UserBrokerAccountGrant.broker_account
+                ),
             )
             .execution_options(populate_existing=True)
         )
@@ -590,6 +604,33 @@ class RbacService:
                     permissions.add(grant.permission.code)
         if role_code == ROLE_ADMINISTRATOR:
             permissions.add("*")
+        active_grants = [
+            grant
+            for grant in user.account_grants
+            if grant.is_active
+            and grant.revoked_at is None
+            and grant.broker_account is not None
+            and grant.broker_account.is_active
+        ]
+        account_grants = {
+            grant.broker_account.account_id: grant.grant_level.upper()
+            for grant in active_grants
+        }
+        accessible_account_ids = [
+            account_id for account_id in account_grants.keys() if account_id
+        ]
+        if not accessible_account_ids:
+            fallback_account_id = settings.TIGER_ACCOUNT or "demo-account"
+            fallback_level = (
+                "ADMIN"
+                if role_code == ROLE_ADMINISTRATOR
+                else "OPERATE" if role_code == ROLE_TRADER else "ANALYZE"
+            )
+            accessible_account_ids = [fallback_account_id]
+            account_grants = {fallback_account_id: fallback_level}
+        default_account_id = settings.TIGER_ACCOUNT or accessible_account_ids[0]
+        if default_account_id not in account_grants:
+            default_account_id = accessible_account_ids[0]
         return UserContext(
             username=user.username,
             role=role_code,
@@ -601,6 +642,9 @@ class RbacService:
             is_system_seed=user.is_system_seed,
             must_change_password=user.must_change_password,
             legacy_mode=False,
+            accessible_account_ids=accessible_account_ids,
+            default_account_id=default_account_id,
+            account_grants=account_grants,
         )
 
     async def authenticate_user(

@@ -54,6 +54,13 @@ class User(Base):
         lazy="selectin",
         cascade="all, delete-orphan",
     )
+    account_grants = relationship(
+        "UserBrokerAccountGrant",
+        back_populates="user",
+        lazy="selectin",
+        foreign_keys="UserBrokerAccountGrant.user_id",
+        cascade="all, delete-orphan",
+    )
     authz_audit_logs = relationship(
         "AuthorizationAuditLog",
         back_populates="user",

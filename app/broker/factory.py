@@ -1,6 +1,8 @@
 from app.core.config import settings
-from .option_client_base import OptionBrokerClient
+
+from .broker_account_registry import BrokerAccountRegistry
 from .dummy_option_client import DummyOptionClient
+from .option_client_base import OptionBrokerClient
 from .tiger_option_client import TigerOptionClient
 
 # ---------- Singleton cache ----------
@@ -8,18 +10,23 @@ _broker_instance: OptionBrokerClient | None = None
 _tiger_instance: TigerOptionClient | None = None
 
 
-def make_option_broker_client() -> OptionBrokerClient:
+def make_option_broker_client(account_id: str | None = None) -> OptionBrokerClient:
     """根据配置返回 Tiger 或显式允许的 Dummy 客户端（单例，进程内复用）。
 
     - 如果在 .env 中配置了 TIGER_PRIVATE_KEY_PATH / TIGER_ID，则用 TigerOptionClient；
     - 否则仅在显式允许时退回 DummyOptionClient。
     """
+    if settings.BROKER_ACCOUNT_REGISTRY_V1131_ENABLED:
+        return BrokerAccountRegistry.get(account_id or settings.TIGER_ACCOUNT)
+
     global _broker_instance
     if _broker_instance is not None:
         return _broker_instance
 
     if settings.TIGER_PRIVATE_KEY_PATH and settings.TIGER_ID:
-        print(f"[BrokerFactory] Creating TigerOptionClient singleton (account={settings.TIGER_ACCOUNT})")
+        print(
+            f"[BrokerFactory] Creating TigerOptionClient singleton (account={settings.TIGER_ACCOUNT})"
+        )
         _broker_instance = TigerOptionClient(
             private_key_path=settings.TIGER_PRIVATE_KEY_PATH,
             tiger_id=settings.TIGER_ID,
@@ -36,8 +43,12 @@ def make_option_broker_client() -> OptionBrokerClient:
     return _broker_instance
 
 
-def get_tiger_client() -> TigerOptionClient | None:
+def get_tiger_client(account_id: str | None = None) -> TigerOptionClient | None:
     """获取 Tiger 客户端单例实例。"""
+    if settings.BROKER_ACCOUNT_REGISTRY_V1131_ENABLED:
+        broker = BrokerAccountRegistry.get(account_id or settings.TIGER_ACCOUNT)
+        return broker if isinstance(broker, TigerOptionClient) else None
+
     global _tiger_instance
     if _tiger_instance is not None:
         return _tiger_instance
@@ -59,9 +70,10 @@ def get_tiger_client() -> TigerOptionClient | None:
 
 # ---------- HK Symbol Helpers ----------
 
+
 def is_hk_stock(symbol: str) -> bool:
     """判断是否为港股代码。
-    
+
     规则：
     - 以 ".HK" 结尾（不区分大小写），如 "0700.HK"
     - 以 "HK" 结尾且前面是数字，如 "0700HK"
@@ -79,7 +91,7 @@ def is_hk_stock(symbol: str) -> bool:
 
 def normalize_hk_symbol(symbol: str) -> str:
     """将港股代码统一为 5 位零填充字符串（Tiger SDK 格式）。
-    
+
     示例：
       "700"      -> "00700"
       "0700.HK"  -> "00700"

@@ -3,9 +3,10 @@
 # 产品需求文档 (PRD)
 
 > **AI量化交易闭环系统** - 个人美港股智能交易平台  
-> 版本：V11.1.1（当前实现） | 更新日期：2026-03-15  
-> 生产基线：V11.0.1（已上线）  
-> 变更摘要（V11.1.1 当前实现）：Trader Workbench Convergence & Architecture Simplification——统一工作台壳层、ExplainabilityStrip、typed contract 与 workbench read model，对齐当前代码能力与版本口径。  
+> 版本：V11.2.1（当前实现 & 生产基线，已上线） | 更新日期：2026-03-15  
+> 下一版本规划：V11.3.1 Multi-Account Support & Account-Scoped Data Governance  
+> 变更摘要（V11.2.1 当前实现）：**RBAC & Role Workbench**——在 V11.1.1 工作台基线上建立正式 RBAC 身份治理层：六张核心表（roles/permissions/users/user_role_bindings/role_permission_grants/authorization_audit_logs）、JWT payload 扩展（role/permissions/permissions_version/feature_flags/must_change_password/is_system_seed）、`require_permission()` / `require_any_role()` 依赖项收口敏感路由、四类角色工作台首页（Researcher/Trader/Supervisor/Administrator）、Admin API 全套接口、强制改密闭环、迁移脚本与四个 feature flags。  
+> 变更摘要（V11.1.1 已上线）：Trader Workbench Convergence & Architecture Simplification——统一工作台壳层、ExplainabilityStrip、typed contract 与 workbench read model，对齐当前代码能力与版本口径。  
 > 变更摘要（V11.0.1 已上线）：**Capital Velocity & Autonomous Evolution OS**——在 V10.5.4 控制平面基线之上，围绕 **Capital Velocity**（近命中信号摩擦跟踪、闲置资本感知、资本轮转效率提升）、**Self-Perception**（MetaState Snapshot、False-Hold Alert、模型阻断画像）、**Improvement Engine**（自动生成参数/模块级改进候选）与 **Evolution Governance**（flag-gated 进化治理与风格约束预留）四条主线推进，重点解释“为什么资金闲置、为什么信号被卡住、哪里值得改进”。  
 > 变更摘要（V10.5.4 基线）：**Signal Pipeline Integrity & Control-Plane Hardening**——V10.5.4 已作为 V11.0.1 的前序控制平面基线，提供 `signal_origin_mode`、canonical signal payload、原生状态迁移与渐进放量纪律。  
 > 变更摘要（V10.5.2 交付）：**组合席位竞争引擎（Capacity-Aware Admission & Replacement Engine）**——把持仓上限从刚性拒绝规则升级为动态席位分配机制：新增 Unified Candidate Pool（当前持仓 + 新信号统一候选池）+ 统一准入评分 admission_score = alpha_quality - replacement_friction - risk_penalty + regime_fit，满仓时按分数淘汰末位 N 个对象（持仓到EXIT、信号到REJECTED_BY_CAPACITY_REPLACEMENT）；引入替换保护带（MIN_REPLACEMENT_EDGE_BPS / MAX_REPLACEMENTS_PER_CYCLE / MIN_HOLD_MINUTES / REPLACEMENT_COOLDOWN_MINUTES）防止过度翻仓；Incumbent Decay Model 让持仓持续参与席位竞争；新增 capacity_decision_audit_log 全量审计；支持 CAPACITY_REPLACEMENT_DRY_RUN 先观测再放量；前端 /portfolio、/autonomy、/order-book 增加席位竞争结果可视化。  
@@ -21,8 +22,9 @@
 > 变更摘要（V10.1）：**兑现承诺 + 打磨质量 + 扩展边界**——Tiger 真实下单接入（覆盖美股/港股/期权）、FULL 模式完整自主交易闭环、Copilot 操作指令执行落地、Dashboard 所有 TODO 指标真实化、AI 组合级决策升级（结构化 JSON 输出 + 批量组合决策）、ETF 标的池正式支持、港股支持（Tiger API 统一，无需 Futu）、Paper→Live 毕业自动化、Dashboard WebSocket 实时推送；**本版本明确不含 Telegram 通知，FULL 模式具备完全自主交易能力**
 >
 > 历史版本：V10.0（2026-02-24）变更摘要见下方历史记录节  
-> 当前代码实现：**V11.1.1** | 实现设计：[V11.1.1 Implementation Design](../architecture/v11_1_1_implementation_design.md)  
-> 当前已上线版本：**V11.0.1**（已发布） | 实现设计：[V11.0.1 Implementation Design](../architecture/v11_0_1_implementation_design.md)  
+> 当前代码实现：**V11.2.1** | 实现设计：[V11.2.1 RBAC Workbench Design](../architecture/v11_2_1_rbac_workbench_design.md)  
+> 当前已上线版本：**V11.2.1**（已发布） | 前序参考：[V11.1.1 Implementation Design](../architecture/v11_1_1_implementation_design.md) | [V11.0.1 Implementation Design](../architecture/v11_0_1_implementation_design.md)  
+> 下一版本规划：[V11.3.1 Release Plan](../archived/v11/v11.3/RELEASE_PLAN_V11.3.1.md) | [V11.3.1 实现设计](../architecture/v11_3_1_multi_account_design.md)  
 > 历史规划归档：[V11.0.1 Release Plan](../archived/v11/v11.0/RELEASE_PLAN_V11.0.1.md) | [V10.5.4 Release Plan](../archived/v10/v10.5/RELEASE_PLAN_V10.5.4.md)
 
 ---
