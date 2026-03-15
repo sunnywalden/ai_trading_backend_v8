@@ -26,9 +26,13 @@ V11.1.1 当前实现不是继续横向扩页，也不是重做交易主链，而
   - `src/views/DashboardV2Page.vue`
   - `src/views/IntelligentOrderBookPage.vue`
   - `src/views/SystemMonitorPage.vue`
+  - `src/views/PortfolioPage.vue`
+  - `src/views/AutonomyPage.vue`
 - 共享组件：
   - `src/components/workbench/WorkbenchShell.vue`
   - `src/components/workbench/ExplainabilityStrip.vue`
+- 前端构建治理：
+  - `vite.config.ts` 通过 `manualChunks` 拆分 `echarts` / `element-plus` / `axios`
 - 路由收口：
   - `/task-management` 复用 `SystemMonitorPage.vue`
   - 通过 `tab=tasks` 与路径识别进入任务管理视图
@@ -97,6 +101,24 @@ V11.1.1 当前实现不是继续横向扩页，也不是重做交易主链，而
 - Order Book：继续基于聚合 summary 做 explainability 消费
 
 这意味着页面不再直接假设后端“顺手返回什么字段都能吃”，而是通过更稳定的 DTO 面向工作台开发。
+
+### 3.5 Portfolio & Autonomy convergence
+
+当前实现已把 `/portfolio` 与 `/autonomy` 也纳入统一 workbench shell：
+
+- `PortfolioPage.vue` 使用 `WorkbenchShell + ExplainabilityStrip` 统一呈现目标权重、风险预算与执行摩擦的解释链；
+- `AutonomyPage.vue` 使用同一套工作台骨架统一呈现自主级别、元状态、False-Hold 告警与控制面建议动作；
+- 两个页面仍保留各自领域内容密度，但不再各自维护独立的 header / shell / explainability 语言。
+
+### 3.6 Bundle splitting discipline
+
+为避免主入口继续膨胀，当前实现在 `vite.config.ts` 中引入 `manualChunks`：
+
+- `echarts` 拆为独立 vendor chunk
+- `element-plus` 拆为独立 vendor chunk
+- `axios` 拆为独立 vendor chunk
+
+这样做的直接收益是：主入口 JS 明显小于此前的单包输出，重型 UI / chart 依赖不再全部压在 app entry 上。
 
 ---
 
