@@ -32,6 +32,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 
 from app.broker.factory import make_option_broker_client
 from app.core.auth import get_current_user, login_for_access_token
+from app.core.authz import require_any_role, require_permission
 from app.core.cache import cache
 from app.core.proxy import ProxyConfig, apply_proxy_env
 from app.engine.auto_hedge_engine import AutoHedgeEngine
@@ -94,13 +95,14 @@ from app.routers import signal_quality  # V10.4.2: 信号精英化漏斗
 from app.routers import system_monitor  # V10.4.3: 系统监控增强
 from app.routers import task_config  # V10: 统一任务配置管理
 from app.routers import war_room  # V10.3.3: 战情室
+from app.routers import admin_rbac
 from app.routers import alerts as v9_alerts
-from app.routers import api_monitoring
+from app.routers import api_monitoring, authz
 from app.routers import dashboard as v9_dashboard
 from app.routers import equity as v9_equity
 from app.routers import journal as v9_journal
 from app.routers import orders as v9_orders
-from app.routers import position_macro, strategy, trading_plan
+from app.routers import position_macro, role_workbench, strategy, trading_plan
 from app.routers import websocket as v9_websocket
 from app.schemas.ai_advice import (
     AiAdviceRequest,
@@ -736,7 +738,14 @@ app.include_router(
     api_monitoring.router,
     prefix="/api/v1",
     tags=["API监控"],
-    dependencies=[Depends(get_current_user)],
+    dependencies=[
+        Depends(get_current_user),
+        Depends(
+            require_permission(
+                "admin.system.read", resource="admin", action="system.read"
+            )
+        ),
+    ],
 )
 app.include_router(
     trading_plan.router,
@@ -749,13 +758,33 @@ app.include_router(
     strategy.router,
     prefix="/api/v1",
     tags=["策略管理"],
-    dependencies=[Depends(get_current_user)],
+    dependencies=[
+        Depends(get_current_user),
+        Depends(
+            require_any_role(
+                "RESEARCHER",
+                "TRADER",
+                "ADMINISTRATOR",
+                resource="research",
+                action="strategy.read",
+            )
+        ),
+    ],
 )
 app.include_router(
     quant_loop.router, dependencies=[Depends(get_current_user)]
 )  # NEW: 量化交易闭环
 app.include_router(
-    task_config.router, prefix="/api/v1", dependencies=[Depends(get_current_user)]
+    task_config.router,
+    prefix="/api/v1",
+    dependencies=[
+        Depends(get_current_user),
+        Depends(
+            require_permission(
+                "admin.task.operate", resource="admin", action="task.operate"
+            )
+        ),
+    ],
 )
 # execution_center.router removed in V11.1.1 (V11.1.1-sunset)
 # ai_advisor.router removed in V11.1.1 (V11.1.1-sunset)
@@ -766,7 +795,18 @@ app.include_router(
     alpha_lab.router, dependencies=[Depends(get_current_user)]
 )  # V10.5.1: Alpha Lab
 app.include_router(
-    execution_policy.router, dependencies=[Depends(get_current_user)]
+    execution_policy.router,
+    dependencies=[
+        Depends(get_current_user),
+        Depends(
+            require_any_role(
+                "TRADER",
+                "ADMINISTRATOR",
+                resource="trading",
+                action="execution_policy.read",
+            )
+        ),
+    ],
 )  # V10.5.1: Execution Policy
 app.include_router(
     governance.router, dependencies=[Depends(get_current_user)]
@@ -802,40 +842,134 @@ app.include_router(
 app.include_router(v9_websocket.router, prefix="/api/v1")
 # V10 新路由注册
 app.include_router(
-    portfolio.router, prefix="/api/v1", dependencies=[Depends(get_current_user)]
+    portfolio.router,
+    prefix="/api/v1",
+    dependencies=[
+        Depends(get_current_user),
+        Depends(
+            require_any_role(
+                "RESEARCHER",
+                "ADMINISTRATOR",
+                resource="research",
+                action="portfolio.read",
+            )
+        ),
+    ],
 )
 app.include_router(
-    etf.router, prefix="/api/v1", dependencies=[Depends(get_current_user)]
+    etf.router,
+    prefix="/api/v1",
+    dependencies=[
+        Depends(get_current_user),
+        Depends(
+            require_any_role(
+                "RESEARCHER",
+                "ADMINISTRATOR",
+                resource="research",
+                action="etf.read",
+            )
+        ),
+    ],
 )
 app.include_router(
     autonomy.router, prefix="/api/v1", dependencies=[Depends(get_current_user)]
 )
 app.include_router(
-    backtest.router, prefix="/api/v1", dependencies=[Depends(get_current_user)]
+    backtest.router,
+    prefix="/api/v1",
+    dependencies=[
+        Depends(get_current_user),
+        Depends(
+            require_any_role(
+                "RESEARCHER",
+                "ADMINISTRATOR",
+                resource="research",
+                action="backtest.read",
+            )
+        ),
+    ],
 )
 app.include_router(
     copilot.router, prefix="/api/v1", dependencies=[Depends(get_current_user)]
 )
 # stress_test.router removed in V11.1.1; use /api/v1/backtest/stress-test/ (V11.1.1-migration)
 app.include_router(
-    paper_trading.router, prefix="/api/v1", dependencies=[Depends(get_current_user)]
+    paper_trading.router,
+    prefix="/api/v1",
+    dependencies=[
+        Depends(get_current_user),
+        Depends(
+            require_any_role(
+                "TRADER",
+                "ADMINISTRATOR",
+                resource="trading",
+                action="paper.read",
+            )
+        ),
+    ],
 )
 app.include_router(
-    options_analysis.router, prefix="/api/v1", dependencies=[Depends(get_current_user)]
+    options_analysis.router,
+    prefix="/api/v1",
+    dependencies=[
+        Depends(get_current_user),
+        Depends(
+            require_any_role(
+                "RESEARCHER",
+                "ADMINISTRATOR",
+                resource="research",
+                action="options.read",
+            )
+        ),
+    ],
 )
 app.include_router(
     execution_algo.router, prefix="/api/v1", dependencies=[Depends(get_current_user)]
 )
 app.include_router(
-    position_eval.router, prefix="/api/v1", dependencies=[Depends(get_current_user)]
+    position_eval.router,
+    prefix="/api/v1",
+    dependencies=[
+        Depends(get_current_user),
+        Depends(
+            require_any_role(
+                "TRADER",
+                "ADMINISTRATOR",
+                resource="trading",
+                action="position_evaluation.read",
+            )
+        ),
+    ],
 )
 # V10.2 新路由注册
 app.include_router(
-    regime.router, dependencies=[Depends(get_current_user)]
+    regime.router,
+    dependencies=[
+        Depends(get_current_user),
+        Depends(
+            require_any_role(
+                "RESEARCHER",
+                "ADMINISTRATOR",
+                resource="research",
+                action="regime.read",
+            )
+        ),
+    ],
 )  # V10.2-M1: 市场体制感知
 # V10.2-M2-M8 路由注册
 app.include_router(
-    events.router, dependencies=[Depends(get_current_user)]
+    events.router,
+    dependencies=[
+        Depends(get_current_user),
+        Depends(
+            require_any_role(
+                "RESEARCHER",
+                "ADMINISTRATOR",
+                resource="research",
+                action="events.read",
+            )
+        ),
+    ],
 )  # M2: 事件日历
 app.include_router(
     position_lifecycle.router, dependencies=[Depends(get_current_user)]
@@ -844,16 +978,50 @@ app.include_router(
     signal_fusion.router, dependencies=[Depends(get_current_user)]
 )  # M4: 信号融合
 app.include_router(
-    attribution.router, dependencies=[Depends(get_current_user)]
+    attribution.router,
+    dependencies=[
+        Depends(get_current_user),
+        Depends(
+            require_any_role(
+                "TRADER",
+                "SUPERVISOR",
+                "ADMINISTRATOR",
+                resource="trading",
+                action="attribution.read",
+            )
+        ),
+    ],
 )  # M5: 交易归因
 app.include_router(
     insights.router, dependencies=[Depends(get_current_user)]
 )  # M6: AI 洞察
 app.include_router(
-    lifecycle.router, dependencies=[Depends(get_current_user)]
+    lifecycle.router,
+    dependencies=[
+        Depends(get_current_user),
+        Depends(
+            require_any_role(
+                "TRADER",
+                "ADMINISTRATOR",
+                resource="trading",
+                action="trade_lifecycle.read",
+            )
+        ),
+    ],
 )  # V10.3: 交易生命周期中心
 app.include_router(
-    order_book.router, dependencies=[Depends(get_current_user)]
+    order_book.router,
+    dependencies=[
+        Depends(get_current_user),
+        Depends(
+            require_any_role(
+                "TRADER",
+                "ADMINISTRATOR",
+                resource="trading",
+                action="order_book.read",
+            )
+        ),
+    ],
 )  # V10.3: 智能订单簿
 # V10.3.3 新路由注册
 app.include_router(
@@ -875,11 +1043,33 @@ app.include_router(
     capacity_arbiter.router, dependencies=[Depends(get_current_user)]
 )  # V10.5.2: 席位竞争仲裁
 app.include_router(
-    system_monitor.router, dependencies=[Depends(get_current_user)]
+    system_monitor.router,
+    dependencies=[
+        Depends(get_current_user),
+        Depends(
+            require_permission(
+                "admin.system.read", resource="admin", action="system.read"
+            )
+        ),
+    ],
 )  # V10.4.3: 系统监控增强
 app.include_router(
-    positions.router, dependencies=[Depends(get_current_user)]
+    positions.router,
+    dependencies=[
+        Depends(get_current_user),
+        Depends(
+            require_any_role(
+                "TRADER",
+                "ADMINISTRATOR",
+                resource="trading",
+                action="positions.read",
+            )
+        ),
+    ],
 )  # V10.4.4: Position-centric
+app.include_router(authz.router)
+app.include_router(role_workbench.router)
+app.include_router(admin_rbac.router)
 
 
 @app.get("/health")
@@ -1121,7 +1311,11 @@ async def rebuild_behavior_stats(
     payload: dict = Body(...),
     session: AsyncSession = Depends(get_session),
     async_run: bool = Query(False, description="是否异步执行"),
-    current_user: str = Depends(get_current_user),
+    _authorized=Depends(
+        require_permission(
+            "admin.task.operate", resource="admin", action="task.operate"
+        )
+    ),
     t: Callable = Depends(get_translator),
 ):
     """重计算最近 N 天的行为评分（基于老虎历史成交 + 盈亏数据）。
@@ -1172,7 +1366,11 @@ async def rebuild_behavior_stats(
 
 
 @app.get("/api/v1/admin/scheduler/jobs")
-async def get_scheduled_jobs(current_user: str = Depends(get_current_user)):
+async def get_scheduled_jobs(
+    _authorized=Depends(
+        require_permission("admin.system.read", resource="admin", action="system.read")
+    ),
+):
     """获取所有定时任务状态"""
     from app.jobs.scheduler import get_jobs
 
@@ -1185,7 +1383,12 @@ async def get_scheduled_jobs(current_user: str = Depends(get_current_user)):
 
 @app.post("/api/v1/admin/scheduler/jobs/{job_id}/pause")
 async def pause_scheduled_job(
-    job_id: str, current_user: str = Depends(get_current_user)
+    job_id: str,
+    _authorized=Depends(
+        require_permission(
+            "admin.task.operate", resource="admin", action="task.operate"
+        )
+    ),
 ):
     """暂停指定的定时任务"""
     from app.jobs.scheduler import pause_job
@@ -1199,7 +1402,12 @@ async def pause_scheduled_job(
 
 @app.post("/api/v1/admin/scheduler/jobs/{job_id}/resume")
 async def resume_scheduled_job(
-    job_id: str, current_user: str = Depends(get_current_user)
+    job_id: str,
+    _authorized=Depends(
+        require_permission(
+            "admin.task.operate", resource="admin", action="task.operate"
+        )
+    ),
 ):
     """恢复指定的定时任务"""
     from app.jobs.scheduler import resume_job
@@ -1215,7 +1423,11 @@ async def resume_scheduled_job(
 async def update_job_schedule(
     job_id: str,
     payload: JobScheduleRequest,
-    current_user: str = Depends(get_current_user),
+    _authorized=Depends(
+        require_permission(
+            "admin.task.operate", resource="admin", action="task.operate"
+        )
+    ),
     t: Callable = Depends(get_translator),
 ):
     """按小时/分钟/时区更新定时任务的触发 cron"""
