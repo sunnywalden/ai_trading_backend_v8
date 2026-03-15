@@ -13,15 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.logging_config import setup_logging
 from app.i18n import get_translator
-from app.models.db import (
-    SessionLocal,
-    engine,
-    ensure_mysql_indexes,
-    ensure_mysql_schema_updates,
-    ensure_mysql_tables,
-    get_session,
-    redis_client,
-)
+from app.models.db import (SessionLocal, engine, ensure_mysql_indexes,
+                           ensure_mysql_schema_updates, ensure_mysql_tables,
+                           get_session, redis_client)
 
 # 初始化系统日志
 setup_logging()
@@ -37,22 +31,18 @@ from app.core.cache import cache
 from app.core.proxy import ProxyConfig, apply_proxy_env
 from app.engine.auto_hedge_engine import AutoHedgeEngine
 from app.jobs.data_refresh_jobs import register_all_jobs
-from app.jobs.ghost_trade_jobs import update_ghost_trades_pnl  # V10.4.2: 幽灵交易追踪
-from app.jobs.paper_graduation_job import (
-    register_paper_graduation_job,
-)  # V10.1: Paper 毕业检查
+from app.jobs.ghost_trade_jobs import \
+    update_ghost_trades_pnl  # V10.4.2: 幽灵交易追踪
+from app.jobs.paper_graduation_job import \
+    register_paper_graduation_job  # V10.1: Paper 毕业检查
 from app.jobs.quant_loop_jobs import register_quant_loop_jobs  # NEW: 闭环定时任务
 from app.jobs.regime_jobs import register_regime_jobs  # V10.2-M1: 市场体制分类任务
-from app.jobs.scheduler import (
-    add_job,
-    init_scheduler,
-    pause_scheduler,
-    shutdown_scheduler,
-    start_scheduler,
-)
-from app.jobs.task_config_jobs import register_task_config_jobs  # V10: 动态配置同步任务
-from app.providers.market_data_provider import MarketDataProvider, market_data_provider
-
+from app.jobs.scheduler import (add_job, init_scheduler, pause_scheduler,
+                                shutdown_scheduler, start_scheduler)
+from app.jobs.task_config_jobs import \
+    register_task_config_jobs  # V10: 动态配置同步任务
+from app.providers.market_data_provider import (MarketDataProvider,
+                                                market_data_provider)
 # hotspots removed in V11.1.1 – no active frontend caller, frontend redirects to /opportunities
 # stress_test removed in V11.1.1 – endpoints migrated to backtest.py (see /backtest/stress-test/)
 # execution_center removed in V11.1.1 – no active frontend caller (PlanEditDialog is orphan)
@@ -104,19 +94,11 @@ from app.routers import journal as v9_journal
 from app.routers import orders as v9_orders
 from app.routers import position_macro, role_workbench, strategy, trading_plan
 from app.routers import websocket as v9_websocket
-from app.schemas.ai_advice import (
-    AiAdviceRequest,
-    AiAdviceResponse,
-    KlineAnalysisRequest,
-    KlineAnalysisResponse,
-    SymbolSearchResponse,
-)
-from app.schemas.ai_state import (
-    AiStateView,
-    ExposureView,
-    LimitsView,
-    SymbolBehaviorView,
-)
+from app.schemas.ai_advice import (AiAdviceRequest, AiAdviceResponse,
+                                   KlineAnalysisRequest, KlineAnalysisResponse,
+                                   SymbolSearchResponse)
+from app.schemas.ai_state import (AiStateView, ExposureView, LimitsView,
+                                  SymbolBehaviorView)
 from app.schemas.scheduler import JobScheduleRequest
 from app.services.ai_advice_service import AiAdviceService
 from app.services.behavior_scoring_service import BehaviorScoringService
@@ -222,7 +204,8 @@ def _begin_fast_shutdown(source: str) -> None:
     logger.info("[Shutdown] Fast shutdown triggered by %s", source)
 
     try:
-        from app.routers.websocket import close_all_websockets, mark_shutdown_started
+        from app.routers.websocket import (close_all_websockets,
+                                           mark_shutdown_started)
 
         mark_shutdown_started()
         loop = asyncio.get_running_loop()
@@ -397,7 +380,8 @@ async def _warm_up_caches() -> None:
 
     # 2. Dashboard 净值汇总
     try:
-        from app.services.dashboard_v2_service import DashboardV2Service  # type: ignore
+        from app.services.dashboard_v2_service import \
+            DashboardV2Service  # type: ignore
 
         async with SessionLocal() as _db:
             svc = DashboardV2Service(_db)
@@ -660,9 +644,8 @@ async def lifespan(app: FastAPI):
 
     # V10.2-M1: 注册体制感知事件处理器（EventBus）
     try:
-        from app.services.regime_strategy_allocator import (
-            register_handlers as _reg_regime_handlers,
-        )
+        from app.services.regime_strategy_allocator import \
+            register_handlers as _reg_regime_handlers
 
         _reg_regime_handlers()
     except Exception as _e:
@@ -710,6 +693,11 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
 
+ADMIN_SYSTEM_READ_PERMISSION = "admin.system.read"
+ADMIN_SYSTEM_READ_ACTION = "system.read"
+ADMIN_TASK_OPERATE_PERMISSION = "admin.task.operate"
+ADMIN_TASK_OPERATE_ACTION = "task.operate"
+
 # 配置CORS中间件
 app.add_middleware(
     CORSMiddleware,
@@ -742,7 +730,9 @@ app.include_router(
         Depends(get_current_user),
         Depends(
             require_permission(
-                "admin.system.read", resource="admin", action="system.read"
+                ADMIN_SYSTEM_READ_PERMISSION,
+                resource="admin",
+                action=ADMIN_SYSTEM_READ_ACTION,
             )
         ),
     ],
@@ -772,7 +762,18 @@ app.include_router(
     ],
 )
 app.include_router(
-    quant_loop.router, dependencies=[Depends(get_current_user)]
+    quant_loop.router,
+    dependencies=[
+        Depends(get_current_user),
+        Depends(
+            require_any_role(
+                "TRADER",
+                "ADMINISTRATOR",
+                resource="trading",
+                action="quant_loop.read",
+            )
+        ),
+    ],
 )  # NEW: 量化交易闭环
 app.include_router(
     task_config.router,
@@ -781,7 +782,9 @@ app.include_router(
         Depends(get_current_user),
         Depends(
             require_permission(
-                "admin.task.operate", resource="admin", action="task.operate"
+                ADMIN_TASK_OPERATE_PERMISSION,
+                resource="admin",
+                action=ADMIN_TASK_OPERATE_ACTION,
             )
         ),
     ],
@@ -809,10 +812,31 @@ app.include_router(
     ],
 )  # V10.5.1: Execution Policy
 app.include_router(
-    governance.router, dependencies=[Depends(get_current_user)]
+    governance.router,
+    dependencies=[
+        Depends(get_current_user),
+        Depends(
+            require_any_role(
+                "RESEARCHER",
+                "ADMINISTRATOR",
+                resource="research",
+                action="governance.read",
+            )
+        ),
+    ],
 )  # V10.5.1: Promotion Pipeline
 app.include_router(
-    live_safety.router, dependencies=[Depends(get_current_user)]
+    live_safety.router,
+    dependencies=[
+        Depends(get_current_user),
+        Depends(
+            require_permission(
+                ADMIN_SYSTEM_READ_PERMISSION,
+                resource="admin",
+                action=ADMIN_SYSTEM_READ_ACTION,
+            )
+        ),
+    ],
 )  # V10.5.1: M4 Live Safety Guard
 
 # V9 路由注册 (deprecated=True; will be removed in V11.2)
@@ -872,7 +896,19 @@ app.include_router(
     ],
 )
 app.include_router(
-    autonomy.router, prefix="/api/v1", dependencies=[Depends(get_current_user)]
+    autonomy.router,
+    prefix="/api/v1",
+    dependencies=[
+        Depends(get_current_user),
+        Depends(
+            require_any_role(
+                "TRADER",
+                "ADMINISTRATOR",
+                resource="trading",
+                action="autonomy.read",
+            )
+        ),
+    ],
 )
 app.include_router(
     backtest.router,
@@ -1028,10 +1064,33 @@ app.include_router(
     observability.router, dependencies=[Depends(get_current_user)]
 )  # V10.3.3: 可观测性 2.0
 app.include_router(
-    ai_hub.router, dependencies=[Depends(get_current_user)]
+    ai_hub.router,
+    dependencies=[
+        Depends(get_current_user),
+        Depends(
+            require_any_role(
+                "RESEARCHER",
+                "TRADER",
+                "ADMINISTRATOR",
+                resource="research",
+                action="ai_hub.read",
+            )
+        ),
+    ],
 )  # V10.3.3: AI 中枢 2.0
 app.include_router(
-    war_room.router, dependencies=[Depends(get_current_user)]
+    war_room.router,
+    dependencies=[
+        Depends(get_current_user),
+        Depends(
+            require_any_role(
+                "TRADER",
+                "ADMINISTRATOR",
+                resource="trading",
+                action="war_room.read",
+            )
+        ),
+    ],
 )  # V10.3.3: 战情室
 app.include_router(
     market_universe.router, prefix="/api/v1", dependencies=[Depends(get_current_user)]
@@ -1048,7 +1107,9 @@ app.include_router(
         Depends(get_current_user),
         Depends(
             require_permission(
-                "admin.system.read", resource="admin", action="system.read"
+                ADMIN_SYSTEM_READ_PERMISSION,
+                resource="admin",
+                action=ADMIN_SYSTEM_READ_ACTION,
             )
         ),
     ],
