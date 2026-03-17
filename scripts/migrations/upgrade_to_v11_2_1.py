@@ -13,8 +13,20 @@ import asyncio
 import importlib.util
 import os
 import sys
+from importlib import import_module
+
+from sqlalchemy import text
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+MODEL_MODULES = (
+    "app.models.authorization_audit_log",
+    "app.models.permission",
+    "app.models.role",
+    "app.models.role_permission_grant",
+    "app.models.user",
+    "app.models.user_role_binding",
+)
 
 
 def _venv_python_path() -> str:
@@ -48,13 +60,17 @@ TABLES = [
 ]
 
 
-async def _table_exists(conn, table_name: str) -> bool:
-    from sqlalchemy import text
+def _load_v1121_model_modules() -> None:
+    for module_name in MODEL_MODULES:
+        import_module(module_name)
 
+
+async def _table_exists(conn, table_name: str) -> bool:
     if conn.dialect.name == "sqlite":
         result = await conn.execute(
             text(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=:table_name"
+                "SELECT COUNT(*) FROM sqlite_master "
+                "WHERE type='table' AND name=:table_name"
             ),
             {"table_name": table_name},
         )
@@ -71,8 +87,6 @@ async def _table_exists(conn, table_name: str) -> bool:
 
 
 async def _column_exists(conn, table_name: str, column_name: str) -> bool:
-    from sqlalchemy import text
-
     if conn.dialect.name == "sqlite":
         result = await conn.execute(text(f"PRAGMA table_info({table_name})"))
         return any(row[1] == column_name for row in result.fetchall())
@@ -89,28 +103,165 @@ async def _column_exists(conn, table_name: str, column_name: str) -> bool:
 
 
 async def _ensure_v1121_patch_columns(conn) -> None:
-    from sqlalchemy import text
-
     if await _table_exists(conn, "users") and not await _column_exists(
         conn, "users", "must_change_password"
     ):
         await conn.execute(
             text(
-                "ALTER TABLE users ADD COLUMN must_change_password BOOLEAN NOT NULL DEFAULT 0"
+                "ALTER TABLE users ADD COLUMN must_change_password "
+                "BOOLEAN NOT NULL DEFAULT 0"
             )
         )
 
 
+async def _ensure_role_record(conn, code: str, payload: dict[str, str]) -> int:
+    result = await conn.execute(
+        text("SELECT id FROM roles WHERE code = :code"),
+        {"code": code},
+    )
+    role_id = result.scalar_one_or_none()
+
+    params = {
+        "code": code,
+        "name": payload["name"],
+        "description": payload["description"],
+        "is_system_builtin": True,
+    }
+    if role_id is None:
+        await conn.execute(
+            text(
+                "INSERT INTO roles "
+                "(code, name, description, is_system_builtin) "
+                "VALUES (:code, :name, :description, :is_system_builtin)"
+            ),
+            params,
+        )
+        result = await conn.execute(
+            text("SELECT id FROM roles WHERE code = :code"),
+            {"code": code},
+        )
+        role_id = result.scalar_one()
+    else:
+        await conn.execute(
+            text(
+                "UPDATE roles "
+                "SET name = :name, description = :description, "
+                "is_system_builtin = :is_system_builtin, "
+                "updated_at = CURRENT_TIMESTAMP "
+                "WHERE id = :id"
+            ),
+            {**params, "id": role_id},
+        )
+
+    return int(role_id)
+
+
+async def _ensure_permission_record(conn, payload: dict[str, str]) -> int:
+    result = await conn.execute(
+        text("SELECT id FROM permissions WHERE code = :code"),
+        {"code": payload["code"]},
+    )
+    permission_id = result.scalar_one_or_none()
+
+    params = {
+        "code": payload["code"],
+        "resource": payload["resource"],
+        "action": payload["action"],
+        "scope": payload["scope"],
+        "access_mode": payload["access_mode"],
+        "description": payload["description"],
+    }
+    if permission_id is None:
+        await conn.execute(
+            text(
+                "INSERT INTO permissions "
+                "(code, resource, action, scope, access_mode, description) "
+                "VALUES "
+                "(:code, :resource, :action, :scope, :access_mode, "
+                ":description)"
+            ),
+            params,
+        )
+        result = await conn.execute(
+            text("SELECT id FROM permissions WHERE code = :code"),
+            {"code": payload["code"]},
+        )
+        permission_id = result.scalar_one()
+    else:
+        await conn.execute(
+            text(
+                "UPDATE permissions "
+                "SET resource = :resource, action = :action, scope = :scope, "
+                "access_mode = :access_mode, description = :description "
+                "WHERE id = :id"
+            ),
+            {**params, "id": permission_id},
+        )
+
+    return int(permission_id)
+
+
+async def _seed_builtin_rbac(conn) -> None:
+    from app.services.rbac_service import (
+        BUILTIN_PERMISSIONS,
+        BUILTIN_ROLES,
+        ROLE_PERMISSION_CODES,
+    )
+
+    role_ids = {
+        code: await _ensure_role_record(conn, code, payload)
+        for code, payload in BUILTIN_ROLES.items()
+    }
+    permission_ids = {
+        payload["code"]: await _ensure_permission_record(conn, payload)
+        for payload in BUILTIN_PERMISSIONS
+    }
+
+    result = await conn.execute(
+        text("SELECT role_id, permission_id FROM role_permission_grants")
+    )
+    existing_grants = {
+        (int(row.role_id), int(row.permission_id)) for row in result.fetchall()
+    }
+
+    for role_code, permission_codes in ROLE_PERMISSION_CODES.items():
+        role_id = role_ids[role_code]
+        for permission_code in permission_codes:
+            permission_id = permission_ids[permission_code]
+            grant_key = (role_id, permission_id)
+            if grant_key in existing_grants:
+                continue
+            await conn.execute(
+                text(
+                    "INSERT INTO role_permission_grants "
+                    "(role_id, permission_id, grant_scope) "
+                    "VALUES (:role_id, :permission_id, :grant_scope)"
+                ),
+                {
+                    "role_id": role_id,
+                    "permission_id": permission_id,
+                    "grant_scope": "global",
+                },
+            )
+            existing_grants.add(grant_key)
+
+
 async def run_check() -> None:
+    _load_v1121_model_modules()
     from app.models.db import engine
 
     try:
         async with engine.connect() as conn:
             for table_name in TABLES:
                 exists = await _table_exists(conn, table_name)
-                print(f"[check] {table_name}: {'✓ exists' if exists else '✗ missing'}")
+                status = "✓ exists" if exists else "✗ missing"
+                print(f"[check] {table_name}: {status}")
             if await _table_exists(conn, "users"):
-                has_column = await _column_exists(conn, "users", "must_change_password")
+                has_column = await _column_exists(
+                    conn,
+                    "users",
+                    "must_change_password",
+                )
                 print(
                     "[check] users.must_change_password: "
                     f"{'✓ exists' if has_column else '✗ missing'}"
@@ -120,31 +271,20 @@ async def run_check() -> None:
 
 
 async def run_upgrade() -> None:
-    from app.models import (
-        authorization_audit_log,
-        permission,  # noqa: F401
-        role,
-        role_permission_grant,
-        user,
-        user_role_binding,
-    )
-    from app.models.db import Base, SessionLocal, engine
-    from app.services.rbac_service import rbac_service
+    _load_v1121_model_modules()
+    from app.models.db import Base, engine
 
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
             await _ensure_v1121_patch_columns(conn)
-        async with SessionLocal() as session:
-            await rbac_service.ensure_builtin_rbac(session)
+            await _seed_builtin_rbac(conn)
         print("[upgrade] ✓ V11.2.1 migration complete")
     finally:
         await engine.dispose()
 
 
 async def run_rollback() -> None:
-    from sqlalchemy import text
-
     from app.models.db import engine
 
     drop_sql = [

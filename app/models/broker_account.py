@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from importlib import import_module
 from typing import Optional
 
 from sqlalchemy import Boolean, DateTime, Index, Integer, String, text
@@ -12,8 +13,16 @@ from app.models.db import Base
 class BrokerAccount(Base):
     __tablename__ = "broker_accounts"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    account_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+    account_id: Mapped[str] = mapped_column(
+        String(64),
+        unique=True,
+        nullable=False,
+    )
     display_name: Mapped[Optional[str]] = mapped_column(String(128))
     account_type: Mapped[str] = mapped_column(
         String(32),
@@ -65,3 +74,9 @@ class BrokerAccount(Base):
         Index("ix_broker_accounts_account_id", "account_id"),
         Index("ix_broker_accounts_is_active", "is_active"),
     )
+
+
+# Ensure related mappers are registered even when BrokerAccount is imported
+# before its string-based relationship targets.
+import_module("app.models.broker_account_credential")
+import_module("app.models.user_broker_account_grant")
