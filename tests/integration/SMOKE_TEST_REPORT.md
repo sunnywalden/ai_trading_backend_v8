@@ -3,8 +3,8 @@
 **测试时间**: 2026-01-09
 
 **测试环境**:
-- 数据库: MySQL 8.0 @ 192.168.2.233:3306 (ai_trading)
-- 缓存: Redis @ 192.168.2.233:6379 (无密码)
+- 数据库: MySQL 8.0 @ localhost:3306 (ai_trading)
+- 缓存: Redis @ localhost:6379 (无密码)
 - Python: 3.13.7
 - 服务器: http://127.0.0.1:8090
 
@@ -213,18 +213,18 @@
 ### MySQL 配置
 ```
 DB_TYPE=mysql
-MYSQL_HOST=192.168.2.233
+MYSQL_HOST=localhost
 MYSQL_PORT=3306
 MYSQL_USER=ai_trading
-MYSQL_PASSWORD=YourStrong@Passw0rd!
+MYSQL_PASSWORD=
 MYSQL_DB=ai_trading
 ```
 
 ### Redis 配置
 ```
-REDIS_HOST=192.168.2.233
+REDIS_HOST=localhost
 REDIS_PORT=6379
-REDIS_PASSWORD=  # 空密码
+REDIS_PASSWORD=
 REDIS_DB=0
 REDIS_ENABLED=True
 ```

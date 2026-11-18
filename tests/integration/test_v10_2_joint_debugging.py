@@ -2,6 +2,7 @@ import asyncio
 import json
 import httpx
 from app.main import app
+from tests.external_calls import require_external_calls
 from app.core.auth import get_current_user
 from app.models.db import get_session
 from datetime import datetime, timezone
@@ -113,4 +114,5 @@ async def run_async_test_suite():
 
 
 if __name__ == "__main__":
+    require_external_calls()
     asyncio.run(run_async_test_suite())

@@ -11,10 +11,19 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT_DIR))
 
+import pytest
+
 from app.services.macro_risk_scoring_service import MacroRiskScoringService
+from tests.external_calls import external_calls_enabled, require_external_calls
+
+pytestmark = pytest.mark.skipif(
+    not external_calls_enabled(),
+    reason="opt-in market-data call; set RUN_EXTERNAL_INTEGRATION=1",
+)
 
 
 async def test_optimization():
+    require_external_calls()
     print("=" * 70)
     print("Macro Risk Service Optimization Test")
     print("=" * 70)
@@ -74,4 +83,5 @@ async def test_optimization():
 
 
 if __name__ == "__main__":
+    require_external_calls()
     asyncio.run(test_optimization())

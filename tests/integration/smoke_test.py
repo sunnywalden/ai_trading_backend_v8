@@ -15,6 +15,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from tests.external_calls import require_external_calls
 from app.models.db import engine, redis_client, get_session, SessionLocal
 from app.models.macro_risk import MacroRiskScore
 from app.models.symbol_profile_cache import SymbolProfileCache
@@ -537,6 +538,7 @@ class SmokeTest:
 
 async def main():
     """主函数"""
+    require_external_calls()
     tester = SmokeTest()
     
     try:

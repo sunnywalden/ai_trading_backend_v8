@@ -14,13 +14,22 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT_DIR))
 
+import pytest
+
 from app.core.config import settings
+from tests.external_calls import external_calls_enabled, require_external_calls
 from app.broker.factory import make_option_broker_client
+
+pytestmark = pytest.mark.skipif(
+    not external_calls_enabled(),
+    reason="opt-in broker call; set RUN_EXTERNAL_INTEGRATION=1",
+)
 from app.broker.history_factory import make_trade_history_client
 
 
 async def test_option_client() -> bool:
     """测试期权客户端"""
+    require_external_calls()
     print("=" * 60)
     print("测试期权客户端 (OptionBrokerClient)")
     print("=" * 60)
@@ -64,6 +73,7 @@ async def test_option_client() -> bool:
 
 async def test_history_client() -> bool:
     """测试历史成交客户端"""
+    require_external_calls()
     print("\n" + "=" * 60)
     print("测试历史成交客户端 (TradeHistoryClient)")
     print("=" * 60)
@@ -156,6 +166,7 @@ async def main() -> bool:
 
 
 if __name__ == "__main__":
+    require_external_calls()
     try:
         result = asyncio.run(main())
         sys.exit(0 if result else 1)
