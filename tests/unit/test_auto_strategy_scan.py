@@ -146,7 +146,28 @@ async def test_trigger_runtime_strategy_scan_runs_multiple_candidates():
     ]
     execute_job = AsyncMock()
 
+    class _EmptyScalars:
+        def first(self):
+            return None
+
+    class _EmptyResult:
+        def scalars(self):
+            return _EmptyScalars()
+
+    class _ReadSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def execute(self, _stmt):
+            return _EmptyResult()
+
     with patch(
+        "app.engine.quant_trading_loop.SessionLocal",
+        return_value=_ReadSession(),
+    ), patch(
         (
             "app.engine.quant_trading_loop."
             "StrategyAutoSelectionService.select_auto_scan_strategies"

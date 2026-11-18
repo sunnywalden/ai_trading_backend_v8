@@ -46,31 +46,15 @@ async def test_situational_awareness_regime_block_uses_truth_source(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_autonomy_status_exposes_truth_sources(monkeypatch):
-    fake_session = AsyncMock()
-    fake_session.execute = AsyncMock(
-        side_effect=[
-            _ScalarResult(3),  # daily trades
-            _ScalarResult([(SimpleNamespace(value="GENERATED"), 2)]),
-            _ScalarResult(None),
-            _ScalarResult(0),
-            _ScalarResult([]),
-        ]
-    )
+    def _empty_execute(*_args, **_kwargs):
+        return SimpleNamespace(
+            scalar=lambda: 0,
+            fetchall=lambda: [],
+            scalars=lambda: SimpleNamespace(all=lambda: []),
+        )
 
-    # fetchall is used for grouped pipeline + cooldown query
-    grouped_result = SimpleNamespace(fetchall=lambda: [(SimpleNamespace(value="GENERATED"), 2)])
-    signals_result = SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
-    fail_result = _ScalarResult(0)
-    cooldown_result = SimpleNamespace(fetchall=lambda: [])
-    fake_session.execute = AsyncMock(
-        side_effect=[
-            _ScalarResult(3),
-            grouped_result,
-            signals_result,
-            fail_result,
-            cooldown_result,
-        ]
-    )
+    fake_session = AsyncMock()
+    fake_session.execute = AsyncMock(side_effect=_empty_execute)
 
     monkeypatch.setattr(
         "app.routers.autonomy._resolve_account_id",

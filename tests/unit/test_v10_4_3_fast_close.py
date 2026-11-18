@@ -10,6 +10,7 @@ from app.engine.signal_position_filter import Position, SignalPositionFilter
 from app.models.trading_signal import SignalType
 from app.services.autonomous_engine import AutonomousEngine
 from app.services.risk_gate_service import RiskGateService
+from app.services.signal_quality_config import SignalQualityConfig
 from app.services.signal_quality_funnel import (SignalFunnelInput,
                                                 SignalQualityFunnel,
                                                 SignalQualityProfile,
@@ -108,6 +109,7 @@ def test_signal_quality_funnel_skips_layer2_for_closing_signals():
         },
         current_positions=10,
         daily_executed=10,
+        cfg=SignalQualityConfig(),
         is_closing=True,
     )
 
@@ -143,6 +145,7 @@ def test_signal_quality_funnel_allows_elite_signal_to_bypass_daily_quota():
         },
         current_positions=1,
         daily_executed=1,
+        cfg=SignalQualityConfig(),
         quality_profile=quality_profile,
     )
 

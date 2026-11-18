@@ -102,6 +102,10 @@ class DataHub:
                 settings.DATA_HUB_TIGER_OHLCV_RATE_LIMIT_COOLDOWN_SECONDS,
             )
         elif self._is_tiger_ohlcv_permission_error(exc):
+            self._set_tiger_ohlcv_cooldown(
+                settings.DATA_HUB_TIGER_OHLCV_PERMISSION_COOLDOWN_SECONDS,
+                "permission-denied",
+            )
             now = time.monotonic()
             normalized = normalize_hk_symbol(symbol) if is_hk_stock(symbol) else str(symbol).strip().upper()
             self._tiger_ohlcv_denied_symbols[normalized] = now
