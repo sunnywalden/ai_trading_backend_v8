@@ -71,3 +71,22 @@ class User(Base):
         Index("ix_users_username", "username"),
         Index("ix_users_status", "status"),
     )
+
+
+def _register_user_relationships() -> None:
+    """Import relationship targets so string names resolve during mapper config."""
+    from importlib import import_module
+
+    for module_name in (
+        "app.models.role",
+        "app.models.permission",
+        "app.models.role_permission_grant",
+        "app.models.user_role_binding",
+        "app.models.user_broker_account_grant",
+        "app.models.authorization_audit_log",
+        "app.models.broker_account",
+    ):
+        import_module(module_name)
+
+
+_register_user_relationships()

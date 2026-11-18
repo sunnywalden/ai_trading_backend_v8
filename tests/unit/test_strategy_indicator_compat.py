@@ -36,8 +36,8 @@ async def test_golden_cross_reads_flat_indicator_columns(monkeypatch):
             return 125.0
 
     monkeypatch.setattr(
-        "app.engine.strategies.golden_cross.MarketDataProvider",
-        _FakeMarketDataProvider,
+        "app.engine.strategies.golden_cross.market_data_provider",
+        _FakeMarketDataProvider(),
     )
 
     strategy = GoldenCross(params={}, session=cast(Any, session))
@@ -75,8 +75,8 @@ async def test_breakout_momentum_reads_flat_atr_column(monkeypatch):
             return prices
 
     monkeypatch.setattr(
-        "app.engine.strategies.breakout_momentum.MarketDataProvider",
-        _FakeMarketDataProvider,
+        "app.engine.strategies.breakout_momentum.market_data_provider",
+        _FakeMarketDataProvider(),
     )
 
     strategy = BreakoutMomentum(params={"lookback_days": 20, "volume_multiplier": 1.1}, session=cast(Any, session))
@@ -115,8 +115,8 @@ async def test_breakout_momentum_can_compute_atr_without_cached_indicator(monkey
             return prices
 
     monkeypatch.setattr(
-        "app.engine.strategies.breakout_momentum.MarketDataProvider",
-        _FakeMarketDataProvider,
+        "app.engine.strategies.breakout_momentum.market_data_provider",
+        _FakeMarketDataProvider(),
     )
 
     strategy = BreakoutMomentum(params={"lookback_days": 20, "volume_multiplier": 1.1}, session=cast(Any, session))
@@ -140,8 +140,8 @@ async def test_bollinger_strategy_reads_flat_band_columns(monkeypatch):
             return 88.0
 
     monkeypatch.setattr(
-        "app.engine.strategies.bollinger_bands.MarketDataProvider",
-        _FakeMarketDataProvider,
+        "app.engine.strategies.bollinger_bands.market_data_provider",
+        _FakeMarketDataProvider(),
     )
 
     strategy = BollingerBandsMeanReversion(params={}, session=cast(Any, session))

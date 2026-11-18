@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from app.services.non_realtime_data_policy import NonRealtimeDataPolicyService
@@ -62,6 +64,8 @@ async def test_non_realtime_policy_runtime_status_aggregates_job_payloads(monkey
 
 @pytest.mark.asyncio
 async def test_system_monitor_exposes_non_realtime_policy_service(monkeypatch):
+    recent_run = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+
     async def fake_policy_status():
         return {
             "runtime_signal_generation": {
@@ -87,19 +91,19 @@ async def test_system_monitor_exposes_non_realtime_policy_service(monkeypatch):
                     "success": True,
                     "success_count": 12,
                     "failure_count": 0,
-                    "last_run_at": "2026-03-13T09:00:00+00:00",
+                    "last_run_at": recent_run,
                 },
                 "key_statistics_cache": {
                     "success": True,
                     "success_count": 12,
                     "failure_count": 0,
-                    "last_run_at": "2026-03-13T09:00:00+00:00",
+                    "last_run_at": recent_run,
                 },
                 "fundamental_data_cache": {
                     "success": True,
                     "success_count": 12,
                     "failure_count": 0,
-                    "last_run_at": "2026-03-13T09:00:00+00:00",
+                    "last_run_at": recent_run,
                 },
             },
         }

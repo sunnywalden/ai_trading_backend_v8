@@ -17,7 +17,7 @@ def find_env_file() -> Path | None:
 
 
 ENV_FILE = find_env_file()
-BASE_DIR = ENV_FILE.parent if ENV_FILE else Path(__file__).resolve().parents[3]
+BASE_DIR = ENV_FILE.parent if ENV_FILE else Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
