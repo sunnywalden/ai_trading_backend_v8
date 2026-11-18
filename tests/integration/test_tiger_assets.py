@@ -12,6 +12,7 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT_DIR))
 
 from app.core.config import settings
+from tests.external_calls import require_external_calls
 
 from tigeropen.common.consts import Language
 from tigeropen.tiger_open_config import TigerOpenClientConfig
@@ -19,6 +20,7 @@ from tigeropen.trade.trade_client import TradeClient
 
 
 def main() -> None:
+    require_external_calls()
     if not settings.TIGER_PRIVATE_KEY_PATH or not settings.TIGER_ID:
         raise SystemExit("TIGER_PRIVATE_KEY_PATH / TIGER_ID 未配置，无法测试 assets")
 

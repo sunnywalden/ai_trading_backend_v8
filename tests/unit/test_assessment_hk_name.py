@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
 """测试持仓评估API返回的港股名称"""
 import asyncio
+
 import httpx
+import pytest
+
 from app.broker.factory import make_option_broker_client
+from tests.external_calls import external_calls_enabled, require_external_calls
+
+pytestmark = pytest.mark.skipif(
+    not external_calls_enabled(),
+    reason="opt-in broker call; set RUN_EXTERNAL_INTEGRATION=1",
+)
 
 
 async def test_assessment_hk_names():
     """测试持仓评估API中的港股名称显示"""
+    require_external_calls()
     print("=== 测试持仓评估API的港股名称显示 ===\n")
     
     # 方法1: 直接测试底层client
@@ -75,4 +85,5 @@ async def test_assessment_hk_names():
 
 
 if __name__ == "__main__":
+    require_external_calls()
     asyncio.run(test_assessment_hk_names())

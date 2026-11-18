@@ -17,7 +17,7 @@ def find_env_file() -> Path | None:
 
 
 ENV_FILE = find_env_file()
-BASE_DIR = ENV_FILE.parent if ENV_FILE else Path(__file__).resolve().parents[3]
+BASE_DIR = ENV_FILE.parent if ENV_FILE else Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
@@ -29,7 +29,8 @@ class Settings(BaseSettings):
     MYSQL_HOST: str = "localhost"
     MYSQL_PORT: int = 3306
     MYSQL_USER: str = "root"
-    MYSQL_PASSWORD: str = "password"
+    # 不提供可用默认口令。DB_TYPE=mysql 时必须由环境变量注入。
+    MYSQL_PASSWORD: str = ""
     MYSQL_DB: str = "ai_trading"
 
     @property
@@ -59,7 +60,7 @@ class Settings(BaseSettings):
         return f"sqlite+aiosqlite:///{path}"
 
     # Redis 配置
-    REDIS_HOST: str = "192.168.2.233"
+    REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379
     REDIS_PASSWORD: str | None = None
     REDIS_DB: int = 0
@@ -139,13 +140,13 @@ class Settings(BaseSettings):
     CORS_ALLOW_ORIGIN_REGEX: str | None = None
 
     # ==================== 认证配置（默认启用） ====================
-    # 是否开启认证（默认 True）。在生产环境请通过环境变量覆盖默认用户名/密码。
+    # 是否开启认证（默认 True）。管理员口令与 JWT 密钥没有生产默认值。
     AUTH_ENABLED: bool = True
     ADMIN_USERNAME: str = "admin"
     # 必须通过环境变量或 .env 显式设置，避免回退到弱口令默认值
     ADMIN_PASSWORD: str | None = None
-    # 用于签发 JWT token 的密钥，请在部署时设置为强随机值
-    JWT_SECRET_KEY: str = "change-me-please"
+    # 必须在部署时设置为强随机值；空值或已知占位符会拒绝启动
+    JWT_SECRET_KEY: str | None = None
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     SEED_RESEARCHER_PASSWORD: str | None = None
     SEED_TRADER_PASSWORD: str | None = None
@@ -418,6 +419,20 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_auth_settings(self) -> "Settings":
+        if _is_placeholder_secret(self.ADMIN_PASSWORD):
+            raise ValueError(
+                "ADMIN_PASSWORD must be injected and must not use a placeholder"
+            )
+        if _is_placeholder_secret(self.SEED_RESEARCHER_PASSWORD):
+            raise ValueError("SEED_RESEARCHER_PASSWORD must not use a placeholder")
+        if _is_placeholder_secret(self.SEED_TRADER_PASSWORD):
+            raise ValueError("SEED_TRADER_PASSWORD must not use a placeholder")
+        if _is_placeholder_secret(self.SEED_SUPERVISOR_PASSWORD):
+            raise ValueError("SEED_SUPERVISOR_PASSWORD must not use a placeholder")
+        if _is_placeholder_secret(self.SEED_ADMIN_PASSWORD):
+            raise ValueError("SEED_ADMIN_PASSWORD must not use a placeholder")
+        if self.DB_TYPE == "mysql" and not (self.MYSQL_PASSWORD or "").strip():
+            raise ValueError("MYSQL_PASSWORD must be set when DB_TYPE=mysql")
         if self.AUTH_ENABLED and not self.RBAC_V1121_ENABLED:
             if not (self.ADMIN_PASSWORD or "").strip():
                 raise ValueError("ADMIN_PASSWORD must be set when AUTH_ENABLED=true")
@@ -429,7 +444,44 @@ class Settings(BaseSettings):
                     "Either ADMIN_PASSWORD or SEED_ADMIN_PASSWORD must be "
                     "set when AUTH_ENABLED=true and RBAC_V1121_ENABLED=true"
                 )
+        if self.AUTH_ENABLED and not _is_usable_jwt_secret(self.JWT_SECRET_KEY):
+            raise ValueError(
+                "JWT_SECRET_KEY must be set to a non-placeholder value "
+                "when AUTH_ENABLED=true"
+            )
         return self
+
+
+_PLACEHOLDER_SECRETS = {
+    "change-me-please",
+    "changeme",
+    "change-me",
+    "secret",
+    "password",
+    "jwt-secret",
+    "replace-me",
+    "replace_me",
+}
+
+
+def _normalized_secret(value: str | None) -> str:
+    return (value or "").strip().strip("'\"").lower()
+
+
+def _is_placeholder_secret(value: str | None) -> bool:
+    raw = _normalized_secret(value)
+    if not raw:
+        return False
+    if raw in _PLACEHOLDER_SECRETS:
+        return True
+    return raw.startswith(("change-this", "your_", "replace-", "replace_"))
+
+
+def _is_usable_jwt_secret(value: str | None) -> bool:
+    raw = (value or "").strip().strip("'\"")
+    if not raw:
+        return False
+    return not _is_placeholder_secret(raw)
 
 
 settings = Settings()

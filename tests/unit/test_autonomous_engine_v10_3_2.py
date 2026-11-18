@@ -57,6 +57,11 @@ async def test_ai_decide_abs_shares_mode_fallback_uses_absolute_quantity(
     monkeypatch,
 ):
     ae = AutonomousEngine()
+    monkeypatch.setattr(
+        "app.services.autonomous_engine.settings.RUNTIME_ALLOW_RULE_BASED_FALLBACK",
+        True,
+        raising=False,
+    )
 
     async def _fake_call_ai(*args, **kwargs):
         await asyncio.sleep(0)

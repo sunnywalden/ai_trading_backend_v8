@@ -78,7 +78,9 @@ AI Trading Backend V8 是一个基于 FastAPI 的**交易风控 + 持仓评估 +
 
 ```bash
 cp .env.example .env
-# 编辑 .env，至少设置：DATABASE_URL / OPENAI_API_KEY / JWT_SECRET_KEY
+# 编辑 .env。认证开启时必须注入 ADMIN_PASSWORD 与 JWT_SECRET_KEY。
+# 示例文件里的口令、种子口令、JWT 与券商加密密钥保持为空，没有生产默认值。
+# MySQL 模式还要注入 MYSQL_PASSWORD。OPENAI_API_KEY 仅在使用对应模型时需要。
 ```
 
 2) 安装依赖并激活虚拟环境（在仓库根目录执行）：
@@ -103,7 +105,7 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8088
   - `POST /api/v1/positions/refresh`
   - `GET /api/v1/positions/assessment`
 
-> Tip: `.env.example` 与仓库内 `docs/` 已同步；示例文件中不会包含真实密钥或密码。请在部署前使用安全的密钥管理工具（Vault / Secrets Manager / Kubernetes Secret）。
+> Tip: `.env.example` 只保留空的密钥字段。复制后自行注入，不要把真实密钥提交回仓库。离线检查用 `pytest tests/unit`。券商、行情和 LLM 脚本默认不执行，需要时单独设置 `RUN_EXTERNAL_INTEGRATION=1`。
 
 ## ⚙️ 配置
 

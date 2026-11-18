@@ -1,10 +1,20 @@
 #!/usr/bin/env python3
 """测试价格获取功能"""
 import asyncio
+
+import pytest
+
 from app.providers.market_data_provider import MarketDataProvider
+from tests.external_calls import external_calls_enabled, require_external_calls
+
+pytestmark = pytest.mark.skipif(
+    not external_calls_enabled(),
+    reason="opt-in market-data call; set RUN_EXTERNAL_INTEGRATION=1",
+)
 
 async def test_price_fetching():
     """测试获取 META 价格"""
+    require_external_calls()
     provider = MarketDataProvider()
     
     print("🧪 测试价格获取功能...")
@@ -40,4 +50,5 @@ async def test_price_fetching():
     print("   - symbol 格式是否正确")
 
 if __name__ == "__main__":
+    require_external_calls()
     asyncio.run(test_price_fetching())
