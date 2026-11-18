@@ -11,19 +11,29 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT_DIR))
 
+import pytest
+
 from app.core.config import settings
 from app.services.ai_analysis_service import AIAnalysisService
+from tests.external_calls import external_calls_enabled, require_external_calls
+
+pytestmark = pytest.mark.skipif(
+    not external_calls_enabled(),
+    reason="opt-in LLM call; set RUN_EXTERNAL_INTEGRATION=1",
+)
 
 
 async def test_ai_config():
+    require_external_calls()
     print("=" * 60)
     print("OpenAI Configuration Test")
     print("=" * 60)
 
     print("\n[1] Configuration from .env:")
-    print(f"  OPENAI_API_KEY: {'✓ Configured' if settings.OPENAI_API_KEY else '✗ Not configured'}")
-    if settings.OPENAI_API_KEY:
-        print(f"  API Key (first 20 chars): {settings.OPENAI_API_KEY[:20]}...")
+    print(
+        "  OPENAI_API_KEY: "
+        + ("configured" if settings.OPENAI_API_KEY else "not configured")
+    )
     print(f"  OPENAI_MODEL: {settings.OPENAI_MODEL}")
     print(f"  OPENAI_MAX_TOKENS: {settings.OPENAI_MAX_TOKENS}")
     print(f"  OPENAI_TIMEOUT_SECONDS: {settings.OPENAI_TIMEOUT_SECONDS}")

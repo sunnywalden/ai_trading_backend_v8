@@ -474,7 +474,7 @@ GET /api/v1/rate-limit/NewsAPI
 
 ```env
 REDIS_ENABLED=true
-REDIS_HOST=192.168.2.233
+REDIS_HOST=localhost
 REDIS_PORT=6379
 REDIS_DB=0
 ```

@@ -40,6 +40,9 @@ env/
 .env.local
 .env.production
 
+# Dependencies are reinstalled from package-lock.json
+node_modules/
+
 # Database
 *.db
 *.sqlite

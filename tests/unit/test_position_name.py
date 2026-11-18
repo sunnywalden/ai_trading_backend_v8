@@ -1,44 +1,48 @@
 #!/usr/bin/env python3
-"""测试Tiger API position对象的属性"""
-from tigeropen.tiger_open_config import get_client_config
-from tigeropen.trade.trade_client import TradeClient
-from tigeropen.common.consts import SecurityType, Market
+"""Manual Tiger position-attribute inspection.
+
+Importing this file does nothing. Running it can call the broker, so it stays
+behind RUN_EXTERNAL_INTEGRATION=1.
+"""
+
+from __future__ import annotations
+
 import os
 import sys
 
-# 直接从环境变量获取
-private_key = os.environ.get('TIGER_PRIVATE_KEY_PATH')
-tiger_id = os.environ.get('TIGER_ID')
-account = os.environ.get('TIGER_ACCOUNT')
 
-if not all([private_key, tiger_id, account]):
-    print("Please set environment variables: TIGER_PRIVATE_KEY_PATH, TIGER_ID, TIGER_ACCOUNT")
-    sys.exit(1)
+def main() -> int:
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from tests.external_calls import require_external_calls
 
-if private_key and tiger_id and account:
-    config = get_client_config(private_key_path=private_key, tiger_id=tiger_id, account=account)
+    require_external_calls()
+
+    private_key = os.environ.get("TIGER_PRIVATE_KEY_PATH")
+    tiger_id = os.environ.get("TIGER_ID")
+    account = os.environ.get("TIGER_ACCOUNT")
+    if not all([private_key, tiger_id, account]):
+        print(
+            "TIGER_PRIVATE_KEY_PATH, TIGER_ID, and TIGER_ACCOUNT must be set "
+            "in the environment"
+        )
+        return 1
+
+    from tigeropen.common.consts import Market, SecurityType
+    from tigeropen.tiger_open_config import get_client_config
+    from tigeropen.trade.trade_client import TradeClient
+
+    config = get_client_config(
+        private_key_path=private_key,
+        tiger_id=tiger_id,
+        account=account,
+    )
     client = TradeClient(config)
-    
     positions = client.get_positions(sec_type=SecurityType.STK, market=Market.HK)
-    
-    if positions and len(positions) > 0:
-        print(f"Found {len(positions)} HK positions\n")
-        
-        for i, pos in enumerate(positions):
-            print(f"=== Position {i+1} ===")
-            print(f"Position attributes: {[attr for attr in dir(pos) if not attr.startswith('_')]}")
-            
-            if hasattr(pos, 'contract'):
-                print(f"\nContract attributes: {[attr for attr in dir(pos.contract) if not attr.startswith('_')]}")
-                
-                # 检查常见的名称字段
-                for name_field in ['name', 'local_symbol', 'symbol', 'sec_name', 'stock_name']:
-                    if hasattr(pos.contract, name_field):
-                        value = getattr(pos.contract, name_field)
-                        print(f"  {name_field}: {value}")
-                
-            print()
-    else:
-        print('No HK positions found')
-else:
-    print('Tiger config not found in environment variables')
+    print(f"HK position count: {len(positions or [])}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

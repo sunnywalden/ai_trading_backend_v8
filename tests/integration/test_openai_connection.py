@@ -11,10 +11,19 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT_DIR))
 
+import pytest
+
 from app.core.config import settings
+from tests.external_calls import external_calls_enabled, require_external_calls
+
+pytestmark = pytest.mark.skipif(
+    not external_calls_enabled(),
+    reason="opt-in LLM call; set RUN_EXTERNAL_INTEGRATION=1",
+)
 
 
 async def test_openai():
+    require_external_calls()
     """测试 OpenAI 连接"""
     print("=" * 60)
     print("OpenAI API Connection Test")
@@ -32,7 +41,7 @@ async def test_openai():
         print("\n❌ OPENAI_API_KEY not configured!")
         return
 
-    print(f"  API Key: {settings.OPENAI_API_KEY[:20]}...{settings.OPENAI_API_KEY[-4:]}")
+    print("  API Key: configured")
 
     # 尝试连接
     print("\n[Connection Test]")
@@ -80,4 +89,5 @@ async def test_openai():
 
 
 if __name__ == "__main__":
+    require_external_calls()
     asyncio.run(test_openai())
